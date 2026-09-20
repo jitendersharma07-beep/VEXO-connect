@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 
 export function FullScreenSpinner() {
@@ -107,6 +108,63 @@ export function EmptyState({ icon: Icon, title, note }) {
       <div className="text-sm font-semibold text-slate-600">{title}</div>
       {note ? <div className="mt-1 max-w-sm text-xs text-slate-400">{note}</div> : null}
     </div>
+  );
+}
+
+// Generic "type a reason" modal for audited manager actions (item void, order
+// void — contract §5.3). onSubmit may throw; the server's error.message is
+// shown inline.
+export function ReasonModal({ open, title, hint, busyLabel = 'Confirm', onSubmit, onClose }) {
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setReason('');
+      setError('');
+      setBusy(false);
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      await onSubmit(reason.trim());
+      onClose();
+    } catch (err) {
+      setError(err?.response?.data?.error?.message || 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open title={title} onClose={onClose}>
+      {hint ? <p className="mb-3 text-sm text-slate-500">{hint}</p> : null}
+      <form onSubmit={submit} className="space-y-3">
+        <div>
+          <label className="label" htmlFor="reason-field">Reason (required)</label>
+          <textarea
+            id="reason-field"
+            className="input min-h-[80px]"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            required
+            minLength={3}
+            autoFocus
+          />
+        </div>
+        <ErrorNote message={error} />
+        <button type="submit" className="btn-primary w-full" disabled={busy || reason.trim().length < 3}>
+          {busy ? 'Working…' : busyLabel}
+        </button>
+      </form>
+    </Modal>
   );
 }
 

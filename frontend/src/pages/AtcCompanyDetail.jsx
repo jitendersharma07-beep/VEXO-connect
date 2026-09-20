@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, BadgePlus, UserPlus, PackagePlus } from 'lucide-react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, BadgePlus, ShoppingCart, UserPlus, PackagePlus } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
+import { setAtcScope } from '../lib/pos.js';
 import {
   PageHeader,
   StatusBadge,
@@ -150,6 +151,7 @@ function OwnerForm({ companyId, onCreated }) {
 
 export default function AtcCompanyDetail() {
   const { companyId } = useParams();
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [modal, setModal] = useState(null); // 'license' | 'addon' | 'owner'
@@ -204,6 +206,16 @@ export default function AtcCompanyDetail() {
         subtitle={`/${company.slug}${company.contactEmail ? ` · ${company.contactEmail}` : ''}`}
         actions={
           <>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => {
+                setAtcScope({ id: company.id, name: company.name });
+                navigate('/orders');
+              }}
+            >
+              <ShoppingCart className="h-4 w-4" /> Browse POS data
+            </button>
             {company.status === 'SUSPENDED' ? (
               <button type="button" className="btn-primary" onClick={() => setCompanyStatus('ACTIVE')}>Restore access</button>
             ) : (
