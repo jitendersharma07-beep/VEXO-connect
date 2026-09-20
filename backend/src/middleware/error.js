@@ -17,7 +17,7 @@ export const errorHandler = (err, req, res, _next) => {
     const first = err.issues?.[0];
     return res.status(400).json({
       error: {
-        code: 'POS_VALIDATION_ERROR',
+        code: 'POS_BAD_REQUEST',
         message: first ? `${first.path.join('.') || 'input'}: ${first.message}` : 'Invalid input',
         field: first?.path?.join('.') || undefined,
       },

@@ -7,6 +7,9 @@ const required = (name) => {
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: Number(process.env.PORT || 5010),
+  // Prod container keeps the all-interfaces default; dev runs set 127.0.0.1
+  // so a public-IP host never exposes the dev stack.
+  HOST: process.env.HOST || '0.0.0.0',
   APP_NAME: process.env.APP_NAME || 'ATC POS',
   APP_URL: process.env.APP_URL || 'http://localhost:5177',
   DATABASE_URL: required('DATABASE_URL'),

@@ -1,6 +1,6 @@
 # ATC POS — Phase 2 Contract (Backend ↔ Frontend)
 
-Version 1.0.1 — 2026-09-20. Maintainer: **Window 1** (backend + integration).
+Version 1.0.2 — 2026-09-20. Maintainer: **Window 1** (backend + integration).
 Status: **FROZEN for Milestone 1.** W2 requests changes by reporting to the
 owner/W1; only W1 edits this file (version bump + changelog entry).
 
@@ -372,6 +372,8 @@ Routes (inside existing Layout/auth; role-gate nav):
 - `/catalog` — owner admin: categories, products + variants, tax rates
   (archive flows, no hard deletes in UI except empty categories).
 - `/tables` — manager/owner: table CRUD + live occupancy board.
+- `/reports` — sales report per §10 (manager sees own branch; owner all/one
+  branch; ATC with company scope; CASHIER gets no route/nav).
 
 Non-negotiables: loading/empty/error state on every fetch; every error
 envelope surfaced honestly (401 → login, 403 licence → banner, 409 → toast
@@ -399,6 +401,9 @@ refunds via gateway, reconciliation report, `channel: "GATEWAY"` rendered as
 verified — clearly distinct from MANUAL.
 
 ## Changelog
+- 1.0.2 (2026-09-20): §11 adds the `/reports` route (was specified in §10 but
+  missing from W2 scope; W2 change-request accepted). Note: `foundation.test.js`
+  wipe extended for phase-2 tables — suite still green (71/71 total).
 - 1.0.1 (2026-09-20): W2 worktree branches from the contract commit (own copy
   of this file); fixed dev passwords gated behind dev-only seed flag.
 - 1.0 (2026-09-20): initial frozen contract for Milestone 1.

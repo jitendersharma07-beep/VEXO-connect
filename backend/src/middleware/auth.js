@@ -98,3 +98,10 @@ export const requireBranchAccess = asyncHandler(async (req, _res, next) => {
 
 export const branchFilterFor = (user) =>
   BRANCH_PINNED_ROLES.has(user.role) ? { id: user.branchId ?? '__none__' } : {};
+
+export const isBranchPinned = (user) => BRANCH_PINNED_ROLES.has(user.role);
+
+// Same pinning as branchFilterFor, but for models that carry a branchId
+// column (orders, tables, ...) instead of being the Branch itself.
+export const branchIdFilterFor = (user) =>
+  BRANCH_PINNED_ROLES.has(user.role) ? { branchId: user.branchId ?? '__none__' } : {};

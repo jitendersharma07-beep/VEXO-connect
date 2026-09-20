@@ -4,6 +4,6 @@ import { logger } from './lib/logger.js';
 
 const app = createApp();
 
-app.listen(env.PORT, () => {
-  logger.info(`ATC POS API listening on :${env.PORT}`);
+app.listen(env.PORT, env.HOST, () => {
+  logger.info(`ATC POS API listening on ${env.HOST}:${env.PORT}`);
 });

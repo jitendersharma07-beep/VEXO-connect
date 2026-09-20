@@ -20,6 +20,17 @@ const { env } = await import('../src/config/env.js');
 const app = createApp();
 
 const wipe = async () => {
+  await prisma.refund.deleteMany();
+  await prisma.payment.deleteMany();
+  await prisma.orderItem.deleteMany();
+  await prisma.kot.deleteMany();
+  await prisma.order.deleteMany();
+  await prisma.invoiceCounter.deleteMany();
+  await prisma.productVariant.deleteMany();
+  await prisma.product.deleteMany();
+  await prisma.category.deleteMany();
+  await prisma.taxRate.deleteMany();
+  await prisma.diningTable.deleteMany();
   await prisma.posAuditLog.deleteMany();
   await prisma.posSession.deleteMany();
   await prisma.licenseAddon.deleteMany();
