@@ -1,17 +1,24 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
+  Armchair,
+  BadgeCheck,
+  BarChart3,
+  Building2,
+  KeyRound,
   LayoutDashboard,
+  LogOut,
+  Package,
+  ReceiptText,
+  ShieldCheck,
+  ShoppingCart,
   Store,
   Users,
-  BadgeCheck,
-  Building2,
-  LogOut,
-  KeyRound,
-  ShieldCheck,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
+import { canSeeReports, canSell, canWriteTables, clearAtcScope, getAtcScope } from '../lib/pos.js';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
 
@@ -106,10 +113,18 @@ export default function Layout() {
 
   const isAtc = user.role === 'POS_SUPER_ADMIN';
   const isOwner = user.role === 'CUSTOMER_OWNER';
+  // Read on every render — navigation re-renders the layout after the ATC
+  // console sets/clears the scope.
+  const atcScope = isAtc ? getAtcScope() : null;
 
   const doLogout = async () => {
     await logout();
     navigate('/login', { replace: true });
+  };
+
+  const exitAtcScope = () => {
+    clearAtcScope();
+    navigate('/atc/companies');
   };
 
   return (
@@ -123,9 +138,45 @@ export default function Layout() {
                 ATC Console
               </div>
               <NavItem to="/atc/companies" icon={Building2} label="Companies" />
+              {atcScope ? (
+                <>
+                  <div className="mt-4 flex items-center justify-between px-3 pb-1">
+                    <span className="truncate text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                      POS · {atcScope.name || 'company'}
+                    </span>
+                    <button
+                      type="button"
+                      className="rounded p-0.5 text-blue-300/60 hover:bg-white/10 hover:text-white"
+                      title="Exit company view"
+                      onClick={exitAtcScope}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+                  <NavItem to="/catalog" icon={Package} label="Catalog" />
+                  <NavItem to="/tables" icon={Armchair} label="Tables" />
+                  <NavItem to="/reports" icon={BarChart3} label="Sales report" />
+                </>
+              ) : null}
             </>
           ) : (
             <>
+              {canSell(user) ? (
+                <>
+                  <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                    Point of Sale
+                  </div>
+                  <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
+                  <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+                  {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
+                  {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
+                  {canSeeReports(user) ? <NavItem to="/reports" icon={BarChart3} label="Sales report" /> : null}
+                  <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                    Manage
+                  </div>
+                </>
+              ) : null}
               <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" end />
               <NavItem to="/branches" icon={Store} label="Branches" />
               {isOwner ? <NavItem to="/team" icon={Users} label="Team" /> : null}
@@ -137,7 +188,7 @@ export default function Layout() {
           <div className="flex items-center gap-1.5 font-bold text-white">
             <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> ATC POS
           </div>
-          Foundation release — billing modules arrive in a later phase.
+          Phase 2 — all payments are manual records; gateway payments arrive in a later phase.
         </div>
       </aside>
 
