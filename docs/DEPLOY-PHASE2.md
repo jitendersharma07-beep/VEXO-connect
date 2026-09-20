@@ -43,8 +43,22 @@ Standing rules that survive this runbook:
    instead of writing somewhere real — treat that guard as a backstop, not as
    permission to run tests without setting the URL. Tests belong on the dev
    host/stack; the prod host runs verification only (§4).
-3. Dev E2E walkthroughs green against the dev stack (`tests/e2e/walk-*.cjs`),
-   including the licence-enforcement walkthrough.
+3. Dev E2E walkthroughs green against the dev stack (`tests/e2e/walk-*.cjs`).
+   The role walkthroughs read the dev seed passwords from
+   `POS_SEED_*_PASSWORD` and refuse (exit 2) if one is unset. The licence
+   walkthrough needs no password — it provisions its own disposable tenant:
+
+   ```sh
+   DATABASE_URL='postgresql://atc_pos:<dev-db-password>@127.0.0.1:5439/atc_pos?schema=public' \
+     node tests/e2e/walk-licence.cjs
+   ```
+
+   It refuses to start unless that DSN is loopback on the dev port, drives
+   ACTIVE → EXPIRED → SUSPENDED → ACTIVE on tenant `pos-licence-test` only,
+   and restores the licence on exit and on SIGINT/SIGTERM, verified by reading
+   the row back. If the restore does not verify it exits nonzero and leaves a
+   recovery file (`/tmp/pos-licence-test-recovery.json`) holding the original
+   status, the original expiry and the exact SQL to put them back.
 4. `df -h /` shows comfortably more free space than an image build needs
    (≥ 10G; this host has crashed databases on ENOSPC before).
 5. Prod `.env` (repo root, not committed): `VITE_BASE_PATH=/pos/` and
