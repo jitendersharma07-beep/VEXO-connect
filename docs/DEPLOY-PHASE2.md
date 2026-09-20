@@ -31,13 +31,20 @@ Standing rules that survive this runbook:
    # Read it from that container's env; it is not written down in this repo.
    env -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
      DATABASE_URL='postgresql://atc_pos:<dev-db-password>@127.0.0.1:5439/atc_pos_test?schema=public' \
+     POS_JWT_SECRET="$(openssl rand -hex 32)" \
      NODE_ENV=test LOG_LEVEL=silent npx vitest run
    ```
 
    The database name **must** end in `_test` (`atc_pos_test`, not `atc_pos`) —
    that suffix is the whole safety property here.
 
-   → 71/71 at c5943ee (foundation 20, logRedaction 7, money 13, phase2 31).
+   `POS_JWT_SECRET` is required by `src/config/env.js` (≥ 32 chars) and the
+   suite boots the app, so without it two files fail to collect. Generate a
+   throwaway one per run as above rather than reaching for the real secret:
+   the tests only need *a* valid signing key, and an ephemeral value keeps the
+   production secret out of the test shell and out of this document.
+
+   → 71/71 at 209e128 (foundation 20, logRedaction 7, money 13, phase2 31).
    `tests/foundation.test.js` and `tests/phase2.test.js` refuse to start
    unless `DATABASE_URL` ends in `_test`, so a mis-pointed run fails loudly
    instead of writing somewhere real — treat that guard as a backstop, not as
