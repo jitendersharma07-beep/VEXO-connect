@@ -1,6 +1,6 @@
 # ATC POS — Phase 2 Contract (Backend ↔ Frontend)
 
-Version 1.0.2 — 2026-09-20. Maintainer: **Window 1** (backend + integration).
+Version 1.0.3 — 2026-09-20. Maintainer: **Window 1** (backend + integration).
 Status: **FROZEN for Milestone 1.** W2 requests changes by reporting to the
 owner/W1; only W1 edits this file (version bump + changelog entry).
 
@@ -48,15 +48,19 @@ Rules:
   image — never hardcode `/pos` in app code.
 - Only ONE backend dev server runs at a time (port 5010 is shared between
   lanes). If it is already up, just use it.
-- **Fixed dev logins** (dev DB only; deliberately non-secret; prod credentials
-  are different and never appear in any file or chat):
+- **Fixed dev logins** (dev DB only; prod credentials are different and never
+  appear in any file or chat). Emails below — the passwords are **not
+  committed**: the seed reads them from `POS_SEED_ADMIN_PASSWORD` /
+  `POS_SEED_OWNER_PASSWORD` / `POS_SEED_MANAGER_PASSWORD` /
+  `POS_SEED_CASHIER_PASSWORD` at seed time; the values are issued out-of-band
+  in the owner's terminal.
 
-  | Role | Email | Password |
-  |---|---|---|
-  | POS_SUPER_ADMIN | pos.admin@atcinfocom.in | Dev-Admin-12345 |
-  | CUSTOMER_OWNER | demo.owner@atcpos.example | Dev-Owner-12345 |
-  | BRANCH_MANAGER (BSC-CP) | demo.manager@atcpos.example | Dev-Manager-12345 |
-  | CASHIER (BSC-CP) | demo.cashier@atcpos.example | Dev-Cashier-12345 |
+  | Role | Email |
+  |---|---|
+  | POS_SUPER_ADMIN | pos.admin@atcinfocom.in |
+  | CUSTOMER_OWNER | demo.owner@atcpos.example |
+  | BRANCH_MANAGER (BSC-CP) | demo.manager@atcpos.example |
+  | CASHIER (BSC-CP) | demo.cashier@atcpos.example |
 
 - These fixed passwords exist only because the seed ran with
   `POS_SEED_ALLOW_FIXED_PASSWORDS=true` — a dev/test-only flag: the seed
@@ -401,6 +405,8 @@ refunds via gateway, reconciliation report, `channel: "GATEWAY"` rendered as
 verified — clearly distinct from MANUAL.
 
 ## Changelog
+- 1.0.3 (2026-09-20): credential hygiene — dev password values removed from §3
+  (emails + `POS_SEED_*_PASSWORD` env names stay); no API change.
 - 1.0.2 (2026-09-20): §11 adds the `/reports` route (was specified in §10 but
   missing from W2 scope; W2 change-request accepted). Note: `foundation.test.js`
   wipe extended for phase-2 tables — suite still green (71/71 total).
