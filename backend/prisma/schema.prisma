@@ -74,6 +74,11 @@ model Company {
   branches Branch[]
   users    PosUser[]
   licenses License[]
+
+  taxRates   TaxRate[]
+  categories Category[]
+  products   Product[]
+  orders     Order[]
 }
 
 model Branch {
@@ -91,6 +96,10 @@ model Branch {
   updatedAt   DateTime     @updatedAt
 
   users PosUser[]
+
+  tables          DiningTable[]
+  orders          Order[]
+  invoiceCounters InvoiceCounter[]
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -116,6 +125,12 @@ model PosUser {
   updatedAt          DateTime      @updatedAt
 
   sessions PosSession[]
+
+  ordersOpened     Order[]     @relation("OrderOpenedBy")
+  ordersVoided     Order[]     @relation("OrderVoidedBy")
+  itemsVoided      OrderItem[] @relation("OrderItemVoidedBy")
+  paymentsReceived Payment[]   @relation("PaymentReceivedBy")
+  refundsIssued    Refund[]    @relation("RefundBy")
 
   @@index([companyId])
   @@index([branchId])
@@ -183,4 +198,270 @@ model PosAuditLog {
 
   @@index([companyId, at])
   @@index([action, at])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — catalog, tables, orders/KOT/billing, manual payments, reports.
+// All money columns are DECIMAL(10,2) rupees; arithmetic happens in integer
+// paise in src/lib/money.js and results are written back exact to 2dp.
+// ---------------------------------------------------------------------------
+
+enum CatalogStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum TableStatus {
+  ACTIVE
+  RETIRED
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEAWAY
+}
+
+enum OrderStatus {
+  OPEN
+  BILLED
+  PAID
+  VOID
+  REFUNDED
+}
+
+enum OrderItemStatus {
+  ACTIVE
+  VOIDED
+}
+
+enum DiscountType {
+  FLAT
+  PERCENT
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  OTHER
+}
+
+// MANUAL = hand-recorded by staff, never presented as gateway-verified.
+// GATEWAY joins in the payment-gateway phase.
+enum PaymentChannel {
+  MANUAL
+}
+
+model TaxRate {
+  id          String        @id @default(cuid())
+  companyId   String
+  company     Company       @relation(fields: [companyId], references: [id])
+  name        String
+  ratePercent Decimal       @db.Decimal(6, 3)
+  status      CatalogStatus @default(ACTIVE)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  products Product[]
+
+  @@index([companyId])
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  name      String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+model Product {
+  id         String        @id @default(cuid())
+  companyId  String
+  company    Company       @relation(fields: [companyId], references: [id])
+  categoryId String
+  category   Category      @relation(fields: [categoryId], references: [id])
+  name       String
+  sku        String?
+  basePrice  Decimal       @db.Decimal(10, 2)
+  taxRateId  String?
+  taxRate    TaxRate?      @relation(fields: [taxRateId], references: [id])
+  status     CatalogStatus @default(ACTIVE)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  variants   ProductVariant[]
+  orderItems OrderItem[]
+
+  @@unique([companyId, sku])
+  @@index([companyId, categoryId])
+}
+
+model ProductVariant {
+  id        String        @id @default(cuid())
+  productId String
+  product   Product       @relation(fields: [productId], references: [id])
+  name      String
+  // Absolute unit price for this variant (not a delta on basePrice).
+  price     Decimal       @db.Decimal(10, 2)
+  status    CatalogStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([productId])
+}
+
+model DiningTable {
+  id        String      @id @default(cuid())
+  branchId  String
+  branch    Branch      @relation(fields: [branchId], references: [id])
+  name      String
+  capacity  Int?
+  status    TableStatus @default(ACTIVE)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  orders Order[]
+
+  @@unique([branchId, name])
+  @@index([branchId])
+}
+
+model Order {
+  id             String        @id @default(cuid())
+  companyId      String
+  company        Company       @relation(fields: [companyId], references: [id])
+  branchId       String
+  branch         Branch        @relation(fields: [branchId], references: [id])
+  type           OrderType
+  status         OrderStatus   @default(OPEN)
+  tableId        String?
+  table          DiningTable?  @relation(fields: [tableId], references: [id])
+  // Assigned at bill time; format <branchCode>/<fy>/<seq5>. Unique per
+  // company (branch codes are unique per company, not globally).
+  invoiceNumber  String?
+  openedById     String
+  openedBy       PosUser       @relation("OrderOpenedBy", fields: [openedById], references: [id])
+  discountType   DiscountType?
+  discountValue  Decimal?      @db.Decimal(10, 2)
+  discountAmount Decimal       @default(0) @db.Decimal(10, 2)
+  subtotal       Decimal       @default(0) @db.Decimal(10, 2)
+  taxAmount      Decimal       @default(0) @db.Decimal(10, 2)
+  total          Decimal       @default(0) @db.Decimal(10, 2)
+  note           String?
+  voidReason     String?
+  voidedById     String?
+  voidedBy       PosUser?      @relation("OrderVoidedBy", fields: [voidedById], references: [id])
+  billedAt       DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  items    OrderItem[]
+  kots     Kot[]
+  payments Payment[]
+  refunds  Refund[]
+
+  @@unique([companyId, invoiceNumber])
+  @@index([companyId, branchId, status])
+  @@index([companyId, billedAt])
+  @@index([tableId])
+}
+
+model OrderItem {
+  id             String          @id @default(cuid())
+  orderId        String
+  order          Order           @relation(fields: [orderId], references: [id])
+  productId      String
+  product        Product         @relation(fields: [productId], references: [id])
+  variantId      String?
+  variant        ProductVariant? @relation(fields: [variantId], references: [id])
+  // Snapshots at add time — later catalog edits never change this line.
+  name           String
+  unitPrice      Decimal         @db.Decimal(10, 2)
+  qty            Int
+  lineDiscount   Decimal         @default(0) @db.Decimal(10, 2)
+  taxRateName    String?
+  taxRatePercent Decimal?        @db.Decimal(6, 3)
+  // Stored results of the §6 contract math (incl. order-discount share).
+  lineSubtotal   Decimal         @default(0) @db.Decimal(10, 2)
+  discountShare  Decimal         @default(0) @db.Decimal(10, 2)
+  lineTax        Decimal         @default(0) @db.Decimal(10, 2)
+  lineTotal      Decimal         @default(0) @db.Decimal(10, 2)
+  kotId          String?
+  kot            Kot?            @relation(fields: [kotId], references: [id])
+  status         OrderItemStatus @default(ACTIVE)
+  voidReason     String?
+  voidedById     String?
+  voidedBy       PosUser?        @relation("OrderItemVoidedBy", fields: [voidedById], references: [id])
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Kot {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id])
+  seq       Int
+  createdAt DateTime @default(now())
+
+  items OrderItem[]
+
+  @@unique([orderId, seq])
+}
+
+model Payment {
+  id           String         @id @default(cuid())
+  orderId      String
+  order        Order          @relation(fields: [orderId], references: [id])
+  method       PaymentMethod
+  channel      PaymentChannel @default(MANUAL)
+  // amount = applied to the order (≤ remaining due). For cash, tendered is
+  // what the customer handed over; change = tendered − amount, never stored.
+  amount       Decimal        @db.Decimal(10, 2)
+  tendered     Decimal?       @db.Decimal(10, 2)
+  note         String?
+  receivedById String
+  receivedBy   PosUser        @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  createdAt    DateTime       @default(now())
+
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+model Refund {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id])
+  amount    Decimal  @db.Decimal(10, 2)
+  reason    String
+  byId      String
+  by        PosUser  @relation("RefundBy", fields: [byId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+// One row per branch per financial year; bill transactions increment
+// lastNumber atomically, so concurrent bills can never share a number.
+model InvoiceCounter {
+  id         String @id @default(cuid())
+  branchId   String
+  branch     Branch @relation(fields: [branchId], references: [id])
+  fyLabel    String
+  lastNumber Int    @default(0)
+
+  @@unique([branchId, fyLabel])
 }

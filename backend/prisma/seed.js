@@ -17,6 +17,16 @@ const prisma = new PrismaClient();
 const genPassword = () => randomBytes(9).toString('base64url');
 const resetPasswords = process.env.POS_SEED_RESET_PASSWORDS === 'true';
 
+// POS_SEED_ALLOW_FIXED_PASSWORDS lets env-provided passwords skip the forced
+// first-login change — for the fixed, documented DEV logins only. Refused
+// outright in production so a prod seed can never mint accounts that skip the
+// forced change; a prod rotation via env passwords still forces it.
+const allowFixedPasswords = process.env.POS_SEED_ALLOW_FIXED_PASSWORDS === 'true';
+if (allowFixedPasswords && process.env.NODE_ENV === 'production') {
+  console.error('POS_SEED_ALLOW_FIXED_PASSWORDS is dev/test-only; refusing to run with NODE_ENV=production.');
+  process.exit(1);
+}
+
 const issued = [];
 
 const ensureUser = async ({ email, fullName, role, companyId = null, branchId = null, passwordEnv }) => {
@@ -25,12 +35,16 @@ const ensureUser = async ({ email, fullName, role, companyId = null, branchId = 
     issued.push({ email, role, password: '(unchanged)' });
     return existing;
   }
+  // Forced first-login change is skipped ONLY when the password came from the
+  // environment AND the explicit dev-only flag is set. Generated (print-once)
+  // passwords and prod env rotations always force a change.
+  const skipForcedChange = Boolean(process.env[passwordEnv]) && allowFixedPasswords;
   const password = process.env[passwordEnv] || genPassword();
   const passwordHash = await argon2Hash(password);
   const user = existing
-    ? await prisma.posUser.update({ where: { email }, data: { passwordHash } })
+    ? await prisma.posUser.update({ where: { email }, data: { passwordHash, mustChangePassword: !skipForcedChange } })
     : await prisma.posUser.create({
-        data: { email, fullName, role, companyId, branchId, passwordHash, mustChangePassword: true },
+        data: { email, fullName, role, companyId, branchId, passwordHash, mustChangePassword: !skipForcedChange },
       });
   issued.push({ email, role, password });
   return user;
@@ -75,7 +89,7 @@ const main = async () => {
     },
   });
 
-  await prisma.branch.upsert({
+  const ch = await prisma.branch.upsert({
     where: { companyId_code: { companyId: demo.id, code: 'BSC-CH' } },
     update: {},
     create: {
@@ -125,6 +139,57 @@ const main = async () => {
     branchId: cp.id,
     passwordEnv: 'POS_SEED_CASHIER_PASSWORD',
   });
+
+  // --- Demo catalog + tables (phase 2) --------------------------------------
+  // Prices/taxes deliberately reproduce the worked example in
+  // docs/PHASE2-CONTRACT.md §6, so the money-math can be checked by hand.
+  const ensureTaxRate = async (name, ratePercent) => {
+    const found = await prisma.taxRate.findFirst({ where: { companyId: demo.id, name } });
+    return found || prisma.taxRate.create({ data: { companyId: demo.id, name, ratePercent } });
+  };
+  const gst5 = await ensureTaxRate('GST 5%', 5);
+  const gst12 = await ensureTaxRate('GST 12%', 12);
+
+  const ensureCategory = (name, sortOrder) =>
+    prisma.category.upsert({
+      where: { companyId_name: { companyId: demo.id, name } },
+      update: { sortOrder },
+      create: { companyId: demo.id, name, sortOrder },
+    });
+  const coffee = await ensureCategory('Coffee', 1);
+  const food = await ensureCategory('Food', 2);
+  const coldBrews = await ensureCategory('Cold Brews', 3);
+
+  const ensureProduct = ({ sku, name, categoryId, basePrice, taxRateId }) =>
+    prisma.product.upsert({
+      where: { companyId_sku: { companyId: demo.id, sku } },
+      update: {},
+      create: { companyId: demo.id, sku, name, categoryId, basePrice, taxRateId },
+    });
+  await ensureProduct({ sku: 'CAP-01', name: 'Cappuccino', categoryId: coffee.id, basePrice: 180, taxRateId: gst5.id });
+  await ensureProduct({ sku: 'ESP-01', name: 'Espresso', categoryId: coffee.id, basePrice: 140, taxRateId: gst5.id });
+  await ensureProduct({ sku: 'CHA-01', name: 'Masala Chai', categoryId: coffee.id, basePrice: 90, taxRateId: gst5.id });
+  await ensureProduct({ sku: 'SND-01', name: 'Veg Sandwich', categoryId: food.id, basePrice: 150, taxRateId: gst5.id });
+  await ensureProduct({ sku: 'CRS-01', name: 'Butter Croissant', categoryId: food.id, basePrice: 120, taxRateId: gst5.id });
+  const coldBrew = await ensureProduct({ sku: 'CBR-01', name: 'Cold Brew', categoryId: coldBrews.id, basePrice: 180, taxRateId: gst12.id });
+  for (const [name, price] of [['Small', 180], ['Large', 220]]) {
+    const existing = await prisma.productVariant.findFirst({ where: { productId: coldBrew.id, name } });
+    if (!existing) await prisma.productVariant.create({ data: { productId: coldBrew.id, name, price } });
+  }
+
+  const ensureTable = (branchId, name, capacity) =>
+    prisma.diningTable.upsert({
+      where: { branchId_name: { branchId, name } },
+      update: {},
+      create: { branchId, name, capacity },
+    });
+  for (const [name, capacity] of [['T1', 2], ['T2', 2], ['T3', 4], ['T4', 4], ['T5', 6], ['T6', 2]]) {
+    await ensureTable(cp.id, name, capacity);
+  }
+  for (const [name, capacity] of [['T1', 2], ['T2', 4], ['T3', 4], ['T4', 6]]) {
+    await ensureTable(ch.id, name, capacity);
+  }
+  console.log('Demo catalog ready: 2 tax rates, 3 categories, 6 products (Cold Brew has variants), 10 tables.');
 
   console.log('\nATC POS seed complete. Credentials (record these now — not stored anywhere):');
   for (const { email, role, password } of issued) {
