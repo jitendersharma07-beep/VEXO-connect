@@ -1,0 +1,186 @@
+// ATC Infocom Solutions Pvt. Ltd. — ATC POS
+// Multi-tenant schema. Tenant boundary = Company; Branch belongs to exactly one
+// Company. ATC-level operators (POS_SUPER_ADMIN) have companyId = null and are
+// the only cross-tenant principals. This database is dedicated to ATC POS —
+// it shares nothing with ATC NOC, Megatel, Review Manager or WhatsApp.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PosRole {
+  POS_SUPER_ADMIN // ATC staff, cross-company
+  CUSTOMER_OWNER // owns one company, all its branches
+  BRANCH_MANAGER // one branch of one company
+  CASHIER // one branch of one company
+}
+
+enum CompanyStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum PosUserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum BranchStatus {
+  ACTIVE
+  CLOSED
+}
+
+enum LicensePlan {
+  FREE_TRIAL
+  SINGLE_STORE
+  MULTI_STORE
+}
+
+// EXPIRED is deliberately not a stored status: expiry is a fact about
+// expiresAt vs now, computed at read time, so a lapsed licence can never be
+// "un-expired" by a forgotten cron or a missed write.
+enum LicenseStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum LicenseAddonKind {
+  ADDITIONAL_BRANCH
+}
+
+model Company {
+  id           String        @id @default(cuid())
+  name         String
+  slug         String        @unique
+  status       CompanyStatus @default(ACTIVE)
+  // Demo tenants are first-class but unmistakable: the flag propagates to the
+  // UI as a persistent badge and demo rows never mix with customer rows.
+  isDemo       Boolean       @default(false)
+  contactName  String?
+  contactEmail String?
+  contactPhone String?
+  city         String?
+  state        String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  branches Branch[]
+  users    PosUser[]
+  licenses License[]
+}
+
+model Branch {
+  id          String       @id @default(cuid())
+  companyId   String
+  company     Company      @relation(fields: [companyId], references: [id])
+  name        String
+  code        String
+  status      BranchStatus @default(ACTIVE)
+  isDemo      Boolean      @default(false)
+  addressLine String?
+  city        String?
+  state       String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  users PosUser[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+model PosUser {
+  id                 String        @id @default(cuid())
+  // null companyId = ATC operator. Every customer principal carries one.
+  companyId          String?
+  company            Company?      @relation(fields: [companyId], references: [id])
+  // Branch-scoped roles (BRANCH_MANAGER, CASHIER) carry the branch they are
+  // pinned to; owner/ATC rows leave it null.
+  branchId           String?
+  branch             Branch?       @relation(fields: [branchId], references: [id])
+  email              String        @unique
+  fullName           String
+  passwordHash       String
+  role               PosRole
+  status             PosUserStatus @default(ACTIVE)
+  mustChangePassword Boolean       @default(false)
+  lastLoginAt        DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  sessions PosSession[]
+
+  @@index([companyId])
+  @@index([branchId])
+}
+
+model PosSession {
+  id        String    @id @default(cuid())
+  userId    String
+  user      PosUser   @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip        String?
+  userAgent String?
+
+  @@index([userId])
+}
+
+model License {
+  id              String        @id @default(cuid())
+  companyId       String
+  company         Company       @relation(fields: [companyId], references: [id])
+  plan            LicensePlan
+  status          LicenseStatus @default(ACTIVE)
+  startsAt        DateTime      @default(now())
+  expiresAt       DateTime
+  // Branch entitlement of the base plan. SINGLE_STORE is clamped to 1 at read
+  // time regardless of what is stored; MULTI_STORE adds active addons on top.
+  baseBranchLimit Int           @default(1)
+  notes           String?
+  createdById     String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  addons LicenseAddon[]
+
+  @@index([companyId])
+}
+
+model LicenseAddon {
+  id        String           @id @default(cuid())
+  licenseId String
+  license   License          @relation(fields: [licenseId], references: [id])
+  kind      LicenseAddonKind @default(ADDITIONAL_BRANCH)
+  quantity  Int              @default(1)
+  expiresAt DateTime?
+  notes     String?
+  createdAt DateTime         @default(now())
+
+  @@index([licenseId])
+}
+
+model PosAuditLog {
+  id         String   @id @default(cuid())
+  at         DateTime @default(now())
+  actorId    String?
+  actorEmail String?
+  companyId  String?
+  action     String
+  entity     String?
+  entityId   String?
+  ip         String?
+  meta       Json?
+
+  @@index([companyId, at])
+  @@index([action, at])
+}

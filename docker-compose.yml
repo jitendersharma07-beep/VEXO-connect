@@ -1,0 +1,22 @@
+# Development stack: Postgres only. The backend (node --watch, port 5010) and
+# frontend (vite, port 5177) run on the host during development.
+name: pos-dev
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: atc-pos-dev-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: atc_pos
+      POSTGRES_PASSWORD: atc_pos_dev
+      POSTGRES_DB: atc_pos
+    ports:
+      # Loopback only; 5439 avoids every Postgres already on this box.
+      - "127.0.0.1:5439:5432"
+    volumes:
+      - pos_dev_pgdata:/var/lib/postgresql/data
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  pos_dev_pgdata:

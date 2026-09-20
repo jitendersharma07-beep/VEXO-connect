@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Full dev-side verification for the POS foundation, in one run:
+#   backend install → migrate → seed → vitest suite → frontend install → build.
+# Idempotent; safe to re-run. Run as atc-noc from the repo root:
+#   bash deploy/dev-verify.sh
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DEV_DB='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos?schema=public'
+TEST_DB='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos_test?schema=public'
+DEV_SECRET='dev-only-secret-0123456789abcdef0123456789'
+
+say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+
+say "0/6  Dev Postgres up + reachable"
+docker compose up -d
+for i in $(seq 1 30); do
+  docker exec atc-pos-dev-db pg_isready -U atc_pos -d atc_pos -q && break
+  sleep 1
+done
+docker exec atc-pos-dev-db pg_isready -U atc_pos -d atc_pos
+# The test database exists only if the initdb script ran on first boot;
+# create it if the volume predates the script.
+docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -tc \
+  "SELECT 1 FROM pg_database WHERE datname='atc_pos_test'" | grep -q 1 || \
+  docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -c 'CREATE DATABASE atc_pos_test OWNER atc_pos'
+
+say "1/6  Backend dependencies"
+cd backend
+npm install --no-audit --no-fund
+
+say "2/6  Prisma migration (dev DB)"
+# Migration SQL is committed (20260920000000_pos_foundation); deploy applies it
+# without the interactive/dev shadow-database machinery.
+DATABASE_URL="$DEV_DB" npx prisma migrate deploy
+DATABASE_URL="$DEV_DB" npx prisma generate
+
+say "3/6  Seed (ATC admin + demo café) — passwords print ONCE below"
+DATABASE_URL="$DEV_DB" POS_JWT_SECRET="$DEV_SECRET" node prisma/seed.js
+
+say "4/6  Migrate the _test DB and run the isolation/licensing suite"
+DATABASE_URL="$TEST_DB" npx prisma migrate deploy
+DATABASE_URL="$TEST_DB" POS_JWT_SECRET="$DEV_SECRET" npm test
+
+say "5/6  Frontend dependencies"
+cd ../frontend
+npm install --no-audit --no-fund
+
+say "6/6  Frontend production build (base=/pos/)"
+VITE_BASE_PATH=/pos/ npm run build
+ls -lh dist/index.html
+
+say "Dev verification complete."

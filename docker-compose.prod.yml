@@ -1,0 +1,57 @@
+# Distinct project name so this file can never collide with the development
+# stack: compose derives container names, image tags and volume names from it.
+name: pos-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Deliberately no "ports": the database is reachable only from the compose
+    # network.
+    volumes:
+      - pos_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      PORT: 5000
+    # No published port and no source bind mounts: the container nginx is the
+    # only way in, and the image is the single source of truth.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && node src/index.js"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Vite inlines this into the bundle; moving POS from the /pos path
+        # mount to a dedicated domain is a .env change + rebuild, not a code
+        # edit. Default is the root-domain case.
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+    restart: unless-stopped
+    ports:
+      # Loopback only: the host nginx is the sole way in.
+      - "127.0.0.1:${HTTP_PORT:-8110}:80"
+    depends_on:
+      - backend
+
+volumes:
+  pos_pgdata:

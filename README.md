@@ -1,0 +1,69 @@
+# ATC POS
+
+Multi-tenant point-of-sale platform by ATC Infocom, mounted at
+`https://atcworkspace.com/pos`. Fully isolated from ATC NOC/CRM, Megatel,
+Google Review Manager and WhatsApp: own repo, own Postgres, own JWT secret,
+own compose stacks. The only shared piece is one `location ^~ /pos/` block in
+the host nginx.
+
+## Architecture
+
+- `backend/` — Express 4 + Prisma 5 API (`/api/*`), argon2 passwords, JWT in an
+  httpOnly `pos_session` cookie backed by a DB session row (revocable).
+- `frontend/` — React 18 + Vite + Tailwind SPA, built with `base=/pos/` for
+  production; container nginx serves the SPA and proxies `/api/` to the backend.
+- `docker-compose.yml` — dev Postgres only (loopback `5439`, DBs `atc_pos` +
+  `atc_pos_test`); backend and frontend run on the host in dev.
+- `docker-compose.prod.yml` — `pos-prod` stack: postgres + backend + frontend
+  edge on loopback `127.0.0.1:8110`.
+- `deploy/go-live-path.sh` — adds the `/pos` route to the atcworkspace.com
+  vhost (backup + `nginx -t` + auto-rollback), brings the stack up, verifies.
+
+## Tenancy, roles, licensing
+
+- `Company` → `Branch` → `PosUser`; customer principals are hard-scoped to
+  their own company server-side (a client-supplied companyId is ignored).
+  Cross-company reads answer 404, indistinguishable from a row that does not
+  exist.
+- Roles: `POS_SUPER_ADMIN` (ATC platform), `CUSTOMER_OWNER`,
+  `BRANCH_MANAGER`, `CASHIER` (the last two are pinned to one branch).
+- Licences: `FREE_TRIAL`, `SINGLE_STORE` (1 branch), `MULTI_STORE`
+  (base limit + `ADDITIONAL_BRANCH` add-ons). `EXPIRED` is derived at read
+  time, never stored. Expired/suspended licences block writes but leave
+  sign-in and reads open. Only the ATC console (`/api/atc/*`) can change any
+  of it.
+
+## Development
+
+```bash
+docker compose up -d                  # dev Postgres on 127.0.0.1:5439
+cd backend && npm install
+export DATABASE_URL='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos?schema=public'
+export POS_JWT_SECRET='dev-only-secret-at-least-32-chars-long'
+npx prisma migrate dev                # apply migrations
+node prisma/seed.js                   # ATC admin + demo café (passwords print once)
+npm run dev                           # API on :5010
+
+cd ../frontend && npm install
+npm run dev                           # SPA on :5177, proxies /api to :5010
+```
+
+Tests (they truncate tables, so the DB name must end in `_test`):
+
+```bash
+cd backend
+DATABASE_URL='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos_test?schema=public' \
+POS_JWT_SECRET='test-secret-0123456789abcdef0123456789' npm test
+```
+
+## Production
+
+```bash
+cp .env.example .env                  # fill in real values; .env is git-ignored
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml exec backend node prisma/seed.js
+sudo bash deploy/go-live-path.sh      # nginx route + verification
+```
+
+Seed passwords come from `POS_SEED_*_PASSWORD` env vars or are generated and
+printed once — they are never committed or stored in plain text.
