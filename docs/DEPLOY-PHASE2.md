@@ -454,11 +454,48 @@ command; `/pos`, `/`, `/reviews/`, `/workspace/` and `/whatsapp/` all stayed
 image the container had been running on was already untagged and pruned out of
 the daemon, leaving it alive on its layers alone with no rollback target.
 
+**§5 run for the three demo accounts — 2026-09-21, right after the recreate
+above made it possible.** `demo.owner` / `demo.manager` / `demo.cashier` were
+rotated with `--demo --out`, one live session revoked each, and all three
+verified against `https://atcworkspace.com/pos` at 9/9 (sign-in + `/me` +
+logout per account) with `mustChangePassword=false` as `--demo` intends.
+`pos.admin@atcinfocom.in` was deliberately **not** in that run: `--demo` leaves
+the forced change off, which is right for a shared demo credential and wrong
+for a real operator account, so the two cannot share one `--confirm`.
+
+The rotation was not strictly required — all four accounts already carried
+`PASSWORD_CHANGED` audit rows from go-live day (16:40:39–16:42:33), so none of
+them still held a dev seed password from git history. It was run to mint fresh
+handover credentials, which is the other reason §5 exists.
+
+**`--out` writes inside the container, and that is not durable.** The backend
+has no bind mounts, so `/tmp/pos-demo-creds.txt` lives in the container's
+writable layer and the next `up -d` destroys it along with the only copy of
+passwords the script prints exactly once. Get it onto the host before anything
+else touches the container:
+
+```sh
+umask 077
+docker cp pos-prod-backend-1:/tmp/pos-demo-creds.txt ~/pos-demo-creds-YYYYMMDD.txt
+chmod 600 ~/pos-demo-creds-YYYYMMDD.txt
+# then remove the container-side copy
+docker exec pos-prod-backend-1 rm /tmp/pos-demo-creds.txt
+```
+
 **Still outstanding (needs the owner, does not block the release):**
 
-1. §5 rotation was **not run, and the evidence says it is not needed**: all
-   four prod accounts carry `PASSWORD_CHANGED` audit rows with `updatedAt`
-   between 16:40:39 and 16:42:33 on go-live day, so they no longer hold the dev
-   seed passwords that exist in git history. `pos.admin`'s later 20:48:34
-   `updatedAt` corresponds to a `LOGIN_SUCCESS` (it moves `lastLoginAt`), not a
-   password change. Re-run §5 only if you want fresh credentials for handover.
+1. **Remove the container-side credential copy.** `/tmp/pos-demo-creds.txt`
+   (0600 root) is still inside `pos-prod-backend-1`; the host copy at
+   `~/pos-demo-creds-20260921.txt` is verified working, so the container one is
+   now redundant exposure. `docker exec pos-prod-backend-1 rm
+   /tmp/pos-demo-creds.txt`.
+2. **`pos.admin@atcinfocom.in` has not been rotated in this pass** and does not
+   need to be — see the audit-row evidence above. Rotate it only for a fresh
+   operator credential, and then **without `--demo`** so the forced first-change
+   stays on.
+3. **Keep `~/pos-prod-pre-phase2-20260921-0252.dump`** (21 KB, 02:52) for at
+   least one business day of live trading before deleting it. It is the
+   pre-phase-2 database, and `pos-prod-backend:pre-phase2` is the matching code.
+4. Housekeeping, whenever convenient: `/tmp/pos-demo/` holds this release's
+   throwaway probes, and `docker builder prune -a -f` reclaims the build cache
+   (see the disk-capacity note — one volume backs `/`, `/tmp` and Docker).
