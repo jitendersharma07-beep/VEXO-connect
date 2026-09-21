@@ -1,10 +1,11 @@
 # ATC POS — Phase 2 production deployment runbook
 
-Status: **PREPARED ONLY — do not execute.** Production deployment is
-owner-gated; this file exists so the eventual deploy is a checklist, not a
-judgement call. Scope: ship phase-2 milestone 1 (catalog / orders / KOT /
-billing / **manual** payment recording / refunds / reports) to the existing
-`pos-prod` stack behind `https://atcworkspace.com/pos`.
+Status: **EXECUTED 2026-09-21 at `0670e7e`** — see §7 for what actually
+happened and what is still outstanding. Everything below §7 is the checklist
+that was followed; keep it current, because the next phase reuses it. Scope:
+ship phase-2 milestone 1 (catalog / orders / KOT / billing / **manual**
+payment recording / refunds / reports) to the existing `pos-prod` stack behind
+`https://atcworkspace.com/pos`.
 
 Standing rules that survive this runbook:
 
@@ -94,6 +95,17 @@ DUMP=~/pos-prod-pre-phase2-$(date +%Y%m%d-%H%M).dump
 docker exec pos-prod-postgres-1 sh -lc \
   'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$DUMP"; echo "pg_dump rc=$?"
 # rc MUST be 0. Any other value: delete the file and stop.
+
+# (a′) preferred: dump to a file INSIDE the container, then copy it out and
+#      compare checksums. This host has zeroed files mid-write on ENOSPC, and
+#      a shell redirect cannot tell a short write from a complete one — two
+#      matching digests can.
+docker exec pos-prod-postgres-1 sh -lc \
+  'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/pre-phase2.dump'; echo "pg_dump rc=$?"
+docker cp pos-prod-postgres-1:/tmp/pre-phase2.dump "$DUMP"
+docker exec pos-prod-postgres-1 sha256sum /tmp/pre-phase2.dump; sha256sum "$DUMP"
+# the two digests MUST match; delete /tmp/pre-phase2.dump from the container
+# afterwards — it is a full copy of production data on a container filesystem.
 
 # (b) archive readability — pg_restore parses the custom-format TOC
 pg_restore --list "$DUMP" | tail -5        # if pg_restore is not on the host:
@@ -257,10 +269,14 @@ Each rotated account must show `mustChangePassword = t` and
   code rollback does NOT require a DB rollback):
 
   ```sh
-  docker image tag <old-backend-id>  pos-prod-backend:latest
-  docker image tag <old-frontend-id> pos-prod-frontend:latest
+  docker image tag pos-prod-backend:pre-phase2  pos-prod-backend:latest
+  docker image tag pos-prod-frontend:pre-phase2 pos-prod-frontend:latest
   docker compose -f docker-compose.prod.yml up -d --no-deps --no-build backend frontend
   ```
+
+  Those `:pre-phase2` tags were applied during the 2026-09-21 deploy (§7) and
+  point at the last phase-1 images. Re-tag the *current* images before the next
+  deploy or this block will roll back further than you intend.
 
 - **Full database rollback — DESTRUCTIVE LAST RESORT. Owner approval required.**
 
@@ -330,3 +346,75 @@ Each rotated account must show `mustChangePassword = t` and
 
 - Git-side undo of the integration itself: `git revert -m 1 c5943ee` on
   `phase2-backend`.
+
+## 7. Execution record — 2026-09-21
+
+Released commit `0670e7e` on `phase2-backend`, working tree clean. Host nginx
+was not touched: `/etc/nginx/sites-available/default` still carries its
+2026-09-20 16:36 mtime and no reload was issued.
+
+**Rollback anchors.** The phase-1 images were given durable tags *before* the
+build, because `compose build` moves `:latest` and would otherwise leave them
+untagged and prunable:
+
+```sh
+docker image tag 82334539af81 pos-prod-backend:pre-phase2   # 2026-09-20 17:53
+docker image tag b3be108921da pos-prod-frontend:pre-phase2  # 2026-09-20 16:31
+```
+
+Do this on every future deploy. The §6 code-only rollback then reads
+`pos-prod-backend:pre-phase2` instead of an image ID copied out of scrollback.
+
+**Backup.** `/home/atc-noc/pos-prod-pre-phase2-20260921-0252.dump`, 21230
+bytes, `pg_dump rc=0`, sha256 `9be4586eb5ec4ba7…` identical in the container
+and on the host. TOC read back as CUSTOM format, 53 entries, 8 tables — all
+phase-1, confirming the snapshot predates the migration. Restored with
+`--exit-on-error` into two throwaway databases (both since dropped); counts
+judged inside the snapshot: **PosUser 4, Company 1, Branch 2, License 1,
+PosAuditLog 15, migrations finished 1, migrations unfinished 0.** That is the
+restore point — anything recorded after 02:52 UTC on 2026-09-21 is not in it.
+
+**Migration gate.** Live DB held one finished migration
+(`20260920000000_pos_foundation`, no rollback marker); the built image carried
+two. Delta was exactly `20260920180000_pos_phase2_orders`, and the backend log
+shows exactly that one name applied, then the listen line. Gate the *image*
+against the *database* like this — matching the image to git proves nothing
+about what the database has already run.
+
+**Timings.** Build 02:53:54→02:55:33 UTC (99 s). Deploy 02:56:11→02:56:24 UTC;
+backend and frontend containers started 02:56:23.5 UTC. **Observed downtime
+≈ 13 s**, and Postgres was never recreated (uptime unbroken since 2026-09-20
+16:31), so no database restart was involved.
+
+**Verification that passed.** `deploy/prod-verify.mjs` 8/8 on loopback 8110 and
+8/8 again on `https://atcworkspace.com/pos`; `/pos/api/health` 200. Served
+bundle moved `index-DgkiHruI.js` → `index-Blf2w4hP.js` and contains the
+phase-2 marker, so this is not a cached phase-1 build. All 11 phase-2 tables
+exist (19 total) and phase-1 row counts still match the snapshot exactly.
+Route prefixes `/api/catalog`, `/api/tables`, `/api/orders`, `/api/reports`
+answer 401 while an unmounted prefix answers 404. Sibling apps unaffected: `/`,
+`/reviews/`, `/workspace/`, `/whatsapp/` all 200. Zero log records at level ≥ 50
+since boot. A `find | sha256sum` over `/app/src` and `/app/prisma/migrations`
+in the running container equals the same digest computed on the working tree.
+
+**Redaction.** Checked with a *negative control* rather than by inspecting a
+plain request: a probe carrying `Cookie: pos_session=FAKE-…` and
+`Authorization: Bearer FAKE-…` plus a marker header `X-Probe` logged
+`"authorization":"[REDACTED]"`, `"cookie":"[REDACTED]"`, zero occurrences of
+the fake token — while `"x-probe"` was logged **with its value**. The marker is
+what makes the result meaningful: it proves the logger does print arbitrary
+header values, so `[REDACTED]` is redaction and not an absent field. `res`
+remains exactly `{"statusCode":…,"contentLength":…}`.
+
+**Still outstanding (both need the owner, neither blocks the release):**
+
+1. The four authenticated checks in `deploy/prod-verify.mjs` — the script
+   prompts for the prod ATC-admin password interactively, so the deploying
+   agent cannot run them. The eight credential-free checks are the ones
+   reported above.
+2. §5 rotation was **not run, and the evidence says it is not needed**: all
+   four prod accounts carry `PASSWORD_CHANGED` audit rows with `updatedAt`
+   between 16:40:39 and 16:42:33 on go-live day, so they no longer hold the dev
+   seed passwords that exist in git history. `pos.admin`'s later 20:48:34
+   `updatedAt` corresponds to a `LOGIN_SUCCESS` (it moves `lastLoginAt`), not a
+   password change. Re-run §5 only if you want fresh credentials for handover.
