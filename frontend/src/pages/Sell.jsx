@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Armchair,
   Ban,
+  CreditCard,
   IndianRupee,
   Minus,
   Package,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
+import { openRazorpayCheckout } from '../lib/checkout.js';
 import { useToast } from '../components/toast.jsx';
 import { ErrorNote, Modal, ReasonModal } from '../components/ui.jsx';
 import { KotListModal, KotModal, ReceiptModal } from '../components/Receipt.jsx';
@@ -344,8 +346,207 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
   );
 }
 
+// Collects a payment through the provider's own checkout.
+//
+// The distinction this screen exists to hold: the customer finishing checkout
+// and the money arriving are two different events, and only the second one is
+// a payment. Checkout's success callback is relayed to the server to be
+// signature-checked, and even then it buys the cashier nothing but the words
+// "confirmation on its way". Until the provider's webhook lands, this screen
+// will not say the order is paid — because it is not.
+const HANDOFF_POLL_MS = 2000;
+const HANDOFF_POLL_LIMIT = 15; // ~30s, then the cashier is told to reconcile
+
+function OnlinePaymentModal({ open, order, company, onClose, onOrder, onPaid }) {
+  // idle → opening → waiting (customer is in the widget) → confirming
+  //   → settled | unconfirmed | cancelled | failed | error
+  const [phase, setPhase] = useState('idle');
+  const [error, setError] = useState('');
+  const [detail, setDetail] = useState('');
+
+  useEffect(() => {
+    if (!open) return undefined;
+    // A handoff may still be polling when the modal closes; this lets the
+    // async chain below see that it should stop touching state.
+    let live = true;
+    setPhase('opening');
+    setError('');
+    setDetail('');
+
+    const poll = async (intentId) => {
+      for (let i = 0; i < HANDOFF_POLL_LIMIT; i += 1) {
+        await new Promise((r) => setTimeout(r, HANDOFF_POLL_MS));
+        if (!live) return false;
+        try {
+          const { data } = await api.get(`/orders/${order.id}`);
+          if (!live) return false;
+          onOrder(data.order);
+          if (data.order.payments.some((p) => p.intentId === intentId)) return true;
+        } catch {
+          // A failed poll says nothing about the money; keep waiting.
+        }
+      }
+      return false;
+    };
+
+    (async () => {
+      let intent;
+      try {
+        const { data } = await api.post(`/orders/${order.id}/payment-intents`, {});
+        if (!live) return;
+        intent = data;
+      } catch (err) {
+        if (live) { setPhase('error'); setError(apiError(err)); }
+        return;
+      }
+
+      if (intent.provider !== 'razorpay' || !intent.keyId || !intent.intent?.providerRef) {
+        if (live) {
+          setPhase('error');
+          setError('This payment provider has no in-browser checkout on this screen.');
+          setDetail(intent.intent?.providerRef ? `Reference: ${intent.intent.providerRef}` : '');
+        }
+        return;
+      }
+
+      setPhase('waiting');
+      let result;
+      try {
+        result = await openRazorpayCheckout({
+          keyId: intent.keyId,
+          orderRef: intent.intent.providerRef,
+          amountPaise: Math.round(Number(order.amountDue) * 100),
+          companyName: company?.name,
+          description: order.invoiceNumber ? `Invoice ${order.invoiceNumber}` : 'Order payment',
+        });
+      } catch (err) {
+        if (live) { setPhase('error'); setError(err?.message || 'Checkout could not be opened'); }
+        return;
+      }
+      if (!live) return;
+
+      if (!result.ok) {
+        // Dismissal leaves the intent open on purpose: the same attempt is
+        // resumed if the cashier tries again, so the customer is never shown
+        // two payable pages for one bill.
+        setPhase(result.reason === 'failed' ? 'failed' : 'cancelled');
+        setDetail(result.detail || '');
+        return;
+      }
+
+      setPhase('confirming');
+      try {
+        const { data } = await api.post(
+          `/orders/${order.id}/payment-intents/${intent.intent.id}/handoff`,
+          { paymentId: result.paymentId, signature: result.signature },
+        );
+        if (!live) return;
+        onOrder(data.order);
+        if (data.settled) return setPhase('settled');
+      } catch (err) {
+        // The handoff is a hint, and a hint that fails to verify is not a
+        // failed payment — the webhook may still be on its way. Say exactly
+        // that and keep watching.
+        if (live) setDetail(apiError(err));
+      }
+
+      const arrived = await poll(intent.intent.id);
+      if (live) setPhase(arrived ? 'settled' : 'unconfirmed');
+    })();
+
+    return () => { live = false; };
+  }, [open, order?.id]);
+
+  if (!open || !order) return null;
+
+  const waiting = phase === 'opening' || phase === 'waiting' || phase === 'confirming';
+  const waitingText = {
+    opening: 'Opening a payment with the provider…',
+    waiting: 'Waiting for the customer to complete payment…',
+    confirming: 'Customer completed checkout. Waiting for the provider to confirm…',
+  }[phase];
+
+  return (
+    <Modal open title="Take payment online" onClose={onClose}>
+      {/* NOT the GATEWAY_PAYMENT_LABEL: that one asserts a confirmed payment
+          and belongs on a payment record that has one. Nothing is confirmed
+          while this modal is open, and the header has to stay true in every
+          phase below, including the ones where no money moved. */}
+      <div className="mb-3 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-700">
+        ONLINE PAYMENT — RECORDED ONLY WHEN THE PROVIDER CONFIRMS IT
+      </div>
+      <div className="mb-4 rounded-lg bg-slate-50 px-4 py-2 text-center">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Amount due</div>
+        <div className="text-2xl font-extrabold text-pos-ink">{fmtINR(order.amountDue)}</div>
+      </div>
+
+      {waiting ? (
+        <div className="space-y-3 text-center">
+          <RefreshCw className="mx-auto h-6 w-6 animate-spin text-pos-royal" />
+          <div className="text-sm font-semibold text-slate-700">{waitingText}</div>
+          {phase === 'confirming' ? (
+            <p className="text-xs text-slate-500">
+              The order stays unpaid until the provider confirms it. Do not hand over goods yet.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {phase === 'settled' ? (
+        <div className="space-y-3">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800">
+            Provider confirmed the payment.
+          </div>
+          <button type="button" className="btn-primary w-full" onClick={onPaid}>
+            View receipt
+          </button>
+        </div>
+      ) : null}
+
+      {phase === 'unconfirmed' ? (
+        <div className="space-y-3">
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+            <div className="text-sm font-bold text-amber-900">Payment not confirmed yet.</div>
+            <p className="mt-1 text-xs text-amber-900">
+              The customer completed checkout but the provider has not confirmed it. The money may
+              still arrive. Do not record a second payment for this order — check Gateway
+              reconciliation before taking anything by hand.
+            </p>
+          </div>
+          {detail ? <p className="text-xs text-slate-500">{detail}</p> : null}
+          <button type="button" className="btn-ghost w-full" onClick={onClose}>Close</button>
+        </div>
+      ) : null}
+
+      {phase === 'cancelled' || phase === 'failed' ? (
+        <div className="space-y-3">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-sm font-bold text-slate-700">
+              {phase === 'failed' ? 'The payment failed.' : 'The customer closed the payment window.'}
+            </div>
+            <p className="mt-1 text-xs text-slate-600">
+              Nothing was charged. The order is still due and can be paid online again or recorded
+              by hand.
+            </p>
+          </div>
+          {detail ? <p className="text-xs text-slate-500">{detail}</p> : null}
+          <button type="button" className="btn-ghost w-full" onClick={onClose}>Close</button>
+        </div>
+      ) : null}
+
+      {phase === 'error' ? (
+        <div className="space-y-3">
+          <ErrorNote message={error} />
+          {detail ? <p className="text-xs text-slate-500">{detail}</p> : null}
+          <button type="button" className="btn-ghost w-full" onClick={onClose}>Close</button>
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
 export default function Sell() {
-  const { user, license } = useAuth();
+  const { user, license, company, onlinePayment } = useAuth();
   const toast = useToast();
   const [params, setParams] = useSearchParams();
 
@@ -378,6 +579,7 @@ export default function Sell() {
   const [variantFor, setVariantFor] = useState(null);
   const [discountOpen, setDiscountOpen] = useState(false);
   const [payOpen, setPayOpen] = useState(false);
+  const [onlineOpen, setOnlineOpen] = useState(false);
   const [kot, setKot] = useState(null);
   const [kotListFor, setKotListFor] = useState(null);
   const [receipt, setReceipt] = useState(null);
@@ -1119,9 +1321,24 @@ export default function Sell() {
                   </>
                 ) : null}
                 {order.status === 'BILLED' ? (
-                  <button type="button" className="btn-orange w-full" disabled={busy || licenseBlocked} onClick={() => setPayOpen(true)}>
-                    <IndianRupee className="h-4 w-4" /> Record payment · {fmtINR(order.amountDue)} due
-                  </button>
+                  <>
+                    {/* Offered only where a provider is actually configured, which
+                        is nowhere today — a button that can only answer 501 is
+                        worse than no button with a customer at the counter. */}
+                    {onlinePayment?.available ? (
+                      <button
+                        type="button"
+                        className="btn-primary w-full"
+                        disabled={busy || licenseBlocked}
+                        onClick={() => setOnlineOpen(true)}
+                      >
+                        <CreditCard className="h-4 w-4" /> Pay online · {fmtINR(order.amountDue)} due
+                      </button>
+                    ) : null}
+                    <button type="button" className="btn-orange w-full" disabled={busy || licenseBlocked} onClick={() => setPayOpen(true)}>
+                      <IndianRupee className="h-4 w-4" /> Record payment · {fmtINR(order.amountDue)} due
+                    </button>
+                  </>
                 ) : null}
                 {order.status === 'PAID' ? (
                   <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-center text-sm font-bold text-emerald-800">
@@ -1180,6 +1397,21 @@ export default function Sell() {
         }}
         onPaid={() => {
           setPayOpen(false);
+          showReceipt(order.id);
+        }}
+      />
+      <OnlinePaymentModal
+        open={onlineOpen}
+        order={order}
+        company={company}
+        onClose={() => {
+          setOnlineOpen(false);
+          loadOpenOrders();
+          loadTables();
+        }}
+        onOrder={setOrder}
+        onPaid={() => {
+          setOnlineOpen(false);
           showReceipt(order.id);
         }}
       />

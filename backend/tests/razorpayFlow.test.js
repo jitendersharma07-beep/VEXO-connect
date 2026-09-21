@@ -568,3 +568,118 @@ describe('out-of-order and unmatched events', () => {
     expect((await refundOf(order.id)).status).toBe('PENDING');
   });
 });
+
+// The browser's claim that the customer paid. The whole point of these is
+// that a verified handoff still settles nothing — the cashier's screen is
+// allowed to change, the money is not.
+describe('the checkout handoff', () => {
+  const KEY_SECRET = process.env.POS_GATEWAY_KEY_SECRET;
+
+  // An intent open with Razorpay, no webhook delivered yet.
+  const openIntent = async () => {
+    const order = await billedOrder();
+    const orderRef = nextId('order_');
+    queue(answer(200, orderBody(order.totalPaise, orderRef)));
+    const opened = await request(app).post(`/api/orders/${order.id}/payment-intents`)
+      .set(auth(tokens.cashier)).send({});
+    expect(opened.status, JSON.stringify(opened.body)).toBe(201);
+    return { ...order, orderRef, intentId: opened.body.intent.id };
+  };
+
+  const sign = (orderRef, payRef, secret = KEY_SECRET) =>
+    crypto.createHmac('sha256', secret).update(`${orderRef}|${payRef}`).digest('hex');
+
+  const handoff = (orderId, intentId, body) =>
+    request(app).post(`/api/orders/${orderId}/payment-intents/${intentId}/handoff`)
+      .set(auth(tokens.cashier)).send(body);
+
+  it('accepts a signature from Razorpay and still reports the money unsettled', async () => {
+    const order = await openIntent();
+    const payRef = nextId('pay_');
+
+    const res = await handoff(order.id, order.intentId, {
+      paymentId: payRef, signature: sign(order.orderRef, payRef),
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.handoff).toBe('verified');
+    // The browser beat the webhook, which is the normal case and must not
+    // read as payment.
+    expect(res.body.settled).toBe(false);
+    expect(res.body.order.status).toBe('BILLED');
+    expect(res.body.order.payments).toHaveLength(0);
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('reports settled once the webhook has actually landed', async () => {
+    const order = await openIntent();
+    const payRef = nextId('pay_');
+    const hook = await deliver(captured(order.orderRef, payRef, order.totalPaise));
+    expect(hook.body.applied).toBe(true);
+
+    const res = await handoff(order.id, order.intentId, {
+      paymentId: payRef, signature: sign(order.orderRef, payRef),
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.settled).toBe(true);
+    expect(res.body.order.status).toBe('PAID');
+  });
+
+  it('refuses a forged signature', async () => {
+    const order = await openIntent();
+    const payRef = nextId('pay_');
+
+    const res = await handoff(order.id, order.intentId, {
+      paymentId: payRef, signature: 'a'.repeat(64),
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/could not be verified/);
+  });
+
+  // The two secrets are easy to confuse and the failure would be silent.
+  it('refuses a handoff signed with the webhook secret', async () => {
+    const order = await openIntent();
+    const payRef = nextId('pay_');
+
+    const res = await handoff(order.id, order.intentId, {
+      paymentId: payRef, signature: sign(order.orderRef, payRef, SECRET),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // Signing over the wrong attempt is how one order's handoff would be
+  // replayed onto another's bill.
+  it('refuses a signature made for a different attempt', async () => {
+    const order = await openIntent();
+    const payRef = nextId('pay_');
+
+    const res = await handoff(order.id, order.intentId, {
+      paymentId: payRef, signature: sign(nextId('order_'), payRef),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses an intent belonging to another order', async () => {
+    const mine = await openIntent();
+    const other = await openIntent();
+    const payRef = nextId('pay_');
+
+    const res = await handoff(mine.id, other.intentId, {
+      paymentId: payRef, signature: sign(other.orderRef, payRef),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('records the handoff so an intent that never settles can be told apart', async () => {
+    const order = await openIntent();
+    const payRef = nextId('pay_');
+    await handoff(order.id, order.intentId, {
+      paymentId: payRef, signature: sign(order.orderRef, payRef),
+    });
+
+    const log = await prisma.posAuditLog.findFirst({
+      where: { action: 'GATEWAY_CHECKOUT_HANDOFF', entityId: order.intentId },
+    });
+    expect(log).not.toBeNull();
+    expect(log.meta.chargeRef).toBe(payRef);
+  });
+});

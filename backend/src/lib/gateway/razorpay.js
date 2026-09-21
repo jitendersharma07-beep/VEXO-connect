@@ -370,9 +370,20 @@ export const verifyCheckoutSignature = ({ orderId, paymentId, signature, secret 
   return hexEqual(signature.trim(), hmacHex(secret, `${orderId}|${paymentId}`));
 };
 
+// The adapter's own wrapper, so the route never has to know which of the two
+// secrets signs a handoff. intentProviderRef is the order_… we opened.
+const verifyCheckoutHandoff = ({ intentProviderRef, paymentId, signature }) =>
+  verifyCheckoutSignature({
+    orderId: intentProviderRef,
+    paymentId,
+    signature,
+    secret: env.POS_GATEWAY_KEY_SECRET,
+  });
+
 export const razorpayAdapter = {
   name: 'razorpay',
   createSession,
   createRefund,
   verifyWebhook,
+  verifyCheckoutHandoff,
 };

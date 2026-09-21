@@ -141,6 +141,11 @@ export const publicPayment = (p) => ({
   tendered: p.tendered === null ? null : num(p.tendered),
   changeDue: p.tendered === null ? null : toRupees(paiseOf(p.tendered) - paiseOf(p.amount)),
   note: p.note,
+  // Which attempt this payment settled, so a screen watching for its own
+  // intent can tell that the webhook landed. Null on manual records, which
+  // settle no attempt. The provider's charge reference stays server-side —
+  // the refund route is its only reader.
+  intentId: p.intentId ?? null,
   receivedBy: p.receivedBy ? { id: p.receivedBy.id, fullName: p.receivedBy.fullName } : null,
   createdAt: p.createdAt,
 });

@@ -8,7 +8,20 @@ const AuthContext = createContext(null);
 
 export const useAuth = () => useContext(AuthContext);
 
-const EMPTY = { user: null, company: null, branch: null, license: null };
+// onlinePayment describes the deployment, not the user: whether a payment
+// provider is configured at all. Defaulting it to unavailable means a server
+// that does not mention it — an older one, or one mid-deploy — hides online
+// payment rather than offering a button that cannot work.
+const NO_GATEWAY = { available: false, provider: null };
+const EMPTY = { user: null, company: null, branch: null, license: null, onlinePayment: NO_GATEWAY };
+
+const sessionOf = (data) => ({
+  user: data.user,
+  company: data.company,
+  branch: data.branch,
+  license: data.license,
+  onlinePayment: data.onlinePayment ?? NO_GATEWAY,
+});
 
 export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
@@ -19,7 +32,7 @@ export function AuthProvider({ children }) {
   const refresh = useCallback(async () => {
     try {
       const { data } = await api.get('/auth/me');
-      setSession({ user: data.user, company: data.company, branch: data.branch, license: data.license });
+      setSession(sessionOf(data));
     } catch {
       setSession(EMPTY);
     } finally {
@@ -34,7 +47,7 @@ export function AuthProvider({ children }) {
   const login = async (email, password) => {
     const { data } = await api.post('/auth/login', { email, password });
     clearAtcScope(); // a fresh session never inherits a previous ATC company scope
-    setSession({ user: data.user, company: data.company, branch: data.branch, license: data.license });
+    setSession(sessionOf(data));
     return data;
   };
 

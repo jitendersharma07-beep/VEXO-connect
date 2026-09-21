@@ -721,6 +721,77 @@ router.post(
   }),
 );
 
+const handoffSchema = z.object({
+  paymentId: z.string().min(1).max(120),
+  signature: z.string().min(1).max(256),
+});
+
+// The browser's report that the customer finished paying — checked, then used
+// for nothing but the words on the cashier's screen.
+//
+// This route settles NOTHING. It creates no payment, closes no intent and
+// touches no money; it re-reads the order and hands back whatever the webhook
+// has or has not already done. That is the entire design: the customer's
+// browser and the provider's webhook are two different claims, and only the
+// second one is evidence.
+//
+// It still verifies, because the cashier acts on the answer. "Customer has
+// paid, confirmation coming" and "customer closed the window" lead to
+// different things happening at the counter, and an unsigned claim of the
+// first is a way to walk out with the goods.
+router.post(
+  '/:id/payment-intents/:intentId/handoff',
+  ...operate,
+  asyncHandler(async (req, res) => {
+    const adapter = getAdapter();
+    const body = handoffSchema.parse(req.body ?? {});
+    const order = await loadOrder(req);
+
+    // Found via the order, so an intent belonging to another company or
+    // another bill is simply absent rather than probeable.
+    const intent = await prisma.paymentIntent.findFirst({
+      where: { id: req.params.intentId, orderId: order.id },
+    });
+    if (!intent) throw notFound('Payment intent not found');
+    if (!intent.providerRef) {
+      throw conflict('This payment was never opened with the provider');
+    }
+    if (typeof adapter.verifyCheckoutHandoff !== 'function') {
+      throw badRequest('This payment provider has no browser handoff to verify');
+    }
+
+    const verified = adapter.verifyCheckoutHandoff({
+      intentProviderRef: intent.providerRef,
+      paymentId: body.paymentId,
+      signature: body.signature,
+    });
+    if (!verified) throw badRequest('The payment confirmation could not be verified');
+
+    // Worth recording even though nothing moved: an intent still open minutes
+    // after a VERIFIED handoff means the customer paid and the webhook never
+    // arrived, which is a far stronger signal than an intent that is merely
+    // old. This is the only trace of that distinction.
+    await audit(req, {
+      action: 'GATEWAY_CHECKOUT_HANDOFF',
+      entity: 'PaymentIntent',
+      entityId: intent.id,
+      companyId: req.companyScope.id,
+      meta: { orderId: order.id, provider: adapter.name, chargeRef: body.paymentId },
+    });
+
+    // Re-read rather than reuse: the webhook may have landed while we were
+    // checking the signature, and the screen should say so.
+    const current = await loadOrder(req, ORDER_INCLUDE);
+    res.json({
+      handoff: 'verified',
+      // Whether the webhook has landed yet. False is the normal first answer:
+      // the browser usually beats the webhook by a second or two.
+      settled: current.payments.some((p) => p.intentId === intent.id),
+      order: serializeOrder(current),
+    });
+  }),
+);
+
 // --- refunds ----------------------------------------------------------------
 
 const REFUND_PAYMENT_INCLUDE = {

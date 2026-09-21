@@ -7,10 +7,22 @@ import { unauthorized, badRequest, asyncHandler } from '../../lib/errors.js';
 import { hashSecret, verifyPassword, hashPassword } from '../../lib/crypto.js';
 import { audit, clientIp } from '../../lib/audit.js';
 import { currentLicense } from '../../lib/license.js';
+import { gatewayAvailable } from '../../lib/gateway/index.js';
 import { requirePosAuth } from '../../middleware/auth.js';
 import { loginLimiter } from '../../middleware/rateLimit.js';
 
 const router = Router();
+
+// A property of the deployment, not of the user, so it rides along with the
+// session rather than costing the Sell screen a call of its own. It is false
+// on every deployment today. The screen uses it to decide whether to offer
+// online payment at all: a button whose only outcome is 501 is worse than no
+// button, because the cashier finds out at the counter with a customer
+// waiting.
+const onlinePayment = () => ({
+  available: gatewayAvailable(),
+  provider: gatewayAvailable() ? env.POS_GATEWAY_PROVIDER : null,
+});
 
 const loginSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -112,6 +124,7 @@ router.post(
       company: publicCompany(user.company),
       branch: user.branch ? { id: user.branch.id, name: user.branch.name, code: user.branch.code } : null,
       license: publicLicense(license),
+      onlinePayment: onlinePayment(),
     });
   }),
 );
@@ -145,6 +158,7 @@ router.get(
       company: publicCompany(req.user.company),
       branch,
       license: publicLicense(license),
+      onlinePayment: onlinePayment(),
     });
   }),
 );

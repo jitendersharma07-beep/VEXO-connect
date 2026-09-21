@@ -43,6 +43,18 @@
 //     let an attacker squat the idempotency key with a forged id and block
 //     the genuine event for good. The caller cannot misuse what it is not given.
 //
+// One method is OPTIONAL, because not every provider has a browser step:
+//
+//   verifyCheckoutHandoff({ intentProviderRef, paymentId, signature })
+//     -> boolean
+//     Proves the three values the provider's in-browser checkout handed back
+//     came from the provider and not from the page's own JavaScript. It is a
+//     DISPLAY fact, never a settlement one: a true here means the customer
+//     reached a real success screen, and nothing may record a payment from it.
+//     It exists because the cashier acts on what the screen says — an
+//     unverified "customer has paid" is how goods leave the counter unpaid.
+//     Absent on adapters whose provider has no such handoff.
+//
 // Amounts are integer paise in both directions; the adapter converts to and
 // from whatever the provider's wire format happens to be.
 
