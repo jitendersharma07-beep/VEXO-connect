@@ -483,7 +483,8 @@ model PaymentIntent {
   updatedAt      DateTime            @updatedAt
   closedAt       DateTime?
 
-  payment Payment?
+  payment       Payment?
+  webhookEvents GatewayWebhookEvent[]
 
   @@unique([provider, providerRef])
   @@index([orderId])
@@ -500,7 +501,11 @@ model GatewayWebhookEvent {
   eventId     String
   kind        String
   payloadHash String
+  // Set only when the delivery matched a real intent. This is also the only
+  // route by which an event can be attributed to a company, since events
+  // carry no tenant of their own.
   intentId    String?
+  intent      PaymentIntent? @relation(fields: [intentId], references: [id])
   receivedAt  DateTime  @default(now())
   processedAt DateTime?
   // Why a verified delivery still changed nothing — unknown intent, already

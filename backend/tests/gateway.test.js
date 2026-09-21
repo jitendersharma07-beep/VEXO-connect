@@ -55,6 +55,7 @@ const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const tokens = {};
 let company, branch, productId;
+const other = {};
 
 const login = async (email) => {
   const res = await request(app).post('/api/auth/login').send({ email, password: PW });
@@ -85,19 +86,22 @@ const succeeded = (providerRef, amountPaise, extra = {}) => ({
 });
 
 // A billed order with a known total, returned with its due amount in paise.
-const billedOrder = async () => {
-  const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
-    .send({ type: 'TAKEAWAY', items: [{ productId, qty: 2 }] });
+const billedOrder = async (as = () => ({ token: tokens.cashier, productId })) => {
+  const { token, productId: pid } = as();
+  const created = await request(app).post('/api/orders').set(auth(token))
+    .send({ type: 'TAKEAWAY', items: [{ productId: pid, qty: 2 }] });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   const id = created.body.order.id;
-  const billed = await request(app).post(`/api/orders/${id}/bill`).set(auth(tokens.cashier)).send({});
+  const billed = await request(app).post(`/api/orders/${id}/bill`).set(auth(token)).send({});
   expect(billed.status, JSON.stringify(billed.body)).toBe(200);
   return { id, totalPaise: Math.round(billed.body.order.total * 100) };
 };
 
-const openIntent = async (orderId) => {
+const asOther = () => ({ token: other.cashierToken, productId: other.productId });
+
+const openIntent = async (orderId, token = tokens.cashier) => {
   const res = await request(app).post(`/api/orders/${orderId}/payment-intents`)
-    .set(auth(tokens.cashier)).send({});
+    .set(auth(token)).send({});
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   return res.body.intent;
 };
@@ -113,8 +117,10 @@ beforeAll(async () => {
   });
   branch = await prisma.branch.create({ data: { companyId: company.id, name: 'Gw One', code: 'G1' } });
   const mk = (data) => prisma.posUser.create({ data: { passwordHash, ...data } });
+  await mk({ email: 'atc.g@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN' });
   await mk({ email: 'owner.g@test.local', fullName: 'Owner G', role: 'CUSTOMER_OWNER', companyId: company.id });
   await mk({ email: 'cashier.g@test.local', fullName: 'Cashier G', role: 'CASHIER', companyId: company.id, branchId: branch.id });
+  tokens.atc = await login('atc.g@test.local');
   tokens.owner = await login('owner.g@test.local');
   tokens.cashier = await login('cashier.g@test.local');
 
@@ -126,6 +132,35 @@ beforeAll(async () => {
     .send({ categoryId: cat.body.category.id, name: 'Latte', basePrice: 200, taxRateId: tax.body.taxRate.id });
   expect(prod.status, JSON.stringify(prod.body)).toBe(201);
   productId = prod.body.product.id;
+
+  // A second, unrelated tenant. Webhook events carry no company of their own,
+  // so cross-tenant leakage in the reconciliation report is only provable with
+  // a real neighbour to leak from.
+  other.company = await prisma.company.create({
+    data: {
+      name: 'Rival Cafe', slug: 'rival-cafe',
+      licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
+    },
+  });
+  other.branch = await prisma.branch.create({
+    data: { companyId: other.company.id, name: 'Rv One', code: 'R1' },
+  });
+  await mk({ email: 'owner.r@test.local', fullName: 'Owner R', role: 'CUSTOMER_OWNER', companyId: other.company.id });
+  await mk({
+    email: 'cashier.r@test.local', fullName: 'Cashier R', role: 'CASHIER',
+    companyId: other.company.id, branchId: other.branch.id,
+  });
+  other.ownerToken = await login('owner.r@test.local');
+  other.cashierToken = await login('cashier.r@test.local');
+
+  const rTax = await request(app).post('/api/catalog/tax-rates').set(auth(other.ownerToken))
+    .send({ name: 'GST 5%', ratePercent: 5 });
+  const rCat = await request(app).post('/api/catalog/categories').set(auth(other.ownerToken))
+    .send({ name: 'Tea', sortOrder: 1 });
+  const rProd = await request(app).post('/api/catalog/products').set(auth(other.ownerToken))
+    .send({ categoryId: rCat.body.category.id, name: 'Chai', basePrice: 100, taxRateId: rTax.body.taxRate.id });
+  expect(rProd.status, JSON.stringify(rProd.body)).toBe(201);
+  other.productId = rProd.body.product.id;
 });
 
 afterAll(async () => {
@@ -386,6 +421,163 @@ describe('what a verified event is still refused for', () => {
     });
     expect(row.skippedReason).toMatch(/unhandled event type "payment.disputed"/);
   });
+});
+
+describe('reconciliation report', () => {
+  const today = () => new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+  // An ATC operator has no company of their own, so the route makes them name
+  // one; a customer's scope comes from their token and cannot be overridden.
+  const fetchReport = (token) =>
+    request(app).get('/api/reports/gateway-reconciliation')
+      .query({ from: today(), to: today(), ...(token === tokens.atc ? { companyId: company.id } : {}) })
+      .set(auth(token));
+
+  // Assertions are scoped to ids this test created, never to running totals:
+  // every other test in this file also writes intents and events.
+  it('lists an open intent as an exception and drops it once settled', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+
+    const before = await fetchReport(tokens.owner);
+    expect(before.status, JSON.stringify(before.body)).toBe(200);
+    expect(before.body.report.exceptions.openIntents.map((i) => i.intentId)).toContain(intent.id);
+
+    await deliver(succeeded(intent.providerRef, order.totalPaise));
+
+    const after = await fetchReport(tokens.owner);
+    expect(after.body.report.exceptions.openIntents.map((i) => i.intentId)).not.toContain(intent.id);
+  });
+
+  it('surfaces an amount mismatch as a verified-but-unapplied event', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await deliver(succeeded(intent.providerRef, order.totalPaise - 100));
+
+    const res = await fetchReport(tokens.owner);
+    const row = res.body.report.exceptions.verifiedButNotApplied
+      .find((e) => e.intentId === intent.id);
+    expect(row).toBeTruthy();
+    expect(row.reason).toBe('settled amount does not match the intent');
+  });
+
+  it('counts signature failures without ever storing them as events', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    const before = (await fetchReport(tokens.atc)).body.report.summary.signatureFailures;
+
+    await deliver(succeeded(intent.providerRef, order.totalPaise), { secret: 'nope-wrong-secret' });
+    await deliver(succeeded(intent.providerRef, order.totalPaise), { secret: 'nope-wrong-secret' });
+
+    const after = await fetchReport(tokens.atc);
+    expect(after.body.report.summary.signatureFailures).toBe(before + 2);
+    // Counted, never stored: a forged id must not be able to occupy the key.
+    expect(after.body.report.exceptions.verifiedButNotApplied
+      .filter((e) => e.eventId?.startsWith('evt_') && e.intentId === intent.id)).toHaveLength(0);
+  });
+
+  it('tells a customer the signature-failure count is unknowable rather than zero', async () => {
+    // A rejected delivery was never verified, so it cannot be tied to a
+    // company. Reporting 0 would be a claim we have no basis to make.
+    await deliver(succeeded('test_anything', 100), { secret: 'nope-wrong-secret' });
+
+    const owner = await fetchReport(tokens.owner);
+    expect(owner.body.report.summary.signatureFailures).toBeNull();
+    expect((await fetchReport(tokens.atc)).body.report.summary.signatureFailures)
+      .toBeGreaterThan(0);
+  });
+
+  it('reports no unprocessed events, because the insert and the settlement share a transaction', async () => {
+    const res = await fetchReport(tokens.owner);
+    expect(res.body.report.exceptions.unprocessedEvents).toBe(0);
+  });
+
+  it('names the configured provider', async () => {
+    const res = await fetchReport(tokens.owner);
+    expect(res.body.report.gateway.configured).toBe(true);
+    expect(res.body.report.gateway.provider).toBe('test');
+  });
+
+  it('is refused to a cashier', async () => {
+    const res = await fetchReport(tokens.cashier);
+    expect(res.status).toBe(403);
+  });
+
+  it('never shows one tenant the gateway traffic of another', async () => {
+    // Everything in this test belongs to Rival Cafe: an open intent, a
+    // settled one, and a verified event that was refused on the amount.
+    const open = await openIntent((await billedOrder(asOther)).id, other.cashierToken);
+    const settledOrder = await billedOrder(asOther);
+    const settled = await openIntent(settledOrder.id, other.cashierToken);
+    await deliver(succeeded(settled.providerRef, settledOrder.totalPaise));
+    const refusedOrder = await billedOrder(asOther);
+    const refused = await openIntent(refusedOrder.id, other.cashierToken);
+    await deliver(succeeded(refused.providerRef, refusedOrder.totalPaise - 100));
+
+    const theirs = await fetchReport(other.ownerToken);
+    expect(theirs.status, JSON.stringify(theirs.body)).toBe(200);
+    expect(theirs.body.report.exceptions.openIntents.map((i) => i.intentId)).toContain(open.id);
+    expect(theirs.body.report.exceptions.verifiedButNotApplied.map((e) => e.intentId))
+      .toContain(refused.id);
+
+    // The neighbour sees none of it — not the intents, not the invoices, and
+    // not the events, which are only reachable through their intent's order.
+    //
+    // Asserted id by id. `not.toEqual(expect.arrayContaining([...]))` would
+    // only fail if EVERY id leaked, so a single leaked row would pass it.
+    const mine = await fetchReport(tokens.owner);
+    const body = JSON.stringify(mine.body);
+    for (const id of [open.id, settled.id, refused.id,
+                      settledOrder.id, refusedOrder.id]) {
+      expect(body).not.toContain(id);
+    }
+  });
+
+  it('hides unattributable events from a customer and shows them to ATC', async () => {
+    // An event matching no intent belongs to nobody we can name; showing it
+    // to a customer would disclose that another tenant's traffic exists.
+    await deliver(succeeded('test_orphan_reference', 4200));
+
+    const owner = await fetchReport(tokens.owner);
+    expect(owner.body.report.summary.unattributedVisible).toBe(false);
+    expect(owner.body.report.exceptions.verifiedButNotApplied
+      .filter((e) => e.intentId === null)).toHaveLength(0);
+
+    const atc = await fetchReport(tokens.atc);
+    expect(atc.body.report.summary.unattributedVisible).toBe(true);
+    expect(atc.body.report.exceptions.verifiedButNotApplied
+      .filter((e) => e.intentId === null).length).toBeGreaterThan(0);
+  });
+});
+
+describe('sales report keeps the channels apart', () => {
+  it('never merges a manual and a gateway payment of the same method', async () => {
+    const order = await billedOrder();
+    const half = Math.floor(order.totalPaise / 2);
+    // Both legs are OTHER: the test adapter reports no instrument, and a
+    // manual OTHER is the method that would collide with it.
+    await request(app).post(`/api/orders/${order.id}/payments`).set(auth(tokens.cashier))
+      .send({ method: 'OTHER', amount: half / 100 });
+    const intent = await openIntent(order.id);
+    await deliver(succeeded(intent.providerRef, order.totalPaise - half));
+
+    const res = await request(app).get('/api/reports/sales')
+      .query({ from: today(), to: today() }).set(auth(tokens.owner));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const other = res.body.report.byMethod.filter((m) => m.method === 'OTHER');
+    const channels = other.map((m) => m.channel).sort();
+    expect(channels).toEqual(['GATEWAY', 'MANUAL']);
+
+    const byChannel = Object.fromEntries(
+      res.body.report.byChannel.map((c) => [c.channel, c.amount]),
+    );
+    expect(byChannel.GATEWAY).toBeGreaterThan(0);
+    expect(byChannel.MANUAL).toBeGreaterThan(0);
+  });
+
+  function today() {
+    return new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+  }
 });
 
 // Re-imports the module graph under a temporarily altered environment, so the

@@ -584,7 +584,13 @@ describe('sales report', () => {
     const coffee = report.byCategory.find((c) => c.name === 'Coffee');
     expect(coffee.qty).toBeGreaterThanOrEqual(3);
     expect(report.byDay.some((d) => d.date === today)).toBe(true);
-    expect(report.note).toBe('All payments are manual records; gateway payments arrive in a later phase.');
+    // This suite runs with no provider configured, which is the shipped state.
+    expect(report.note).toBe(
+      'All payments are manual records: no payment provider is configured on this deployment.',
+    );
+    expect(report.byChannel).toEqual([
+      expect.objectContaining({ channel: 'MANUAL' }),
+    ]);
   });
 
   it('owner scopes by branch; unknown branch answers 404', async () => {
