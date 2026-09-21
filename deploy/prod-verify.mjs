@@ -28,10 +28,12 @@ const EOT = String.fromCharCode(4); // ctrl-D
 const ETX = String.fromCharCode(3); // ctrl-C
 const DEL = String.fromCharCode(127);
 const BS = String.fromCharCode(8);
+const ESC = String.fromCharCode(27);
 
 let reading = false;
 let pending = null; // { resolve, hidden } — the prompt currently awaiting a line
 let partial = '';
+let escState = 0; // 0 normal · 1 just saw ESC · 2 inside a CSI/SS3 sequence
 const typedAhead = [];
 
 const closeReader = () => {
@@ -55,6 +57,24 @@ const deliver = () => {
 
 function onData(chunk) {
   for (const ch of chunk) {
+    // Swallow terminal escape sequences. In raw mode an arrow key, a function
+    // key or a bracketed paste arrives as ESC-[…-final-byte. Those bytes are
+    // invisible when echoed back, so letting them into the value produces a
+    // field that looks empty on screen but fails validation — which is exactly
+    // how a stray arrow key became "not an email address".
+    if (escState === 1) {
+      escState = ch === '[' || ch === 'O' ? 2 : 0;
+      continue;
+    }
+    if (escState === 2) {
+      const code = ch.charCodeAt(0);
+      if (code >= 0x40 && code <= 0x7e) escState = 0; // final byte ends it
+      continue;
+    }
+    if (ch === ESC) {
+      escState = 1;
+      continue;
+    }
     if (ch === ETX) {
       closeReader();
       process.stdout.write('\n');
@@ -73,6 +93,7 @@ function onData(chunk) {
       }
       continue;
     }
+    if (ch.charCodeAt(0) < 0x20) continue; // any remaining control byte (tab, ctrl-*)
     partial += ch;
     // Echo only while a prompt is live, so a pasted line that arrives early is
     // buffered rather than printed.
@@ -160,7 +181,7 @@ try {
   // credential — so refuse locally and say which field is wrong.
   let token;
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    record('admin sign-in', false, 'field=email: not an email address — nothing was sent');
+    record('admin sign-in', false, `field=email: not an email address (length ${email.length}) — nothing was sent`);
   } else if (password.length === 0) {
     record('admin sign-in', false, 'field=password: empty input — nothing was sent');
   } else {
