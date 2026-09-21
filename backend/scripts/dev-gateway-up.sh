@@ -70,12 +70,39 @@ if [ -n "$MISSING" ]; then
 fi
 
 # --- the provider secrets ----------------------------------------------------
-printf 'Razorpay TEST key id (rzp_test_...): '
-read -rs KEY_ID; echo
-printf 'Razorpay TEST key secret: '
-read -rs KEY_SECRET; echo
-printf 'Webhook secret — the SAME string you put in the Razorpay webhook form: '
-read -rs WH_SECRET; echo
+# Either from the 0600 git-ignored file razorpay-sandbox-setup.sh wrote, or
+# typed here. The file is preferred because a sandbox session is many restarts,
+# and re-typing three secrets every time is what eventually pushes someone into
+# putting them on a command line, where argv and history both keep them.
+SECRETS="$REPO/backend/.secrets/razorpay-sandbox.env"
+if [ -f "$SECRETS" ]; then
+  # Refuse a credential file anyone else can read. On a shared box the mode is
+  # the only thing protecting it, so a loosened mode is a stop, not a warning.
+  PERM="$(stat -c '%a' "$SECRETS")"
+  [ "$PERM" = "600" ] || fail "$SECRETS is mode $PERM, expected 600 — fix it before starting"
+  # Belt and braces: the launcher re-checks what the setup script promised,
+  # because a .gitignore can be edited after the fact.
+  git -C "$REPO" check-ignore -q "$SECRETS" || fail "$SECRETS is visible to git — do not start with it in place"
+
+  # shellcheck source=/dev/null
+  . "$SECRETS"
+  KEY_ID="${POS_GATEWAY_KEY_ID:-}"
+  KEY_SECRET="${POS_GATEWAY_KEY_SECRET:-}"
+  WH_SECRET="${POS_GATEWAY_WEBHOOK_SECRET:-}"
+  [ -n "$KEY_ID" ] && [ -n "$KEY_SECRET" ] && [ -n "$WH_SECRET" ] \
+    || fail "$SECRETS is incomplete — re-run backend/scripts/razorpay-sandbox-setup.sh"
+  echo "PASS: using the stored sandbox credentials (0600, git-ignored)"
+else
+  echo "No stored credentials. To avoid re-typing these on every restart, run"
+  echo "  bash backend/scripts/razorpay-sandbox-setup.sh"
+  echo
+  printf 'Razorpay TEST key id (rzp_test_...): '
+  read -rs KEY_ID; echo
+  printf 'Razorpay TEST key secret: '
+  read -rs KEY_SECRET; echo
+  printf 'Webhook secret — the SAME string you put in the Razorpay webhook form: '
+  read -rs WH_SECRET; echo
+fi
 
 case "$KEY_ID" in
   *_live_*) fail "that is a LIVE key; this script runs sandbox keys only" ;;
@@ -106,7 +133,10 @@ POS_GATEWAY_WEBHOOK_SECRET="$WH_SECRET" \
 LOG_LEVEL=info \
   node src/index.js > "$LOG" 2>&1 &
 BACKEND_PID=$!
+# Out of this shell's memory too. The values above were passed to the one
+# process that needs them; nothing after this line has any use for them.
 unset KEY_ID KEY_SECRET WH_SECRET JWT DSN
+unset POS_GATEWAY_KEY_ID POS_GATEWAY_KEY_SECRET POS_GATEWAY_WEBHOOK_SECRET
 
 trap 'kill "$BACKEND_PID" 2>/dev/null; exit 0' INT TERM
 
