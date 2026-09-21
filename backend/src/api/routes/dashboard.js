@@ -7,9 +7,10 @@ const router = Router();
 
 router.use(requirePosAuth, resolveCompanyScope);
 
-// Foundation dashboard: every figure is a real count from this company's own
-// rows. Sales/billing do not exist yet, so the API says so explicitly instead
-// of inventing numbers.
+// Dashboard: every figure is a real count from this company's own rows.
+// Money is deliberately absent here — the sales report computes it over an
+// explicit date range and branch scope, and a second set of totals on this
+// page would be a second set to reconcile.
 router.get(
   '/summary',
   asyncHandler(async (req, res) => {
@@ -40,7 +41,10 @@ router.get(
             branchesUsed: activeBranches,
           }
         : null,
-      sales: { available: false, note: 'Billing goes live in a later phase' },
+      // `available` describes THIS payload, not the product: selling, payments,
+      // refunds and the sales report are all live. It stays false because the
+      // summary carries no money, and the note says where the money is.
+      sales: { available: false, note: 'Sales figures are in the sales report' },
     });
   }),
 );

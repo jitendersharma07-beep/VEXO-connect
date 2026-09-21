@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Store, Users, BadgeCheck, CalendarClock, ReceiptText } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
+import { canSeeReports } from '../lib/pos.js';
 import {
   PageHeader,
   StatCard,
@@ -130,9 +131,14 @@ export default function Dashboard() {
           </div>
           <h2 className="mt-3 text-sm font-bold text-slate-600">Sales &amp; billing</h2>
           <p className="mt-1 text-xs leading-relaxed text-slate-400">
-            {summary.sales.note}. This panel will show live sales once billing is enabled for your
-            licence — no placeholder numbers are shown here.
+            {summary.sales.note}, over a date range you choose. Nothing is totalled here, so there
+            is only ever one set of figures to reconcile.
           </p>
+          {canSeeReports(user) ? (
+            <Link to="/reports" className="mt-3 text-xs font-semibold text-pos-royal hover:underline">
+              Open the sales report →
+            </Link>
+          ) : null}
         </div>
       </div>
     </div>

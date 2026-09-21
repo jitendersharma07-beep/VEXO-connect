@@ -188,7 +188,11 @@ export default function Layout() {
           <div className="flex items-center gap-1.5 font-bold text-white">
             <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> ATC POS
           </div>
-          Phase 2 — all payments are manual records; gateway payments arrive in a later phase.
+          {/* States what is true of this deployment, not where it sits on a
+              roadmap. Staff record every payment by hand here, and nothing has
+              checked that the money arrived — saying so is the whole point. */}
+          Every payment is recorded by staff at the till. None of them is verified by a payment
+          provider.
         </div>
       </aside>
 
