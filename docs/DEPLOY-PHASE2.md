@@ -399,8 +399,9 @@ backend and frontend containers started 02:56:23.5 UTC. **Observed downtime
 ≈ 13 s**, and Postgres was never recreated (uptime unbroken since 2026-09-20
 16:31), so no database restart was involved.
 
-**Verification that passed.** `deploy/prod-verify.mjs` 8/8 on loopback 8110 and
-8/8 again on `https://atcworkspace.com/pos`; `/pos/api/health` 200. Served
+**Verification that passed.** `deploy/prod-verify.mjs` 8/8 credential-free on
+loopback 8110 and on `https://atcworkspace.com/pos`, then **12/12 once the
+owner supplied the admin password** (see below); `/pos/api/health` 200. Served
 bundle moved `index-DgkiHruI.js` → `index-Blf2w4hP.js` and contains the
 phase-2 marker, so this is not a cached phase-1 build. All 11 phase-2 tables
 exist (19 total) and phase-1 row counts still match the snapshot exactly.
@@ -419,13 +420,25 @@ what makes the result meaningful: it proves the logger does print arbitrary
 header values, so `[REDACTED]` is redaction and not an absent field. `res`
 remains exactly `{"statusCode":…,"contentLength":…}`.
 
-**Still outstanding (both need the owner, neither blocks the release):**
+**The four authenticated checks — CLOSED 2026-09-21.** They prompt for the prod
+ATC-admin password, so the deploying agent could only reach 8/8 credential-free;
+the owner ran them and `https://atcworkspace.com/pos` reports **12/12**, with
+`logout revokes session` confirming server-side revocation.
 
-1. The four authenticated checks in `deploy/prod-verify.mjs` — the script
-   prompts for the prod ATC-admin password interactively, so the deploying
-   agent cannot run them. The eight credential-free checks are the ones
-   reported above.
-2. §5 rotation was **not run, and the evidence says it is not needed**: all
+Getting there took two fixes to the verifier itself, worth recording because the
+symptom pointed at the wrong thing. It reported `HTTP 400` on sign-in for an
+admin whose password worked in a browser. **`/api/auth/login` answers one
+indistinct 401 for every credential failure; its only 400 is a payload the
+schema rejected** — so that 400 was always the client, never the password.
+`98e9f8f`: a fresh readline interface per prompt swallowed type-ahead, `.trim()`
+stripped a password's outer spaces, and failures printed only a status code.
+`f3a6aa9`: raw ESC/CSI bytes from a stray arrow key landed in the email field,
+invisible when echoed, so the field looked untouched while failing validation.
+Failures now name the API's own code, message and field — and nothing else.
+
+**Still outstanding (needs the owner, does not block the release):**
+
+1. §5 rotation was **not run, and the evidence says it is not needed**: all
    four prod accounts carry `PASSWORD_CHANGED` audit rows with `updatedAt`
    between 16:40:39 and 16:42:33 on go-live day, so they no longer hold the dev
    seed passwords that exist in git history. `pos.admin`'s later 20:48:34
