@@ -6,13 +6,20 @@
 // an owner dependency — it needs an account and credentials — and until that
 // happens this module's job is to refuse cleanly rather than to pretend.
 //
-// ADAPTER CONTRACT. A provider is an object with a name and two methods:
+// ADAPTER CONTRACT. A provider is an object with a name and three methods:
 //
 //   createSession({ amountPaise, currency, orderId, idempotencyKey })
 //     -> { providerRef, checkoutUrl }
 //     Opens one attempt to collect amountPaise. Must pass idempotencyKey to
 //     the provider so a retry returns the first attempt instead of opening a
 //     second one the customer could also pay.
+//
+//   createRefund({ intentProviderRef, amountPaise, currency, orderId, idempotencyKey })
+//     -> { providerRef }
+//     Asks the provider to return amountPaise from the payment behind
+//     intentProviderRef. The reference it returns names the REFUND, not the
+//     original payment, and it is a request, not a result: only a later
+//     refund.succeeded webhook may mark the money as actually paid out.
 //
 //   verifyWebhook({ rawBody, headers, secret, toleranceSeconds, nowMs })
 //     -> { valid: true, eventId, kind, providerRef, amountPaise, currency }

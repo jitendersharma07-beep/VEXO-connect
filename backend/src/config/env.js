@@ -29,6 +29,12 @@ export const env = {
   POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS: Number(
     process.env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS || 300,
   ),
+  // API credentials the adapter calls the provider with. Named for the role
+  // they play, not for Razorpay, because the adapter layer is deliberately
+  // provider-independent — swapping providers must not rename the deployment's
+  // variables. The test adapter needs neither: it never leaves the process.
+  POS_GATEWAY_KEY_ID: process.env.POS_GATEWAY_KEY_ID || null,
+  POS_GATEWAY_KEY_SECRET: process.env.POS_GATEWAY_KEY_SECRET || null,
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
@@ -52,6 +58,22 @@ if (env.POS_GATEWAY_WEBHOOK_SECRET && env.POS_GATEWAY_WEBHOOK_SECRET.length < 16
 // distance between "verified by the gateway" and "fake success".
 if (env.NODE_ENV === 'production' && env.POS_GATEWAY_PROVIDER?.startsWith('test')) {
   throw new Error(`Gateway provider "${env.POS_GATEWAY_PROVIDER}" cannot be used in production`);
+}
+// A real provider is reached over the network with an API credential; the test
+// adapter never leaves the process. Missing keys would otherwise surface as a
+// failed charge with the customer already at the counter, so this refuses at
+// boot for the same reason the webhook secret does.
+const realProvider = gatewayEnabled && !env.POS_GATEWAY_PROVIDER.startsWith('test');
+if (realProvider && !(env.POS_GATEWAY_KEY_ID && env.POS_GATEWAY_KEY_SECRET)) {
+  throw new Error(
+    `Gateway provider "${env.POS_GATEWAY_PROVIDER}" needs POS_GATEWAY_KEY_ID and POS_GATEWAY_KEY_SECRET`,
+  );
+}
+// Live keys move real customer money. Outside production a live key is always
+// a paste error, and the cost of noticing late is a genuine charge on somebody's
+// card during a dev run.
+if (env.NODE_ENV !== 'production' && env.POS_GATEWAY_KEY_ID?.includes('_live_')) {
+  throw new Error('POS_GATEWAY_KEY_ID is a live key; dev and test runs must use sandbox keys');
 }
 if (!Number.isFinite(env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS) ||
     env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS <= 0) {

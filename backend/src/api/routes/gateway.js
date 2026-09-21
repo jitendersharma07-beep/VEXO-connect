@@ -116,6 +116,16 @@ router.post(
           intentId: outcome.intentId,
         },
       });
+    } else if (outcome.refundSettled || outcome.refundFailed) {
+      // The refund existed before this event; what changed is whether the
+      // provider actually paid it out, so that is what the audit records.
+      await audit(req, {
+        action: outcome.refundSettled ? 'ORDER_REFUND_SETTLED' : 'ORDER_REFUND_FAILED',
+        entity: 'Order',
+        entityId: outcome.orderId,
+        companyId: outcome.companyId,
+        meta: { channel: 'GATEWAY', provider: adapter.name, refundId: outcome.refundId },
+      });
     } else if (outcome.skippedReason) {
       logger.warn(
         { provider: adapter.name, eventId: verified.eventId, reason: outcome.skippedReason },
@@ -126,7 +136,10 @@ router.post(
     // 200 for every verified delivery, applied or not: it was genuine, and a
     // retry cannot change the outcome. The reason is on the row for the
     // reconciliation report to surface.
-    return res.json({ received: true, applied: Boolean(outcome.payment) });
+    return res.json({
+      received: true,
+      applied: Boolean(outcome.payment || outcome.refundSettled || outcome.refundFailed),
+    });
   }),
 );
 

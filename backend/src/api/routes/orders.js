@@ -8,7 +8,7 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
-import { getAdapter } from '../../lib/gateway/index.js';
+import { getAdapter, gatewayAvailable } from '../../lib/gateway/index.js';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { audit } from '../../lib/audit.js';
 import {
@@ -31,6 +31,12 @@ import {
   publicRefund,
   buildReceipt,
   paiseOf,
+  settledRefundPaise,
+  reservedRefundPaise,
+  refundLegs,
+  pickRefundLeg,
+  largestRefundablePaise,
+  isUnconfirmedGatewayRefund,
   istDayStartUtc,
 } from '../../lib/orders.js';
 
@@ -663,50 +669,257 @@ router.post(
 
 // --- refunds ----------------------------------------------------------------
 
+const REFUND_PAYMENT_INCLUDE = {
+  select: {
+    amount: true,
+    channel: true,
+    intentId: true,
+    intent: { select: { id: true, providerRef: true, provider: true } },
+  },
+};
+
+const REFUND_STATE_SELECT = {
+  select: { amount: true, status: true, channel: true, intentId: true, providerRef: true },
+};
+
+const rupees = (paise) => (paise / 100).toFixed(2);
+
+// Asks the provider to return the money, OUTSIDE any database transaction and
+// always with the key already stored on the row.
+//
+// The three outcomes are not two. Accepted is a providerRef to track. Refused
+// is a provider that answered no. Everything else — timeout, socket reset, a
+// 500, an answer with no reference in it — is UNKNOWN: the request may be
+// paying out this second. Unknown must never be reported as refused, because
+// a refused refund frees its money to be requested again, and doing that to a
+// request that did go through pays the customer twice.
+const sendRefundToProvider = async (refund, intentProviderRef, orderId) => {
+  try {
+    const result = await getAdapter().createRefund({
+      intentProviderRef,
+      amountPaise: paiseOf(refund.amount),
+      currency: 'INR',
+      orderId,
+      idempotencyKey: refund.idempotencyKey,
+    });
+    const providerRef = result?.providerRef ?? null;
+    if (!providerRef) {
+      return { confirmed: false, detail: 'the provider answered without a refund reference' };
+    }
+    return { confirmed: true, providerRef };
+  } catch (err) {
+    return { confirmed: false, detail: err?.message ? String(err.message).slice(0, 200) : 'no answer from the provider' };
+  }
+};
+
+// Records whichever of the two outcomes we actually got. The row already
+// exists and already holds the money either way; this only fills in what the
+// provider told us.
+//
+// A provider that webhooks faster than this UPDATE lands leaves an event that
+// matches no refund. That fails in the safe direction — the event is stored
+// with its reason and counted as a reconciliation exception, and the refund
+// stays visibly unconfirmed rather than being reported as money returned.
+const recordProviderAnswer = async (refundId, answer) =>
+  prisma.refund.update({
+    where: { id: refundId },
+    data: answer.confirmed
+      ? { providerRef: answer.providerRef, failureReason: null }
+      : { failureReason: `provider did not confirm the request: ${answer.detail}` },
+    include: { by: { select: { id: true, fullName: true } } },
+  });
+
 router.post(
   '/:id/refunds',
   ...managerUp,
   asyncHandler(async (req, res) => {
     const body = z.object({ amount: money2, reason: reasonSchema }).parse(req.body);
     const order = await loadOrder(req);
+    const amount = toPaise(body.amount);
 
-    const refund = await prisma.$transaction(async (tx) => {
+    // PHASE 1 — reserve the money locally, and commit, BEFORE the provider is
+    // called. A request that is sent but never answered still holds its amount
+    // here, so an unknown outcome can never become a second refund.
+    const reservation = await prisma.$transaction(async (tx) => {
+      // Serialises every refund on this order. Under READ COMMITTED two
+      // concurrent requests otherwise each read a state with the other's row
+      // invisible, both clear the cap, and both insert — the customer is
+      // refunded twice for one order.
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
       const cur = await tx.order.findUnique({
         where: { id: order.id },
-        include: { payments: { select: { amount: true } }, refunds: { select: { amount: true } } },
+        include: { payments: REFUND_PAYMENT_INCLUDE, refunds: REFUND_STATE_SELECT },
       });
       if (!['BILLED', 'PAID'].includes(cur.status)) {
         throw conflict('Refunds apply to billed or paid orders only');
       }
+
+      // An unanswered request already out with the provider makes every figure
+      // on this order provisional. Raising a second one on top would be
+      // guessing about money that may already have moved.
+      if (cur.refunds.some(isUnconfirmedGatewayRefund)) {
+        throw conflict(
+          'An earlier refund on this order was sent to the payment provider and never confirmed. ' +
+            'Reconcile that request before raising another, or the same money could be returned twice',
+        );
+      }
+
       const collected = cur.payments.reduce((a, p) => a + paiseOf(p.amount), 0);
-      const refunded = cur.refunds.reduce((a, r) => a + paiseOf(r.amount), 0);
-      const amount = toPaise(body.amount);
-      if (amount > collected - refunded) {
+      // Reserved, not settled: a request already in flight with the provider
+      // still holds that money, or the same amount could be asked back twice.
+      if (amount > collected - reservedRefundPaise(cur.refunds)) {
         throw badRequest('Refund exceeds the amount collected', 'amount');
       }
+
+      // Money collected through the provider can only be returned by the
+      // provider, and only out of the charge that took it. Refunding it against
+      // the till would hand back cash the shop never received here.
+      const legs = refundLegs(cur);
+      if (legs.gateway.length > 0 && !gatewayAvailable()) {
+        throw conflict(
+          'This order was paid through a payment provider that is no longer configured; ' +
+            'the refund has to be issued from the provider dashboard and recorded there',
+        );
+      }
+
+      const leg = pickRefundLeg(legs, amount);
+      if (!leg) {
+        // Never split a refund across legs on the operator's behalf: which
+        // part of a mixed payment to return is their decision, not a default.
+        throw badRequest(
+          `This order was paid in more than one part and no single payment has ₹${rupees(amount)} ` +
+            `left to return. The most that can go back on one payment is ₹${rupees(largestRefundablePaise(legs))}. ` +
+            'Refund each payment separately.',
+          'amount',
+        );
+      }
+
+      const viaGateway = leg.channel === 'GATEWAY';
       const created = await tx.refund.create({
         data: {
           orderId: order.id,
-          amount: (amount / 100).toFixed(2),
+          amount: rupees(amount),
           reason: body.reason,
           byId: req.user.id,
+          // PENDING is the whole point: nothing has been returned yet, and
+          // only a signature-verified webhook may say otherwise.
+          channel: viaGateway ? 'GATEWAY' : 'MANUAL',
+          status: viaGateway ? 'PENDING' : 'SUCCEEDED',
+          settledAt: viaGateway ? null : new Date(),
+          intentId: viaGateway ? leg.intentId : null,
+          // Minted here and kept, so a retry is the same request rather than
+          // a second one. providerRef stays null until the provider answers.
+          idempotencyKey: viaGateway ? randomUUID() : null,
+          providerRef: null,
         },
         include: { by: { select: { id: true, fullName: true } } },
       });
-      if (cur.status === 'PAID' && refunded + amount === collected) {
+
+      // Only settled money closes the order. A pending gateway request leaves
+      // it PAID, because as of this instant the customer still has none of it
+      // back and the order has not been unwound.
+      const settled = settledRefundPaise(cur.refunds) + (viaGateway ? 0 : amount);
+      if (cur.status === 'PAID' && settled === collected) {
         await tx.order.update({ where: { id: order.id }, data: { status: 'REFUNDED' } });
       }
-      return created;
+      return { refund: created, leg };
     });
 
+    // PHASE 2 — now ask the provider. The reservation above survives whatever
+    // happens here, including this process dying mid-call.
+    let refund = reservation.refund;
+    let answer = { confirmed: true };
+    if (refund.channel === 'GATEWAY') {
+      answer = await sendRefundToProvider(refund, reservation.leg.intentProviderRef, order.id);
+      refund = await recordProviderAnswer(refund.id, answer);
+    }
+
     await audit(req, {
-      action: 'ORDER_REFUND',
+      action: refund.channel === 'GATEWAY' ? 'ORDER_REFUND_REQUESTED' : 'ORDER_REFUND',
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { amount: String(refund.amount), reason: body.reason },
+      meta: {
+        amount: String(refund.amount),
+        reason: body.reason,
+        channel: refund.channel,
+        status: refund.status,
+        providerConfirmed: refund.channel === 'GATEWAY' ? answer.confirmed : null,
+      },
     });
-    res.status(201).json({ order: await fullOrder(order.id), refund: publicRefund(refund) });
+
+    // 202, not 201: the refund is on record and holding its money, but whether
+    // the provider took it is unknown. Saying 201 would claim it was placed.
+    res.status(answer.confirmed ? 201 : 202).json({
+      order: await fullOrder(order.id),
+      refund: publicRefund(refund),
+      ...(answer.confirmed
+        ? {}
+        : {
+            warning:
+              'The refund was recorded and its amount is held, but the payment provider did not confirm it. ' +
+              'It may still pay out. Reconcile this refund — do not raise a new one.',
+          }),
+    });
+  }),
+);
+
+// Re-sends a refund the provider never confirmed, with THE SAME idempotency
+// key it was first sent under. That is the whole mechanism: a provider that
+// honours the key returns the original refund instead of creating a second,
+// so this is safe to call however many times it takes.
+router.post(
+  '/:id/refunds/:refundId/reconcile',
+  ...managerUp,
+  asyncHandler(async (req, res) => {
+    const order = await loadOrder(req);
+    const existing = await prisma.refund.findFirst({
+      where: { id: req.params.refundId, orderId: order.id },
+      include: { intent: { select: { providerRef: true } } },
+    });
+    if (!existing) throw notFound('Refund not found');
+    if (existing.channel !== 'GATEWAY') {
+      throw conflict('Only a refund issued through the payment provider can be reconciled');
+    }
+    if (existing.status !== 'PENDING') {
+      throw conflict(`This refund is already ${existing.status.toLowerCase()}`);
+    }
+    if (existing.providerRef) {
+      throw conflict('The provider already has this refund; it is waiting for the provider to pay it out');
+    }
+    if (!gatewayAvailable()) {
+      throw conflict(
+        'The payment provider is not configured on this deployment, so this refund cannot be reconciled here',
+      );
+    }
+
+    const answer = await sendRefundToProvider(existing, existing.intent?.providerRef ?? null, order.id);
+    const refund = await recordProviderAnswer(existing.id, answer);
+
+    await audit(req, {
+      action: 'ORDER_REFUND_RECONCILED',
+      entity: 'Order',
+      entityId: order.id,
+      companyId: req.companyScope.id,
+      meta: {
+        refundId: refund.id,
+        amount: String(refund.amount),
+        providerConfirmed: answer.confirmed,
+      },
+    });
+
+    res.status(answer.confirmed ? 200 : 202).json({
+      order: await fullOrder(order.id),
+      refund: publicRefund(refund),
+      ...(answer.confirmed
+        ? {}
+        : {
+            warning:
+              'The provider still did not confirm this refund. Its amount stays held. Try again, ' +
+              'or settle it from the provider dashboard.',
+          }),
+    });
   }),
 );
 
@@ -722,13 +935,19 @@ router.post(
     await prisma.$transaction(async (tx) => {
       const cur = await tx.order.findUnique({
         where: { id: order.id },
-        include: { payments: { select: { amount: true } }, refunds: { select: { amount: true } } },
+        include: {
+          payments: { select: { amount: true } },
+          refunds: { select: { amount: true, status: true } },
+        },
       });
       if (!['OPEN', 'BILLED'].includes(cur.status)) {
         throw conflict('Only open or billed orders can be voided');
       }
       const collected = cur.payments.reduce((a, p) => a + paiseOf(p.amount), 0);
-      const refunded = cur.refunds.reduce((a, r) => a + paiseOf(r.amount), 0);
+      // Settled, not reserved. A gateway refund the provider has not paid out
+      // yet leaves the customer still out of pocket, so voiding here would
+      // close an order that still owes somebody money.
+      const refunded = settledRefundPaise(cur.refunds);
       if (collected - refunded !== 0) {
         throw conflict('Refund recorded payments first; net collected must be zero');
       }

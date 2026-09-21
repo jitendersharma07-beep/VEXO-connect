@@ -8,7 +8,7 @@
 //
 // Runs ONLY against a database whose name ends in _test — it truncates tables.
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 
 if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
@@ -23,7 +23,7 @@ process.env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS = '300';
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
-const { signPayload, SIGNATURE_HEADER } = await import('../src/lib/gateway/testAdapter.js');
+const { signPayload, SIGNATURE_HEADER, testAdapter } = await import('../src/lib/gateway/testAdapter.js');
 
 const app = createApp();
 const SECRET = process.env.POS_GATEWAY_WEBHOOK_SECRET;
@@ -686,5 +686,595 @@ describe('MANUAL and GATEWAY stay distinguishable', () => {
     const gateway = after.body.order.payments.find((p) => p.channel === 'GATEWAY');
     expect(manual.receivedBy).not.toBeNull();
     expect(gateway.receivedBy).toBeNull();
+  });
+});
+
+describe('gateway refunds', () => {
+  // Money the provider collected is returned by the provider, and only its
+  // refund.succeeded webhook may say the customer actually has it back.
+  // Same discipline as payments: asking is not receiving.
+  let rfSeq = 0;
+  const refundEvent = (kind, providerRef, amountPaise) => ({
+    id: `evt_rf_${++rfSeq}_${Date.now()}`,
+    type: kind,
+    data: { providerRef, amountPaise, currency: 'INR' },
+  });
+
+  const gatewayPaid = async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    const res = await deliver(succeeded(intent.providerRef, order.totalPaise));
+    expect(res.body.applied, JSON.stringify(res.body)).toBe(true);
+    return { ...order, intentId: intent.id };
+  };
+
+  const requestRefund = (orderId, rupees, reason = 'customer returned the order') =>
+    request(app).post(`/api/orders/${orderId}/refunds`).set(auth(tokens.owner))
+      .send({ amount: rupees, reason });
+
+  const refundRow = (orderId) =>
+    prisma.refund.findFirst({ where: { orderId }, orderBy: { createdAt: 'desc' } });
+
+  it('sends a refund of gateway money back through the provider and settles nothing yet', async () => {
+    const order = await gatewayPaid();
+    const res = await requestRefund(order.id, order.totalPaise / 100);
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.refund.channel).toBe('GATEWAY');
+    expect(res.body.refund.status).toBe('PENDING');
+    expect(res.body.refund.settledAt).toBeNull();
+
+    // Nothing has moved: the order is still PAID, the money merely reserved.
+    expect(res.body.order.status).toBe('PAID');
+    expect(res.body.order.amountRefunded).toBe(0);
+    expect(Math.round(res.body.order.amountRefundPending * 100)).toBe(order.totalPaise);
+
+    const row = await refundRow(order.id);
+    expect(row.providerRef).toMatch(/^testrf_/);
+    expect(row.intentId).toBe(order.intentId);
+
+    const entry = await prisma.posAuditLog.findFirst({
+      where: { action: 'ORDER_REFUND_REQUESTED', entityId: order.id },
+    });
+    expect(entry).toBeTruthy();
+    expect(entry.meta.status).toBe('PENDING');
+  });
+
+  it('refund.succeeded settles the request, and only then is the order unwound', async () => {
+    const order = await gatewayPaid();
+    await requestRefund(order.id, order.totalPaise / 100);
+    const row = await refundRow(order.id);
+
+    const res = await deliver(refundEvent('refund.succeeded', row.providerRef, order.totalPaise));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.applied).toBe(true);
+
+    const settled = await prisma.refund.findUnique({ where: { id: row.id } });
+    expect(settled.status).toBe('SUCCEEDED');
+    expect(settled.settledAt).not.toBeNull();
+
+    const after = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(after.body.order.status).toBe('REFUNDED');
+    expect(Math.round(after.body.order.amountRefunded * 100)).toBe(order.totalPaise);
+    expect(after.body.order.amountRefundPending).toBe(0);
+
+    const entry = await prisma.posAuditLog.findFirst({
+      where: { action: 'ORDER_REFUND_SETTLED', entityId: order.id },
+    });
+    expect(entry).toBeTruthy();
+    expect(entry.meta.refundId).toBe(row.id);
+  });
+
+  it('refund.failed marks the request failed and frees the money to be requested again', async () => {
+    const order = await gatewayPaid();
+    await requestRefund(order.id, order.totalPaise / 100);
+    const row = await refundRow(order.id);
+
+    const res = await deliver(refundEvent('refund.failed', row.providerRef, order.totalPaise));
+    expect(res.body.applied).toBe(true);
+
+    const failed = await prisma.refund.findUnique({ where: { id: row.id } });
+    expect(failed.status).toBe('FAILED');
+    expect(failed.failureReason).toMatch(/provider reported/i);
+    expect(failed.settledAt).not.toBeNull();
+
+    // The order was never unwound, and a FAILED request reserves nothing —
+    // so the same money may be asked back a second time.
+    const view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.status).toBe('PAID');
+    expect(view.body.order.amountRefunded).toBe(0);
+    expect(view.body.order.amountRefundPending).toBe(0);
+
+    const again = await requestRefund(order.id, order.totalPaise / 100, 'second attempt after failure');
+    expect(again.status, JSON.stringify(again.body)).toBe(201);
+    expect(again.body.refund.status).toBe('PENDING');
+
+    const entry = await prisma.posAuditLog.findFirst({
+      where: { action: 'ORDER_REFUND_FAILED', entityId: order.id },
+    });
+    expect(entry).toBeTruthy();
+  });
+
+  it('refuses to settle a refund for an amount that was never requested', async () => {
+    const order = await gatewayPaid();
+    const half = Math.floor(order.totalPaise / 2);
+    await requestRefund(order.id, half / 100);
+    const row = await refundRow(order.id);
+
+    const res = await deliver(refundEvent('refund.succeeded', row.providerRef, half - 100));
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toBe(false);
+
+    const evt = await prisma.gatewayWebhookEvent.findFirst({
+      where: { intentId: order.intentId, skippedReason: { not: null } },
+      orderBy: { receivedAt: 'desc' },
+    });
+    expect(evt.skippedReason).toBe('refunded amount does not match the request');
+
+    // Change nothing, assert nothing: the request stays open for a human.
+    const untouched = await prisma.refund.findUnique({ where: { id: row.id } });
+    expect(untouched.status).toBe('PENDING');
+    const view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.status).toBe('PAID');
+  });
+
+  it('applies a redelivered settlement exactly once and refuses a fresh event for a settled refund', async () => {
+    const order = await gatewayPaid();
+    await requestRefund(order.id, order.totalPaise / 100);
+    const row = await refundRow(order.id);
+    const event = refundEvent('refund.succeeded', row.providerRef, order.totalPaise);
+
+    const first = await deliver(event);
+    expect(first.body.applied).toBe(true);
+    const second = await deliver(event);
+    expect(second.status).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+
+    const third = await deliver(refundEvent('refund.succeeded', row.providerRef, order.totalPaise));
+    expect(third.body.applied).toBe(false);
+    const evt = await prisma.gatewayWebhookEvent.findFirst({
+      where: { skippedReason: 'refund already succeeded' },
+      orderBy: { receivedAt: 'desc' },
+    });
+    expect(evt).toBeTruthy();
+
+    const after = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(after.body.order.status).toBe('REFUNDED');
+    expect(after.body.order.refunds.filter((r) => r.status === 'SUCCEEDED')).toHaveLength(1);
+  });
+
+  it('records a verified refund event that matches no refund without applying it', async () => {
+    const res = await deliver(refundEvent('refund.succeeded', 'testrf_no_such_reference', 4200));
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toBe(false);
+    const evt = await prisma.gatewayWebhookEvent.findFirst({
+      where: { skippedReason: 'no refund matches this provider reference' },
+      orderBy: { receivedAt: 'desc' },
+    });
+    expect(evt).toBeTruthy();
+  });
+
+  it('a partial settlement never unwinds the order; the remainder completes it', async () => {
+    const order = await gatewayPaid();
+    const half = Math.floor(order.totalPaise / 2);
+
+    await requestRefund(order.id, half / 100, 'half back first');
+    const firstRow = await refundRow(order.id);
+    await deliver(refundEvent('refund.succeeded', firstRow.providerRef, half));
+
+    let view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.status).toBe('PAID');
+    expect(Math.round(view.body.order.amountRefunded * 100)).toBe(half);
+
+    const rest = order.totalPaise - half;
+    await requestRefund(order.id, rest / 100, 'and the remainder');
+    const secondRow = await refundRow(order.id);
+    expect(secondRow.id).not.toBe(firstRow.id);
+    await deliver(refundEvent('refund.succeeded', secondRow.providerRef, rest));
+
+    view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.status).toBe('REFUNDED');
+    expect(Math.round(view.body.order.amountRefunded * 100)).toBe(order.totalPaise);
+  });
+
+  // Half in cash, half through the provider. Two pools, and a refund has to
+  // come out of the one that actually took the money.
+  const mixedOrder = async () => {
+    const order = await billedOrder();
+    const cash = Math.floor(order.totalPaise / 2);
+    const card = order.totalPaise - cash;
+    await request(app).post(`/api/orders/${order.id}/payments`).set(auth(tokens.cashier))
+      .send({ method: 'CASH', amount: cash / 100 });
+    const intent = await openIntent(order.id);
+    await deliver(succeeded(intent.providerRef, card));
+    return { ...order, cash, card, intentId: intent.id, intentProviderRef: intent.providerRef };
+  };
+
+  it('refuses a refund that no single payment can cover, rather than guessing a split', async () => {
+    const order = await mixedOrder();
+
+    // The whole total exceeds either leg. Routing it to the provider would ask
+    // for more than the provider ever took; routing it to the till would hand
+    // back cash the shop never held. Both are wrong, so neither is chosen.
+    const res = await requestRefund(order.id, order.totalPaise / 100, 'full refund across both legs');
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error.field).toBe('amount');
+    expect(res.body.error.message).toMatch(/more than one part/i);
+    expect(res.body.error.message).toMatch(/Refund each payment separately/i);
+    // It names the largest single refund that WOULD work, so the operator is
+    // told what to do rather than left guessing.
+    expect(res.body.error.message).toContain(`₹${(order.card / 100).toFixed(2)}`);
+
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('ties each leg of a mixed order to the payment that took the money', async () => {
+    const order = await mixedOrder();
+
+    // The provider leg goes back to the provider, against that intent, and
+    // waits for confirmation.
+    const viaGateway = await requestRefund(order.id, order.card / 100, 'card share back');
+    expect(viaGateway.status, JSON.stringify(viaGateway.body)).toBe(201);
+    expect(viaGateway.body.refund.channel).toBe('GATEWAY');
+    expect(viaGateway.body.refund.status).toBe('PENDING');
+    const gwRow = await prisma.refund.findFirst({ where: { orderId: order.id, channel: 'GATEWAY' } });
+    expect(gwRow.intentId).toBe(order.intentId);
+
+    // The cash leg is handed over the counter and is done on the spot. It is
+    // NOT attached to the intent — that money never went through the provider.
+    const viaTill = await requestRefund(order.id, order.cash / 100, 'cash share back');
+    expect(viaTill.status, JSON.stringify(viaTill.body)).toBe(201);
+    expect(viaTill.body.refund.channel).toBe('MANUAL');
+    expect(viaTill.body.refund.status).toBe('SUCCEEDED');
+    const cashRow = await prisma.refund.findFirst({ where: { orderId: order.id, channel: 'MANUAL' } });
+    expect(cashRow.intentId).toBeNull();
+    expect(cashRow.providerRef).toBeNull();
+    expect(cashRow.idempotencyKey).toBeNull();
+
+    // Only the cash is back so far, and the order is not unwound while the
+    // provider still owes its share.
+    let view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(Math.round(view.body.order.amountRefunded * 100)).toBe(order.cash);
+    expect(Math.round(view.body.order.amountRefundPending * 100)).toBe(order.card);
+    expect(view.body.order.status).toBe('PAID');
+
+    // Both legs are now fully spoken for, so nothing more can be asked back.
+    const excess = await requestRefund(order.id, 0.01, 'one paisa too many');
+    expect(excess.status, JSON.stringify(excess.body)).toBe(400);
+    expect(excess.body.error.message).toMatch(/exceeds the amount collected/i);
+
+    await deliver(refundEvent('refund.succeeded', gwRow.providerRef, order.card));
+    view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.status).toBe('REFUNDED');
+    expect(Math.round(view.body.order.amountRefunded * 100)).toBe(order.totalPaise);
+  });
+
+  it('will not refund a leg twice over, even when the order as a whole has room', async () => {
+    const order = await mixedOrder();
+
+    const first = await requestRefund(order.id, order.card / 100, 'card share back');
+    expect(first.status).toBe(201);
+    expect(first.body.refund.channel).toBe('GATEWAY');
+
+    // The order still has the cash leg outstanding, so the TOTAL cap would
+    // allow this. The per-leg cap is what stops the provider being asked to
+    // return the card payment a second time; without it the customer is paid
+    // the card amount twice and the till is never touched.
+    const second = await requestRefund(order.id, order.card / 100, 'and again');
+    if (second.status === 201) {
+      expect(second.body.refund.channel, 'the card leg was refunded twice').toBe('MANUAL');
+    }
+    const gatewayRefunds = await prisma.refund.findMany({
+      where: { orderId: order.id, channel: 'GATEWAY' },
+    });
+    const gatewayTotal = gatewayRefunds.reduce((a, r) => a + Math.round(Number(r.amount) * 100), 0);
+    expect(gatewayTotal).toBeLessThanOrEqual(order.card);
+  });
+
+  it('refuses to refund provider-collected money once the provider is gone', async () => {
+    const order = await gatewayPaid();
+    await withEnv({ POS_GATEWAY_PROVIDER: undefined, POS_GATEWAY_WEBHOOK_SECRET: undefined }, async () => {
+      const { createApp: createBare } = await import('../src/app.js');
+      const bare = createBare();
+      const signIn = await request(bare).post('/api/auth/login')
+        .send({ email: 'owner.g@test.local', password: PW });
+      const res = await request(bare).post(`/api/orders/${order.id}/refunds`)
+        .set(auth(signIn.body.token))
+        .send({ amount: order.totalPaise / 100, reason: 'attempt with no provider' });
+      // Refunding it against the till would hand back cash the shop never
+      // received, so the route refuses and points at the provider dashboard.
+      expect(res.status).toBe(409);
+      expect(res.body.error.message).toMatch(/no longer configured/i);
+      expect(res.body.error.message).toMatch(/provider dashboard/i);
+    });
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('refuses a refund on another company\'s order, indistinguishably from one that does not exist', async () => {
+    const ours = await gatewayPaid();
+    const absent = 'ckzzzzzzzzzzzzzzzzzzzzzzz';
+
+    // The other tenant's owner is a real, fully privileged user — just not
+    // here. The answer must carry no signal that this order exists at all.
+    const cross = await request(app).post(`/api/orders/${ours.id}/refunds`)
+      .set(auth(other.ownerToken)).send({ amount: 1, reason: 'not mine to refund' });
+    const missing = await request(app).post(`/api/orders/${absent}/refunds`)
+      .set(auth(other.ownerToken)).send({ amount: 1, reason: 'no such order' });
+
+    expect(cross.status).toBe(404);
+    expect(cross.body).toEqual(missing.body);
+    expect(await prisma.refund.count({ where: { orderId: ours.id } })).toBe(0);
+
+    // Reconcile is a second door onto the same money; it must be locked too.
+    await requestRefund(ours.id, ours.totalPaise / 100);
+    const row = await refundRow(ours.id);
+    const crossReconcile = await request(app)
+      .post(`/api/orders/${ours.id}/refunds/${row.id}/reconcile`)
+      .set(auth(other.ownerToken)).send({});
+    expect(crossReconcile.status).toBe(404);
+  });
+});
+
+// The provider is asked over a network, and a network can decline to answer.
+// "No answer" is not "no refund": the request may be paying out this second.
+describe('a refund whose outcome the provider never reported', () => {
+  let rfSeq = 0;
+  const refundEvent = (kind, providerRef, amountPaise) => ({
+    id: `evt_unk_${++rfSeq}_${Date.now()}`,
+    type: kind,
+    data: { providerRef, amountPaise, currency: 'INR' },
+  });
+
+  const gatewayPaid = async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    const res = await deliver(succeeded(intent.providerRef, order.totalPaise));
+    expect(res.body.applied, JSON.stringify(res.body)).toBe(true);
+    return { ...order, intentId: intent.id };
+  };
+
+  const requestRefund = (orderId, rupees, reason = 'customer returned the order') =>
+    request(app).post(`/api/orders/${orderId}/refunds`).set(auth(tokens.owner))
+      .send({ amount: rupees, reason });
+
+  const refundRow = (orderId) =>
+    prisma.refund.findFirst({ where: { orderId }, orderBy: { createdAt: 'desc' } });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('holds the money and records the request when the provider times out', async () => {
+    const order = await gatewayPaid();
+    vi.spyOn(testAdapter, 'createRefund').mockRejectedValue(new Error('socket hang up'));
+
+    const res = await requestRefund(order.id, order.totalPaise / 100);
+    // 202, not 201 and not 5xx. The refund is on record; whether the provider
+    // took it is unknown, and neither "created" nor "failed" would be true.
+    expect(res.status, JSON.stringify(res.body)).toBe(202);
+    expect(res.body.warning).toMatch(/did not confirm/i);
+    expect(res.body.warning).toMatch(/do not raise a new one/i);
+
+    // The row EXISTS. This is the whole point: a rolled-back transaction here
+    // would leave the provider possibly paying out with nothing on our side.
+    const row = await refundRow(order.id);
+    expect(row).toBeTruthy();
+    expect(row.status).toBe('PENDING');
+    expect(row.providerRef).toBeNull();
+    expect(row.idempotencyKey).toBeTruthy();
+    expect(row.failureReason).toMatch(/socket hang up/);
+
+    // And it holds its amount, so nothing further can be requested back.
+    const view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.amountRefunded).toBe(0);
+    expect(Math.round(view.body.order.amountRefundPending * 100)).toBe(order.totalPaise);
+    expect(view.body.order.status).toBe('PAID');
+    expect(view.body.order.refunds[0].providerConfirmed).toBe(false);
+    expect(view.body.order.refunds[0].label).toMatch(/awaiting confirmation/i);
+  });
+
+  it('refuses to raise a second refund while one is unconfirmed', async () => {
+    const order = await gatewayPaid();
+    vi.spyOn(testAdapter, 'createRefund').mockRejectedValue(new Error('gateway timeout'));
+    expect((await requestRefund(order.id, 1)).status).toBe(202);
+    vi.restoreAllMocks();
+
+    // There is plenty of room under the cap, so only the unconfirmed request
+    // itself is what stops this. Raising another would be guessing about
+    // money that may already have moved.
+    const second = await requestRefund(order.id, 1, 'try again the wrong way');
+    expect(second.status, JSON.stringify(second.body)).toBe(409);
+    expect(second.body.error.message).toMatch(/never confirmed/i);
+    expect(second.body.error.message).toMatch(/Reconcile/i);
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(1);
+  });
+
+  it('reconciles with the ORIGINAL idempotency key, so the provider sees one refund', async () => {
+    const order = await gatewayPaid();
+    const sent = [];
+    const spy = vi.spyOn(testAdapter, 'createRefund');
+    spy.mockImplementation(async (args) => {
+      sent.push(args);
+      throw new Error('no answer from upstream');
+    });
+
+    const first = await requestRefund(order.id, order.totalPaise / 100);
+    expect(first.status).toBe(202);
+    const row = await refundRow(order.id);
+    const key = row.idempotencyKey;
+
+    // Now the provider is reachable again. It derives its reference from the
+    // key, exactly as a provider honouring idempotency does — so the same key
+    // yielding the same reference is what "one refund, not two" looks like.
+    spy.mockRestore();
+    const realSpy = vi.spyOn(testAdapter, 'createRefund');
+    realSpy.mockImplementation(async (args) => {
+      sent.push(args);
+      return { providerRef: `testrf_${args.idempotencyKey.slice(0, 16)}` };
+    });
+
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    // THE key assertion: the retry carried the same key as the first attempt.
+    // A fresh key here is a second refund and a second payout.
+    expect(sent).toHaveLength(2);
+    expect(sent[1].idempotencyKey).toBe(key);
+    expect(sent[1].amountPaise).toBe(order.totalPaise);
+
+    // Still one row, now confirmed, still PENDING until the webhook lands.
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(1);
+    const after = await prisma.refund.findUnique({ where: { id: row.id } });
+    expect(after.idempotencyKey).toBe(key);
+    expect(after.providerRef).toBeTruthy();
+    expect(after.status).toBe('PENDING');
+    expect(after.failureReason).toBeNull();
+
+    // And it is the confirmed reference the webhook settles against.
+    realSpy.mockRestore();
+    await deliver(refundEvent('refund.succeeded', after.providerRef, order.totalPaise));
+    const settled = await prisma.refund.findUnique({ where: { id: row.id } });
+    expect(settled.status).toBe('SUCCEEDED');
+    const view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(view.body.order.status).toBe('REFUNDED');
+    expect(Math.round(view.body.order.amountRefunded * 100)).toBe(order.totalPaise);
+  });
+
+  it('keeps holding the money when reconciliation also gets no answer', async () => {
+    const order = await gatewayPaid();
+    vi.spyOn(testAdapter, 'createRefund').mockRejectedValue(new Error('still nothing'));
+    await requestRefund(order.id, order.totalPaise / 100);
+    const row = await refundRow(order.id);
+
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(res.status).toBe(202);
+    expect(res.body.warning).toMatch(/still did not confirm/i);
+
+    const after = await prisma.refund.findUnique({ where: { id: row.id } });
+    expect(after.status).toBe('PENDING');
+    expect(after.providerRef).toBeNull();
+    expect(after.idempotencyKey).toBe(row.idempotencyKey);
+    const view = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.cashier));
+    expect(Math.round(view.body.order.amountRefundPending * 100)).toBe(order.totalPaise);
+  });
+
+  it('will not reconcile a refund the provider already has, or one already settled', async () => {
+    const order = await gatewayPaid();
+    await requestRefund(order.id, order.totalPaise / 100);
+    const row = await refundRow(order.id);
+    expect(row.providerRef).toBeTruthy();
+
+    const confirmed = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(confirmed.status).toBe(409);
+    expect(confirmed.body.error.message).toMatch(/already has this refund/i);
+
+    await deliver(refundEvent('refund.succeeded', row.providerRef, order.totalPaise));
+    const settled = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(settled.status).toBe(409);
+    expect(settled.body.error.message).toMatch(/already succeeded/i);
+  });
+
+  it('surfaces an unconfirmed refund apart from one the provider has accepted', async () => {
+    // Delta-based: earlier tests in this file leave their own pending refunds
+    // behind, so absolute counts would assert on unrelated residue.
+    const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+    const fetchReport = async () => {
+      const res = await request(app).get('/api/reports/gateway-reconciliation')
+        .query({ from: today, to: today })
+        .set(auth(tokens.owner));
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      return res.body.report;
+    };
+    const before = await fetchReport();
+
+    const unknown = await gatewayPaid();
+    vi.spyOn(testAdapter, 'createRefund').mockRejectedValue(new Error('no answer'));
+    await requestRefund(unknown.id, unknown.totalPaise / 100);
+    vi.restoreAllMocks();
+
+    const accepted = await gatewayPaid();
+    await requestRefund(accepted.id, accepted.totalPaise / 100);
+
+    const after = await fetchReport();
+
+    // Two different problems. Lumping them together would hide the one that
+    // must never be retried as a fresh refund.
+    expect(after.summary.refundsUnconfirmedByProvider - before.summary.refundsUnconfirmedByProvider).toBe(1);
+    expect(after.summary.refundsAwaitingProvider - before.summary.refundsAwaitingProvider).toBe(1);
+
+    const newly = (key, prev) => {
+      const seen = new Set(prev.exceptions[key].map((r) => r.refundId));
+      return after.exceptions[key].filter((r) => !seen.has(r.refundId));
+    };
+    const newUnconfirmed = newly('refundsUnconfirmedByProvider', before);
+    const newAwaiting = newly('refundsAwaitingProvider', before);
+    expect(newUnconfirmed.map((r) => r.orderId)).toEqual([unknown.id]);
+    expect(newAwaiting.map((r) => r.orderId)).toEqual([accepted.id]);
+    expect(newUnconfirmed[0].failureReason).toMatch(/did not confirm/i);
+  });
+});
+
+// Two cashiers, one order, the same instant. The cap is only a cap if it
+// survives that; a check-then-insert with no lock is not one.
+describe('refunds under concurrency', () => {
+  const gatewayPaid = async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await deliver(succeeded(intent.providerRef, order.totalPaise));
+    return order;
+  };
+
+  const fire = (orderId, rupees, reason) =>
+    request(app).post(`/api/orders/${orderId}/refunds`).set(auth(tokens.owner))
+      .send({ amount: rupees, reason });
+
+  it('never reserves more than was collected, however simultaneous the requests', async () => {
+    const order = await gatewayPaid();
+    const full = order.totalPaise / 100;
+
+    // Both ask for the whole amount at once. Exactly one may win.
+    const results = await Promise.all([
+      fire(order.id, full, 'first cashier'),
+      fire(order.id, full, 'second cashier'),
+    ]);
+
+    const created = results.filter((r) => r.status === 201 || r.status === 202);
+    expect(created).toHaveLength(1);
+    const refused = results.find((r) => r.status >= 400);
+    // Either refusal is correct. Whichever transaction loses the row lock
+    // sees the winner's row — as a cap breach if the winner had already been
+    // confirmed by the provider, or as an unconfirmed request still in
+    // flight if it had not. Both refuse; neither over-refunds.
+    expect(refused.body.error.message).toMatch(/exceeds the amount collected|never confirmed/i);
+
+    const rows = await prisma.refund.findMany({ where: { orderId: order.id } });
+    expect(rows).toHaveLength(1);
+    const reserved = rows.reduce((a, r) => a + Math.round(Number(r.amount) * 100), 0);
+    expect(reserved).toBe(order.totalPaise);
+  });
+
+  it('holds the cap across many partial requests fired together', async () => {
+    const order = await gatewayPaid();
+    // Six requests for a quarter each: at most four can fit.
+    const quarter = Math.floor(order.totalPaise / 4);
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, i) => fire(order.id, quarter / 100, `slice ${i}`)),
+    );
+
+    const accepted = results.filter((r) => r.status === 201 || r.status === 202);
+    const rows = await prisma.refund.findMany({ where: { orderId: order.id } });
+    expect(rows).toHaveLength(accepted.length);
+
+    const reserved = rows.reduce((a, r) => a + Math.round(Number(r.amount) * 100), 0);
+    // The invariant, stated as money rather than as a count: the shop can
+    // never owe back more than it took.
+    expect(reserved).toBeLessThanOrEqual(order.totalPaise);
+    expect(accepted.length).toBeLessThanOrEqual(4);
+    expect(accepted.length).toBeGreaterThan(0);
   });
 });

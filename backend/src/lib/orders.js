@@ -6,6 +6,26 @@
 import { toPaise, toRupees, pctToMilli, computeOrderTotals } from './money.js';
 
 export const MANUAL_PAYMENT_LABEL = 'MANUAL PAYMENT RECORD — not gateway-verified';
+export const GATEWAY_PAYMENT_LABEL = 'GATEWAY PAYMENT — confirmed by the provider';
+
+// Printed on the customer's receipt, so it has to be true of the payment in
+// front of it. Printing the manual label on a gateway-settled payment would
+// tell the customer in writing that verified money was not verified.
+export const paymentLabelFor = (channel) =>
+  channel === 'GATEWAY' ? GATEWAY_PAYMENT_LABEL : MANUAL_PAYMENT_LABEL;
+
+// The same rule for refunds, where getting it wrong is worse: telling a
+// customer their money is back when the provider has not sent it is the one
+// statement this system must never make.
+export const refundLabelFor = (r) => {
+  if (r.channel !== 'GATEWAY') return 'REFUND HANDED BACK — recorded by staff';
+  if (r.status === 'SUCCEEDED') return 'REFUND PAID OUT — confirmed by the provider';
+  if (r.status === 'FAILED') return 'REFUND FAILED — the provider did not pay this out';
+  // Sent, but the provider never answered. Saying "requested" here would claim
+  // more than is known, and the customer may in fact already have the money.
+  if (!r.providerRef) return 'REFUND SENT — awaiting confirmation from the provider';
+  return 'REFUND REQUESTED — not yet paid out by the provider';
+};
 
 export const IST_OFFSET_MS = 330 * 60 * 1000;
 export const istDayStartUtc = (yyyyMmDd) => new Date(`${yyyyMmDd}T00:00:00.000+05:30`);
@@ -144,13 +164,93 @@ export const publicRefund = (r) => ({
   id: r.id,
   amount: num(r.amount),
   reason: r.reason,
+  channel: r.channel,
+  status: r.status,
+  failureReason: r.failureReason,
+  // Whether the provider acknowledged the request at all. A PENDING refund
+  // that is not acknowledged is in an unknown state, not a queued one, and
+  // the two must not read alike on screen.
+  providerConfirmed: r.channel === 'GATEWAY' ? Boolean(r.providerRef) : null,
+  label: refundLabelFor(r),
   by: r.by ? { id: r.by.id, fullName: r.by.fullName } : null,
   createdAt: r.createdAt,
+  settledAt: r.settledAt ?? null,
 });
+
+// Two different sums, and confusing them is how a gateway refund would be
+// reported as money returned before the provider moved any.
+//
+//   settled  — the provider paid it out, or a person handed the cash back.
+//              This is the only figure that may be shown as "refunded".
+//   reserved — settled plus still-pending requests. This is the figure the
+//              cap is checked against, so the same money cannot be requested
+//              back twice while the first request is in flight.
+export const settledRefundPaise = (refunds) =>
+  refunds.filter((r) => r.status === 'SUCCEEDED').reduce((a, r) => a + paiseOf(r.amount), 0);
+
+export const reservedRefundPaise = (refunds) =>
+  refunds
+    .filter((r) => r.status === 'SUCCEEDED' || r.status === 'PENDING')
+    .reduce((a, r) => a + paiseOf(r.amount), 0);
+
+const holdsMoney = (r) => r.status === 'SUCCEEDED' || r.status === 'PENDING';
+
+// A refund has to come back out of the leg that took the money in. Provider-
+// collected money can only be returned by the provider, and cash can only be
+// handed back from the till, so an order paid in two parts has two separate
+// pools — each capped by what that part actually collected. Netting them into
+// one figure is how a ₹500 refund gets sent against a ₹250 charge.
+//
+// Every gateway payment is its own leg, keyed by intent, because two intents
+// on one order are two distinct charges the provider knows separately.
+export const refundLegs = (order) => {
+  const held = (pred) =>
+    order.refunds.filter((r) => holdsMoney(r) && pred(r)).reduce((a, r) => a + paiseOf(r.amount), 0);
+
+  const gateway = order.payments
+    .filter((p) => p.channel === 'GATEWAY' && p.intentId && p.intent?.providerRef)
+    .map((p) => ({
+      channel: 'GATEWAY',
+      intentId: p.intentId,
+      intentProviderRef: p.intent.providerRef,
+      available: paiseOf(p.amount) - held((r) => r.intentId === p.intentId),
+    }));
+
+  const manualCollected = order.payments
+    .filter((p) => p.channel !== 'GATEWAY')
+    .reduce((a, p) => a + paiseOf(p.amount), 0);
+
+  const manual = {
+    channel: 'MANUAL',
+    intentId: null,
+    intentProviderRef: null,
+    available: manualCollected - held((r) => r.channel === 'MANUAL'),
+  };
+
+  return { gateway, manual };
+};
+
+// Provider money first: it is the leg that cannot be settled across the
+// counter, so leaving it for last would strand it. Returns null when no single
+// leg can cover the amount — the caller must refuse rather than split the
+// request across legs on the customer's behalf.
+export const pickRefundLeg = (legs, amountPaise) =>
+  legs.gateway.find((l) => l.available >= amountPaise) ??
+  (legs.manual.available >= amountPaise ? legs.manual : null);
+
+export const largestRefundablePaise = (legs) =>
+  Math.max(0, legs.manual.available, ...legs.gateway.map((l) => l.available));
+
+// Reserved here, never confirmed by the provider. The request may already be
+// paying out, so it keeps holding its amount and must be reconciled with its
+// original idempotency key rather than raised again.
+export const isUnconfirmedGatewayRefund = (r) =>
+  r.channel === 'GATEWAY' && r.status === 'PENDING' && !r.providerRef;
 
 export const serializeOrder = (o) => {
   const collected = o.payments.reduce((a, p) => a + paiseOf(p.amount), 0);
-  const refunded = o.refunds.reduce((a, r) => a + paiseOf(r.amount), 0);
+  const refunded = settledRefundPaise(o.refunds);
+  const refundPending = reservedRefundPaise(o.refunds) - refunded;
   const total = paiseOf(o.total);
   return {
     id: o.id,
@@ -173,6 +273,9 @@ export const serializeOrder = (o) => {
     amountPaid: toRupees(collected),
     amountDue: o.status === 'VOID' ? 0 : toRupees(Math.max(0, total - collected)),
     amountRefunded: toRupees(refunded),
+    // Requested from the provider and not yet paid out. Kept apart from
+    // amountRefunded so no screen can add the two together by accident.
+    amountRefundPending: toRupees(refundPending),
     openedBy: o.openedBy,
     note: o.note,
     createdAt: o.createdAt,
@@ -250,13 +353,26 @@ export const buildReceipt = (company, branch, o) => {
     total: num(o.total),
     payments: o.payments.map((p) => ({
       method: p.method,
+      channel: p.channel,
       amount: num(p.amount),
       tendered: p.tendered === null ? null : num(p.tendered),
       changeDue: p.tendered === null ? null : toRupees(paiseOf(p.tendered) - paiseOf(p.amount)),
-      label: MANUAL_PAYMENT_LABEL,
+      label: paymentLabelFor(p.channel),
     })),
     amountPaid: toRupees(collected),
     amountDue: toRupees(Math.max(0, total - collected)),
-    refunds: o.refunds.map((r) => ({ amount: num(r.amount), reason: r.reason, createdAt: r.createdAt })),
+    // A pending gateway refund is printed as REQUESTED, never as a refund.
+    // The customer is holding this paper as evidence of what happened to their
+    // money, so it must not say returned when nothing has been returned yet.
+    refunds: o.refunds
+      .filter((r) => r.status !== 'FAILED')
+      .map((r) => ({
+        amount: num(r.amount),
+        reason: r.reason,
+        status: r.status,
+        channel: r.channel,
+        label: refundLabelFor(r),
+        createdAt: r.createdAt,
+      })),
   };
 };

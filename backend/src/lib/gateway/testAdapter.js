@@ -31,6 +31,16 @@ export const testAdapter = {
     };
   },
 
+  // Asks the provider to return money. It returns a reference, NOT a result:
+  // a real provider queues the payout and confirms later by webhook, and
+  // pretending otherwise here is exactly the fake success this codebase
+  // refuses to ship.
+  async createRefund({ idempotencyKey }) {
+    return {
+      providerRef: `testrf_${hmacHex('atc-pos-test-adapter-refund', idempotencyKey).slice(0, 22)}`,
+    };
+  },
+
   verifyWebhook({ rawBody, headers, secret, toleranceSeconds, nowMs }) {
     const parsed = parseSignatureHeader(headers?.[SIGNATURE_HEADER]);
     if (!parsed) return { valid: false, reason: 'signature header missing or malformed' };

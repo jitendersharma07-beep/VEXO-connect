@@ -7,9 +7,12 @@ const router = Router();
 
 router.use(requirePosAuth, resolveCompanyScope);
 
-// Foundation dashboard: every figure is a real count from this company's own
-// rows. Sales/billing do not exist yet, so the API says so explicitly instead
-// of inventing numbers.
+// Dashboard: every figure is a real count from this company's own rows. The
+// sales card deliberately carries no numbers: money is computed server-side by
+// the Sales report (/api/reports/sales), and this summary must never invent or
+// approximate it. The note describes the rule rather than the current mix of
+// channels, so it cannot go stale the first time an order is settled by a
+// provider instead of by hand.
 router.get(
   '/summary',
   asyncHandler(async (req, res) => {
@@ -40,7 +43,13 @@ router.get(
             branchesUsed: activeBranches,
           }
         : null,
-      sales: { available: false, note: 'Billing goes live in a later phase' },
+      // `available` describes THIS payload, not the product: selling, payments,
+      // refunds and the sales report are all live. It stays false because the
+      // summary carries no money, and the note says where the money is.
+      sales: {
+        available: false,
+        note: 'Billing is live — every payment shows whether staff recorded it or the provider confirmed it',
+      },
     });
   }),
 );

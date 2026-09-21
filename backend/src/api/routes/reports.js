@@ -68,8 +68,11 @@ router.get(
         where: { createdAt: window, order: { companyId, ...branchWhere } },
         select: { amount: true, method: true, channel: true, createdAt: true },
       }),
+      // SUCCEEDED only. A gateway refund the provider has not paid out yet is
+      // not money that left the business, and totalling it here would
+      // under-report takings by an amount nobody has actually returned.
       prisma.refund.findMany({
-        where: { createdAt: window, order: { companyId, ...branchWhere } },
+        where: { createdAt: window, status: 'SUCCEEDED', order: { companyId, ...branchWhere } },
         select: { amount: true, createdAt: true },
       }),
     ]);
@@ -217,8 +220,17 @@ router.get(
     const window = { gte: fromUtc, lt: toExcl };
     const isAtc = req.user.role === 'POS_SUPER_ADMIN';
 
-    const [openIntents, settledIntents, orphanPayments, skippedEvents, unprocessed, rejections] =
-      await Promise.all([
+    const [
+      openIntents,
+      settledIntents,
+      orphanPayments,
+      skippedEvents,
+      unprocessed,
+      rejections,
+      pendingRefunds,
+      unconfirmedRefunds,
+      failedRefunds,
+    ] = await Promise.all([
         // Asked for, never answered. The customer may have paid and the
         // delivery never arrived, so these are the ones to chase.
         prisma.paymentIntent.findMany({
@@ -272,6 +284,46 @@ router.get(
         isAtc
           ? prisma.posAuditLog.count({ where: { action: 'GATEWAY_WEBHOOK_REJECTED', at: window } })
           : null,
+        // Money the customer was promised back and has not received. These are
+        // the ones that turn into complaints, so they are exceptions from the
+        // moment they are raised, not only once they age.
+        //
+        // providerRef set: the provider has the request and owes the payout.
+        prisma.refund.findMany({
+          where: {
+            createdAt: window,
+            channel: 'GATEWAY',
+            status: 'PENDING',
+            providerRef: { not: null },
+            order: orderScope,
+          },
+          include: { order: { select: { id: true, invoiceNumber: true } } },
+          orderBy: { createdAt: 'asc' },
+          take: 200,
+        }),
+        // providerRef null: the request went out and nothing came back, so
+        // nobody knows whether this money is moving. Worse than pending and
+        // listed apart from it — these need a human and the same idempotency
+        // key, never a fresh refund.
+        prisma.refund.findMany({
+          where: {
+            createdAt: window,
+            channel: 'GATEWAY',
+            status: 'PENDING',
+            providerRef: null,
+            order: orderScope,
+          },
+          include: { order: { select: { id: true, invoiceNumber: true } } },
+          orderBy: { createdAt: 'asc' },
+          take: 200,
+        }),
+        // The provider declined to pay it out. The customer is still owed.
+        prisma.refund.findMany({
+          where: { createdAt: window, channel: 'GATEWAY', status: 'FAILED', order: orderScope },
+          include: { order: { select: { id: true, invoiceNumber: true } } },
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+        }),
       ]);
 
     const settledWithoutPayment = settledIntents.filter((i) => !i.payment);
@@ -291,7 +343,20 @@ router.get(
       orphanPayments.length +
       amountMismatches.length +
       skippedEvents.length +
-      unprocessed;
+      unprocessed +
+      pendingRefunds.length +
+      unconfirmedRefunds.length +
+      failedRefunds.length;
+
+    const refundRow = (r) => ({
+      refundId: r.id,
+      orderId: r.orderId,
+      invoiceNumber: r.order.invoiceNumber,
+      amount: Number(r.amount),
+      reason: r.reason,
+      failureReason: r.failureReason,
+      requestedAt: r.createdAt,
+    });
 
     res.json({
       report: {
@@ -312,6 +377,9 @@ router.get(
           // null, not 0, for a customer: unknowable is not the same as none.
           signatureFailures: rejections,
           unattributedVisible: isAtc,
+          refundsAwaitingProvider: pendingRefunds.length,
+          refundsUnconfirmedByProvider: unconfirmedRefunds.length,
+          refundsRejectedByProvider: failedRefunds.length,
         },
         exceptions: {
           openIntents: openIntents.map((i) => ({
@@ -344,6 +412,14 @@ router.get(
             receivedAt: e.receivedAt,
           })),
           unprocessedEvents: unprocessed,
+          // Requested from the provider, not yet paid out. The customer is
+          // still waiting for this money.
+          refundsAwaitingProvider: pendingRefunds.map(refundRow),
+          // Sent to the provider with no answer. Reconcile with the stored
+          // idempotency key; raising a new refund here pays the customer twice.
+          refundsUnconfirmedByProvider: unconfirmedRefunds.map(refundRow),
+          // The provider refused. Somebody has to make this right by hand.
+          refundsRejectedByProvider: failedRefunds.map(refundRow),
         },
         note: isAtc
           ? 'Signature failures are counted, never stored as events: the event id comes from the payload, so recording unverified deliveries would let a forged id block the genuine one. The count and any unattributable events are deployment-wide, not this company only.'

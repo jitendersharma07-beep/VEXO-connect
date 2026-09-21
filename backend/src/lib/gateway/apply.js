@@ -13,6 +13,10 @@ import { paiseOf } from '../orders.js';
 
 export const EVENT_SUCCEEDED = 'payment.succeeded';
 export const EVENT_FAILED = 'payment.failed';
+export const EVENT_REFUND_SUCCEEDED = 'refund.succeeded';
+export const EVENT_REFUND_FAILED = 'refund.failed';
+
+const REFUND_EVENTS = new Set([EVENT_REFUND_SUCCEEDED, EVENT_REFUND_FAILED]);
 
 // The provider may name the instrument it charged. Anything we do not
 // recognise is recorded as OTHER rather than guessed at, because this feeds
@@ -20,7 +24,68 @@ export const EVENT_FAILED = 'payment.failed';
 const KNOWN_METHODS = new Set(['CARD', 'UPI', 'OTHER']);
 const normaliseMethod = (method) => (KNOWN_METHODS.has(method) ? method : 'OTHER');
 
+// A refund event's providerRef names the REFUND, not the original payment.
+// Until one of these arrives the refund is a request and nothing has moved, so
+// this is the only place a refund may be marked paid out.
+const applyRefundEvent = async (tx, { providerRef, kind, amountPaise }) => {
+  const refund = await tx.refund.findUnique({
+    where: { providerRef },
+    include: { order: { select: { id: true, companyId: true, branchId: true, status: true } } },
+  });
+  if (!refund) return { skippedReason: 'no refund matches this provider reference' };
+  const base = { intentId: refund.intentId ?? null, refundId: refund.id };
+
+  if (refund.status !== 'PENDING') {
+    return { ...base, skippedReason: `refund already ${refund.status.toLowerCase()}` };
+  }
+  // Never settle for an amount we did not request. Accepting the provider's
+  // figure would silently alter what the customer got back.
+  if (amountPaise !== paiseOf(refund.amount)) {
+    return { ...base, skippedReason: 'refunded amount does not match the request' };
+  }
+
+  if (kind === EVENT_REFUND_FAILED) {
+    await tx.refund.update({
+      where: { id: refund.id },
+      data: {
+        status: 'FAILED',
+        failureReason: 'provider reported the refund failed',
+        settledAt: new Date(),
+      },
+    });
+    return { ...base, refundFailed: true, orderId: refund.order.id,
+             companyId: refund.order.companyId, branchId: refund.order.branchId };
+  }
+
+  await tx.refund.update({
+    where: { id: refund.id },
+    data: { status: 'SUCCEEDED', settledAt: new Date() },
+  });
+
+  // Now, and only now, may the order be unwound: the money is actually back.
+  const order = await tx.order.findUnique({
+    where: { id: refund.orderId },
+    include: {
+      payments: { select: { amount: true } },
+      refunds: { select: { amount: true, status: true } },
+    },
+  });
+  const collected = order.payments.reduce((a, p) => a + paiseOf(p.amount), 0);
+  const settled = order.refunds
+    .filter((r) => r.status === 'SUCCEEDED')
+    .reduce((a, r) => a + paiseOf(r.amount), 0);
+  if (order.status === 'PAID' && settled === collected) {
+    await tx.order.update({ where: { id: order.id }, data: { status: 'REFUNDED' } });
+  }
+  return { ...base, refundSettled: true, orderId: order.id,
+           companyId: order.companyId, branchId: order.branchId };
+};
+
 export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, method }) => {
+  if (REFUND_EVENTS.has(kind)) {
+    return applyRefundEvent(tx, { providerRef, kind, amountPaise });
+  }
+
   const intent = await tx.paymentIntent.findUnique({
     where: { provider_providerRef: { provider, providerRef } },
   });

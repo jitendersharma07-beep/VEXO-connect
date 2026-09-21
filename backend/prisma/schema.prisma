@@ -264,6 +264,14 @@ enum PaymentIntentStatus {
   CANCELLED
 }
 
+// A manual refund is SUCCEEDED on creation — the cash is already out of the
+// drawer. A gateway refund starts PENDING and only the provider can move it.
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
 model TaxRate {
   id          String        @id @default(cuid())
   companyId   String
@@ -485,6 +493,7 @@ model PaymentIntent {
 
   payment       Payment?
   webhookEvents GatewayWebhookEvent[]
+  refunds       Refund[]              @relation("RefundIntent")
 
   @@unique([provider, providerRef])
   @@index([orderId])
@@ -523,11 +532,39 @@ model Refund {
   order     Order    @relation(fields: [orderId], references: [id])
   amount    Decimal  @db.Decimal(10, 2)
   reason    String
+  // MANUAL: cash or card handed back across the counter. Done the moment it
+  // happens, because a person did it.
+  //
+  // GATEWAY: only the provider can move this money back. Writing the row
+  // returns nothing to anybody, so the refund stays a REQUEST until a
+  // signature-verified webhook says the provider actually paid it out. A
+  // PENDING refund must never be shown, totalled or reported as money returned.
+  channel       PaymentChannel @default(MANUAL)
+  status        RefundStatus   @default(SUCCEEDED)
+  // The gateway payment being reversed, and the provider's own reference for
+  // the reversal. providerRef is unique so a redelivered refund webhook lands
+  // on exactly one row.
+  //
+  // A GATEWAY row that is PENDING with a NULL providerRef is the unknown
+  // state: the request was reserved here, but the provider never told us
+  // whether it took it. It may already be paying out. It therefore keeps
+  // holding its amount and must be reconciled, never re-requested.
+  intentId      String?
+  intent        PaymentIntent? @relation("RefundIntent", fields: [intentId], references: [id])
+  providerRef   String?        @unique
+  // Sent to the provider, and kept, so a request whose outcome we never
+  // learned can be re-sent as THE SAME request. Without a stored key a retry
+  // is a second refund and the customer is paid twice. Null for MANUAL, where
+  // there is no provider to deduplicate against.
+  idempotencyKey String?       @unique
+  failureReason String?
   byId      String
   by        PosUser  @relation("RefundBy", fields: [byId], references: [id])
   createdAt DateTime @default(now())
+  settledAt DateTime?
 
   @@index([orderId])
+  @@index([status])
 }
 
 // One row per branch per financial year; bill transactions increment
