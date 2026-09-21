@@ -21,11 +21,26 @@
 //             i.e. `docker exec -it`). Values never appear in argv, in the
 //             environment, or in shell history.
 //
+// Where the generated passwords go:
+//   default      stdout, once. Fine at a terminal you control; NOT fine when
+//                something else is capturing the scrollback.
+//   --out FILE   write them to FILE with mode 0600 and keep stdout free of
+//                secrets. Refuses if FILE already exists, so a second run can
+//                never silently overwrite credentials you have not read yet.
+//
+// --demo: leave mustChangePassword = FALSE instead of forcing a change on
+// first sign-in. This deliberately disables a security control and exists for
+// ONE case: a shared demo credential handed to several people. The forced
+// change is non-dismissible in the UI, so the first person to sign in would
+// otherwise change the password and lock everybody else out. Never use --demo
+// for a real user account — for those, the forced change IS the point.
+//
 // Exit codes: 0 ok · 1 refused/failed · 2 usage.
 
 import { PrismaClient } from '@prisma/client';
 import { hash as argon2Hash } from '@node-rs/argon2';
 import { randomBytes } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
 
 const CR = '\r';
 const LF = '\n';
@@ -48,9 +63,30 @@ const emails = emailsArg
   .filter(Boolean);
 const confirm = has('--confirm');
 const usePrompt = has('--prompt');
+const demo = has('--demo');
+const outFile = valueOf('--out');
 
 if (!emails.length) {
-  console.error('usage: node scripts/rotate-pos-passwords.mjs --emails a@x,b@y [--prompt] [--confirm]');
+  console.error(
+    'usage: node scripts/rotate-pos-passwords.mjs --emails a@x,b@y [--prompt] [--demo] [--out FILE] [--confirm]',
+  );
+  process.exit(2);
+}
+// Gate on the FLAG, not on its value: `--out` as the last argument makes
+// valueOf() return undefined, and testing the value alone would let that fall
+// through to the default — which prints the passwords to stdout. A typo must
+// never downgrade "write to a 0600 file" into "print the secrets".
+if (has('--out') && (!outFile || outFile.startsWith('--'))) {
+  console.error('refused: --out needs a file path');
+  process.exit(2);
+}
+if (outFile && usePrompt) {
+  console.error('refused: --out has nothing to write under --prompt (you chose the passwords yourself)');
+  process.exit(2);
+}
+// Never clobber a credential file that may not have been read yet.
+if (outFile && existsSync(outFile)) {
+  console.error(`refused: ${outFile} already exists; move or delete it first`);
   process.exit(2);
 }
 const dupes = emails.filter((e, i) => emails.indexOf(e) !== i);
@@ -129,6 +165,12 @@ const main = async () => {
     );
   }
 
+  console.log(
+    `\nmode: forced-change=${demo ? 'OFF (--demo, shared demo credential)' : 'ON'}  passwords=${
+      usePrompt ? 'typed at the prompt' : outFile ? `written to ${outFile}` : 'printed to stdout once'
+    }`,
+  );
+
   if (!confirm) {
     console.log('\nPREVIEW ONLY — nothing written. Re-run with --confirm to rotate these accounts.');
     return;
@@ -162,7 +204,7 @@ const main = async () => {
         for (const p of pending) {
           await tx.posUser.update({
             where: { id: p.user.id },
-            data: { passwordHash: p.hash, mustChangePassword: true },
+            data: { passwordHash: p.hash, mustChangePassword: !demo },
           });
           const r = await tx.posSession.updateMany({
             where: { userId: p.user.id, revokedAt: null },
@@ -175,7 +217,16 @@ const main = async () => {
               entityId: p.user.id,
               companyId: p.user.companyId,
               actorEmail: process.env.POS_ROTATE_ACTOR || 'scripts/rotate-pos-passwords.mjs',
-              meta: { sessionsRevoked: r.count, source: 'scoped-rotation', prompted: usePrompt },
+              // `forcedChange: false` is the audit trail's record that a
+              // security control was switched off on purpose, and for which
+              // account. Do not drop it.
+              meta: {
+                sessionsRevoked: r.count,
+                source: 'scoped-rotation',
+                prompted: usePrompt,
+                forcedChange: !demo,
+                demoCredential: demo,
+              },
             },
           });
           out.push({ email: p.user.email, id: p.user.id, revoked: r.count, password: usePrompt ? null : p.password });
@@ -203,9 +254,15 @@ const main = async () => {
       sessions: { where: { revokedAt: null }, select: { id: true } },
     },
   });
-  const bad = after.filter((u) => !u.mustChangePassword || u.sessions.length > 0);
+  // Assert the state we asked for, not a fixed one: --demo inverts the
+  // mustChangePassword expectation, so checking for `true` unconditionally
+  // would report every demo rotation as broken.
+  const expectMustChange = !demo;
+  const bad = after.filter((u) => u.mustChangePassword !== expectMustChange || u.sessions.length > 0);
   if (bad.length) {
-    console.error('\nPARTIAL/INCONSISTENT STATE — verify and repair these accounts by hand:');
+    console.error(
+      `\nPARTIAL/INCONSISTENT STATE — expected mustChangePassword=${expectMustChange} and 0 live sessions:`,
+    );
     for (const u of bad) {
       console.error(`  ${u.email}  mustChangePassword=${u.mustChangePassword}  live-sessions=${u.sessions.length}`);
     }
@@ -213,15 +270,35 @@ const main = async () => {
     process.exit(1);
   }
 
-  console.log('\nrotated (one transaction; forced password change is ON for each account):');
+  console.log(
+    `\nrotated (one transaction; forced password change is ${demo ? 'OFF — DEMO CREDENTIALS' : 'ON for each account'}):`,
+  );
   for (const r of results) {
     console.log(`  ${r.email}  sessions-revoked=${r.revoked}`);
   }
+  if (demo) {
+    console.log('\nNOTE: --demo left mustChangePassword=false. These passwords stay valid');
+    console.log('until someone rotates them again. Do not use --demo for real accounts.');
+  }
 
   if (!usePrompt) {
-    console.log('\n--- NEW PASSWORDS — shown ONCE. Record them now, then clear this screen. ---');
-    for (const r of results) console.log(`  ${r.email}  ${r.password}`);
-    console.log('--- end ---');
+    if (outFile) {
+      const body = [
+        '# ATC POS demo credentials',
+        `# generated ${new Date().toISOString()} by scripts/rotate-pos-passwords.mjs`,
+        `# forced password change on first sign-in: ${demo ? 'NO (--demo)' : 'YES'}`,
+        '# Treat this file as a secret. Delete it once the credentials are handed over.',
+        '',
+        ...results.map((r) => `${r.email}\t${r.password}`),
+        '',
+      ].join('\n');
+      writeFileSync(outFile, body, { mode: 0o600, flag: 'wx' });
+      console.log(`\nNEW PASSWORDS WRITTEN TO ${outFile} (mode 0600). Not shown here by design.`);
+    } else {
+      console.log('\n--- NEW PASSWORDS — shown ONCE. Record them now, then clear this screen. ---');
+      for (const r of results) console.log(`  ${r.email}  ${r.password}`);
+      console.log('--- end ---');
+    }
   }
 };
 
