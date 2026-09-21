@@ -22,6 +22,10 @@ const app = createApp();
 const wipe = async () => {
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
+  // Before Order: PaymentIntent references it ON DELETE RESTRICT, so an
+  // order delete fails outright once any intent exists.
+  await prisma.gatewayWebhookEvent.deleteMany();
+  await prisma.paymentIntent.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();

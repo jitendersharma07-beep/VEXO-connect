@@ -131,6 +131,7 @@ model PosUser {
   itemsVoided      OrderItem[] @relation("OrderItemVoidedBy")
   paymentsReceived Payment[]   @relation("PaymentReceivedBy")
   refundsIssued    Refund[]    @relation("RefundBy")
+  intentsCreated   PaymentIntent[] @relation("PaymentIntentCreatedBy")
 
   @@index([companyId])
   @@index([branchId])
@@ -247,9 +248,20 @@ enum PaymentMethod {
 }
 
 // MANUAL = hand-recorded by staff, never presented as gateway-verified.
-// GATEWAY joins in the payment-gateway phase.
+// GATEWAY = settled by the provider and confirmed by a signature-verified
+// webhook. Nothing else may ever write GATEWAY.
 enum PaymentChannel {
   MANUAL
+  GATEWAY
+}
+
+enum PaymentIntentStatus {
+  CREATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  CANCELLED
 }
 
 model TaxRate {
@@ -370,6 +382,7 @@ model Order {
   kots     Kot[]
   payments Payment[]
   refunds  Refund[]
+  intents  PaymentIntent[]
 
   @@unique([companyId, invoiceNumber])
   @@index([companyId, branchId, status])
@@ -433,12 +446,70 @@ model Payment {
   amount       Decimal        @db.Decimal(10, 2)
   tendered     Decimal?       @db.Decimal(10, 2)
   note         String?
-  receivedById String
-  receivedBy   PosUser        @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  // Null for GATEWAY: the provider settled it, no member of staff received
+  // anything. Recording the cashier here would misattribute the money.
+  receivedById String?
+  receivedBy   PosUser?       @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  // Unique, so one intent can never settle twice however often the provider
+  // redelivers. This is the last line of defence behind webhook idempotency.
+  intentId     String?        @unique
+  intent       PaymentIntent? @relation(fields: [intentId], references: [id])
   createdAt    DateTime       @default(now())
 
   @@index([orderId])
   @@index([createdAt])
+}
+
+// One attempt to collect an order's due amount through a provider. Order-linked
+// so reconciliation can always put "what we asked for" beside "what arrived".
+model PaymentIntent {
+  id             String              @id @default(cuid())
+  orderId        String
+  order          Order               @relation(fields: [orderId], references: [id])
+  provider       String
+  // The provider's own id for the attempt; null until the provider answers.
+  // Postgres treats NULLs as distinct, so many un-answered intents coexist.
+  providerRef    String?
+  amount         Decimal             @db.Decimal(10, 2)
+  currency       String              @default("INR")
+  status         PaymentIntentStatus @default(CREATED)
+  // Sent to the provider, so a retried create returns the first attempt
+  // instead of opening a second one the customer could also pay.
+  idempotencyKey String              @unique
+  failureReason  String?
+  createdById    String
+  createdBy      PosUser             @relation("PaymentIntentCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  closedAt       DateTime?
+
+  payment Payment?
+
+  @@unique([provider, providerRef])
+  @@index([orderId])
+  @@index([status])
+}
+
+// One row per signature-VERIFIED delivery. Rejected deliveries are deliberately
+// NOT stored here: eventId comes from the payload, so recording unverified ones
+// would let anyone squat the unique key with a forged id and permanently block
+// the genuine event from ever being applied. Rejections go to PosAuditLog.
+model GatewayWebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventId     String
+  kind        String
+  payloadHash String
+  intentId    String?
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  // Why a verified delivery still changed nothing — unknown intent, already
+  // settled, order no longer billable. Null once it has been applied.
+  skippedReason String?
+
+  @@unique([provider, eventId])
+  @@index([receivedAt])
+  @@index([processedAt])
 }
 
 model Refund {

@@ -21,8 +21,39 @@ export const env = {
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true',
   CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:5177',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+  // Payment gateway (contract §13). Unset is the normal, shipped state: with no
+  // provider named, every gateway route refuses. Production runs this way today
+  // and will keep doing so until the owner supplies real provider credentials.
+  POS_GATEWAY_PROVIDER: process.env.POS_GATEWAY_PROVIDER || null,
+  POS_GATEWAY_WEBHOOK_SECRET: process.env.POS_GATEWAY_WEBHOOK_SECRET || null,
+  POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS: Number(
+    process.env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS || 300,
+  ),
 };
+
+export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
 
 if (env.POS_JWT_SECRET.length < 32) {
   throw new Error('POS_JWT_SECRET must be at least 32 characters');
+}
+
+// A half-configured gateway is worse than none: routes would exist and then
+// fail on the first webhook, after the customer has already paid. Refuse at
+// boot instead, while nobody is mid-transaction.
+if (gatewayEnabled && !env.POS_GATEWAY_WEBHOOK_SECRET) {
+  throw new Error('POS_GATEWAY_PROVIDER is set but POS_GATEWAY_WEBHOOK_SECRET is missing');
+}
+if (env.POS_GATEWAY_WEBHOOK_SECRET && env.POS_GATEWAY_WEBHOOK_SECRET.length < 16) {
+  throw new Error('POS_GATEWAY_WEBHOOK_SECRET must be at least 16 characters');
+}
+// The test adapter exists so the signature, idempotency and reconciliation
+// paths can be exercised without a provider account. It settles payments on
+// command, so production must never be able to name it — that is the whole
+// distance between "verified by the gateway" and "fake success".
+if (env.NODE_ENV === 'production' && env.POS_GATEWAY_PROVIDER?.startsWith('test')) {
+  throw new Error(`Gateway provider "${env.POS_GATEWAY_PROVIDER}" cannot be used in production`);
+}
+if (!Number.isFinite(env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS) ||
+    env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS <= 0) {
+  throw new Error('POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS must be a positive number of seconds');
 }

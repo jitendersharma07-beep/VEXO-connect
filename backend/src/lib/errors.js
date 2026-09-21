@@ -15,6 +15,15 @@ export const forbidden = (message = 'You do not have permission to perform this 
 export const notFound = (message = 'Not found') => new AppError(404, 'POS_NOT_FOUND', message);
 export const conflict = (message) => new AppError(409, 'POS_CONFLICT', message);
 
+// 501, not 403: the caller did nothing wrong and no permission would help.
+// Online payment simply is not configured on this deployment.
+export const gatewayNotConfigured = () =>
+  new AppError(
+    501,
+    'POS_GATEWAY_NOT_CONFIGURED',
+    'Online payment is not enabled on this deployment. Record the payment manually.',
+  );
+
 export const licenseBlocked = (state) =>
   new AppError(
     403,
