@@ -183,9 +183,16 @@ stops at `interactive sign-in needs a TTY` and you get 8/10. The password is
 read with echo off and is never printed, logged or sent anywhere but
 `/api/auth/login`.
 
+Run it **by absolute path**. The lane worktrees under `~/atc-pos-lanes/` each
+carry their own older `deploy/prod-verify.mjs`, and the pre-`98e9f8f` copy
+mangles the typed credential and then reports a bare `HTTP 400` with no field
+name — which reads as "the admin password is wrong" for a password that works
+in a browser. If a failing line does not name a field or an error code, you
+are running the wrong copy.
+
 ```sh
-node deploy/prod-verify.mjs                                   # loopback 8110 — expect 12/12 PASS
-BASE_URL=https://atcworkspace.com/pos node deploy/prod-verify.mjs   # public mount — expect 12/12 PASS
+node /home/atc-noc/atc-pos/deploy/prod-verify.mjs             # loopback 8110 — expect 12/12 PASS
+BASE_URL=https://atcworkspace.com/pos node /home/atc-noc/atc-pos/deploy/prod-verify.mjs   # public mount — expect 12/12 PASS
 curl -fsS https://atcworkspace.com/pos/api/health
 curl -fsS -o /dev/null -w '%{http_code}\n' https://atcworkspace.com/       # regression: main site 200
 curl -fsS -o /dev/null -w '%{http_code}\n' https://atcworkspace.com/reviews/  # regression: reviews 200
