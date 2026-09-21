@@ -436,6 +436,24 @@ stripped a password's outer spaces, and failures printed only a status code.
 invisible when echoed, so the field looked untouched while failing validation.
 Failures now name the API's own code, message and field — and nothing else.
 
+**§5's scripts reached the running container — 2026-09-21 04:41 UTC.** The
+image deployed at go-live had no `/app/scripts`, so every §5 command above died
+with `MODULE_NOT_FOUND`; `4ab05a6` added `COPY scripts ./scripts` to the
+backend Dockerfile. Adopting it needed `docker compose -f
+docker-compose.prod.yml up -d --no-deps backend` — `restart` reuses the
+container's existing image and would have changed nothing. **The restart
+shipped zero code change**, and that was established before touching anything:
+`find /app -type f -not -path '/app/scripts/*' | sha256sum` returned the same
+`ada2fa64…` inside the running container and inside the new image, so the only
+delta is the added directory. The migration gate agreed — both migrations were
+already `finished_at`-complete in `_prisma_migrations`, and boot duly logged
+`No pending migrations to apply`. Health returned within ~2s of the compose
+command; `/pos`, `/`, `/reviews/`, `/workspace/` and `/whatsapp/` all stayed
+200. The image is pinned as `pos-prod-backend:20260921-m1-scripts` so the next
+`compose build` cannot orphan it the way it orphaned its predecessor — the
+image the container had been running on was already untagged and pruned out of
+the daemon, leaving it alive on its layers alone with no rollback target.
+
 **Still outstanding (needs the owner, does not block the release):**
 
 1. §5 rotation was **not run, and the evidence says it is not needed**: all
