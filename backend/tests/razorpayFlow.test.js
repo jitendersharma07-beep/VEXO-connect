@@ -403,7 +403,13 @@ describe('refunding a Razorpay payment', () => {
 
   it('releases the money when Razorpay refuses, so a second refund is possible', async () => {
     const order = await paidOrder();
-    queue(answer(400, { error: { description: 'the payment has been fully refunded already' } }));
+    queue(
+      answer(400, { error: { description: 'the payment has been fully refunded already' } }),
+      // The 400 is not enough on its own any more. Releasing money now costs a
+      // second question — does a refund under this key exist on the charge? —
+      // and the empty list is the answer that makes the refusal safe to act on.
+      answer(200, { entity: 'collection', count: 0, items: [] }),
+    );
     const res = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
       .send({ amount: 100, reason: 'duplicate charge' });
     // 202, not 201: a record was made, but no refund was placed.
@@ -424,6 +430,61 @@ describe('refunding a Razorpay payment', () => {
     expect(second.status, JSON.stringify(second.body)).toBe(201);
     expect((await refundOf(order.id)).providerRef).toBe(refundRef);
   });
+
+  // The money-losing case the release rule exists to prevent, end to end.
+  // Razorpay rejects a replayed idempotency key with a 400, so the request that
+  // looks most like "we refused" is the one most likely to be sitting on top of
+  // a refund already paid out. Releasing on the status alone would let the
+  // cashier refund the same order twice, and the customer would be paid twice.
+  it('does not release, or fail, a refund whose 400 hides one already made', async () => {
+    const order = await paidOrder();
+    const existing = nextId('rfnd_');
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'idempotency key already used' } }),
+      // The charge does carry a refund under our key. The 400 was about the
+      // request, not about whether money moved.
+      // Echo back the key the POST actually sent, which is the only thing that
+      // ties the refund on the charge to the request this POS made.
+      () => {
+        const sent = [...calls].reverse().find((c) => c.headers['x-refund-idempotency']);
+        return {
+          status: 200,
+          body: {
+            entity: 'collection',
+            count: 1,
+            items: [
+              {
+                ...refundBody(10000, existing, order.payRef),
+                notes: { pos_refund_key: sent.headers['x-refund-idempotency'] },
+              },
+            ],
+          },
+        };
+      },
+    );
+    const res = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'duplicate charge' });
+    // 201: the refund was placed — by the earlier attempt, which this one found.
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+
+    const row = await refundOf(order.id);
+    // Not FAILED. Nothing was refused, so nothing is released.
+    expect(row.status).toBe('PENDING');
+    expect(row.settledAt).toBeNull();
+    // And it is tracking the refund that actually exists at Razorpay.
+    expect(row.providerRef).toBe(existing);
+
+    // And the ₹100 is still HELD. This is the assertion the whole rule exists
+    // for: had the 400 been read as a refusal, this amount would have gone back
+    // on sale while Razorpay was paying it out, and the next request would
+    // return it a second time. Asking for the full amount collected must still
+    // be short by exactly the reserved ₹100.
+    const again = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: order.totalPaise / 100, reason: 'second attempt' });
+    expect(again.status, JSON.stringify(again.body)).toBe(400);
+    expect(again.body.error.message).toMatch(/exceeds the amount collected/i);
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(1);
+  }, 15000);
 
   it('holds the money and BLOCKS a second refund when Razorpay never answers', async () => {
     const order = await paidOrder();
@@ -595,7 +656,13 @@ describe('reconciling a refund the provider never confirmed', () => {
   // rather than both being held.
   it('still releases the money when the provider refuses on the retry', async () => {
     const { order, row } = await unanswered();
-    queue(answer(400, { error: { description: 'the payment has been fully refunded already' } }));
+    queue(
+      answer(400, { error: { description: 'the payment has been fully refunded already' } }),
+      // Same evidence the create path now demands: the charge carries no refund
+      // under this key, so the 400 really is a refusal and not a replay sitting
+      // on top of a payout already made.
+      answer(200, { entity: 'collection', count: 0, items: [] }),
+    );
     const res = await request(app)
       .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
       .set(auth(tokens.owner)).send({});

@@ -408,19 +408,133 @@ describe('createRefund', () => {
     expect(err.providerRefused).toBe(false);
   });
 
-  it('marks a 400 as the provider refusing, so the reservation can be released', async () => {
-    queue(answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'The payment has been fully refunded already' } }));
+  it('marks a 400 as the provider refusing ONLY once the charge shows no such refund', async () => {
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'The payment has been fully refunded already' } }),
+      // The charge is read before any money is released, and it holds no
+      // refund under our key: the refusal is now evidenced by more than a
+      // status code.
+      answer(200, { entity: 'collection', count: 0, items: [] }),
+    );
     const err = await razorpayAdapter.createRefund(args).catch((e) => e);
     expect(err.kind).toBe('TERMINAL');
     expect(err.providerRefused).toBe(true);
     expect(err.message).toMatch(/fully refunded already/);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].method).toBe('GET');
+    expect(calls[1].path).toBe('/v1/payments/pay_TESTfakepayment1/refunds');
   });
 
-  it('treats a 409 as retryable — a concurrent request under the same key', async () => {
-    queue(answer(409, { error: { description: 'another request with this idempotency key is in progress' } }));
+  // The rule this whole block exists for: a 4xx describes the REQUEST, not the
+  // world. Razorpay rejects a replayed idempotency key whose payload differs,
+  // so the status that looks most like "no" is exactly the one most likely to
+  // be sitting on top of a refund that already happened.
+  it('does NOT release the money when a 4xx hides a refund already made under our key', async () => {
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'idempotency key already used' } }),
+      answer(200, {
+        entity: 'collection',
+        count: 1,
+        items: [refundEntity({ id: 'rfnd_TESTrecovered1', notes: { pos_refund_key: 'refund-key-1' } })],
+      }),
+    );
+    const out = await razorpayAdapter.createRefund(args);
+    // Recovered, not refused: the reference of the refund that does exist.
+    expect(out).toEqual({ providerRef: 'rfnd_TESTrecovered1' });
+  });
+
+  it('holds the money when the 4xx cannot be resolved, rather than calling it a refusal', async () => {
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'idempotency key already used' } }),
+      answer(500, { error: { description: 'refund list unavailable' } }),
+    );
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    expect(err.kind).toBe('UNKNOWN');
+    // The reservation stands. This is the flag that would have released it.
+    expect(err.providerRefused).toBe(false);
+    expect(err.status).toBe(null);
+    expect(err.message).toMatch(/may already exist/);
+  });
+
+  // A full page is a page that may have another behind it. "Not in the part I
+  // read" is not "not there", and treating it as such releases money on a
+  // charge whose later refunds were never looked at.
+  it('will not read a truncated refund list as proof that no refund exists', async () => {
+    const full = Array.from({ length: 100 }, (_, i) =>
+      refundEntity({ id: `rfnd_other${i}`, notes: { pos_refund_key: `someone-elses-key-${i}` } }),
+    );
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'idempotency key already used' } }),
+      answer(200, { entity: 'collection', count: full.length, items: full }),
+    );
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    expect(err.kind).toBe('UNKNOWN');
+    expect(err.providerRefused).toBe(false);
+  });
+
+  it('refuses to choose when two refunds carry the same key', async () => {
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'idempotency key already used' } }),
+      answer(200, {
+        entity: 'collection',
+        count: 2,
+        items: [
+          refundEntity({ id: 'rfnd_first', notes: { pos_refund_key: 'refund-key-1' } }),
+          refundEntity({ id: 'rfnd_second', notes: { pos_refund_key: 'refund-key-1' } }),
+        ],
+      }),
+    );
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    expect(err.kind).toBe('UNKNOWN');
+    expect(err.providerRefused).toBe(false);
+  });
+
+  it('checks a recovered refund against the amount asked for, exactly like a fresh one', async () => {
+    queue(
+      answer(400, { error: { code: 'BAD_REQUEST_ERROR', description: 'idempotency key already used' } }),
+      answer(200, {
+        entity: 'collection',
+        count: 1,
+        items: [refundEntity({ amount: 5000, notes: { pos_refund_key: 'refund-key-1' } })],
+      }),
+    );
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    expect(err.kind).toBe('MISMATCH');
+    expect(err.providerRefused).toBe(false);
+  });
+
+  it('resolves a 409 conflict into the refund the concurrent request created', async () => {
+    queue(
+      answer(409, { error: { description: 'another request with this idempotency key is in progress' } }),
+      answer(200, {
+        entity: 'collection',
+        count: 1,
+        items: [refundEntity({ id: 'rfnd_TESTconcurrent', notes: { pos_refund_key: 'refund-key-1' } })],
+      }),
+    );
+    const out = await razorpayAdapter.createRefund(args);
+    expect(out).toEqual({ providerRef: 'rfnd_TESTconcurrent' });
+  });
+
+  it('leaves a 409 retryable when the conflict produced nothing to find', async () => {
+    queue(
+      answer(409, { error: { description: 'another request with this idempotency key is in progress' } }),
+      answer(200, { entity: 'collection', count: 0, items: [] }),
+    );
     const err = await razorpayAdapter.createRefund(args).catch((e) => e);
     expect(err.kind).toBe('RETRYABLE');
     expect(err.providerRefused).toBe(false);
+  });
+
+  // A 5xx or a dead socket already holds the money. Going back to Razorpay
+  // there would add a second way to fail and change no decision.
+  it('does not go looking after a 5xx, which already holds the money', async () => {
+    queue(answer(503, { error: { description: 'service unavailable' } }));
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    expect(err.kind).toBe('RETRYABLE');
+    expect(err.providerRefused).toBe(false);
+    expect(calls).toHaveLength(1);
   });
 });
 
