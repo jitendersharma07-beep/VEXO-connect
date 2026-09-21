@@ -4,7 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import pinoHttp from 'pino-http';
 
-import { env } from './config/env.js';
+import { env, gatewayEnabled } from './config/env.js';
 import { logger, resSerializer } from './lib/logger.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { notFoundHandler, errorHandler } from './middleware/error.js';
@@ -20,6 +20,7 @@ import catalogRoutes from './api/routes/catalog.js';
 import tableRoutes from './api/routes/tables.js';
 import orderRoutes from './api/routes/orders.js';
 import reportRoutes from './api/routes/reports.js';
+import gatewayRoutes from './api/routes/gateway.js';
 
 export const createApp = () => {
   const app = express();
@@ -45,7 +46,6 @@ export const createApp = () => {
     }),
   );
 
-  app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
   app.use(
@@ -62,6 +62,15 @@ export const createApp = () => {
   );
 
   app.use(globalLimiter);
+
+  // Ahead of express.json, because signature verification needs the exact
+  // bytes the provider signed. Mounted only when a provider is configured, so
+  // a deployment without a gateway has no webhook endpoint to probe at all.
+  if (gatewayEnabled) {
+    app.use('/api/gateway', gatewayRoutes);
+  }
+
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/', (_req, res) => {
     res.json({

@@ -125,6 +125,21 @@ export const publicPayment = (p) => ({
   createdAt: p.createdAt,
 });
 
+// idempotencyKey is deliberately absent: it is the token that makes a retried
+// create return the first attempt, so it stays between us and the provider.
+export const publicIntent = (i) => ({
+  id: i.id,
+  orderId: i.orderId,
+  provider: i.provider,
+  providerRef: i.providerRef,
+  amount: num(i.amount),
+  currency: i.currency,
+  status: i.status,
+  failureReason: i.failureReason,
+  createdAt: i.createdAt,
+  closedAt: i.closedAt,
+});
+
 export const publicRefund = (r) => ({
   id: r.id,
   amount: num(r.amount),

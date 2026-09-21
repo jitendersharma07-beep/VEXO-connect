@@ -5,8 +5,10 @@
 // responds with the full recalculated order.
 
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
+import { getAdapter } from '../../lib/gateway/index.js';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { audit } from '../../lib/audit.js';
 import {
@@ -25,6 +27,7 @@ import {
   serializeOrder,
   serializeOrderSummary,
   publicPayment,
+  publicIntent,
   publicRefund,
   buildReceipt,
   paiseOf,
@@ -578,6 +581,82 @@ router.post(
       order: await fullOrder(order.id),
       payment: publicPayment(result.payment),
       changeDue: result.changeDue,
+    });
+  }),
+);
+
+// --- gateway payment intents ------------------------------------------------
+
+// Opens one provider-side attempt to collect what is still due. On a
+// deployment with no provider configured — which is every deployment today —
+// this answers 501 and the cashier records the payment manually instead.
+//
+// Nothing here records a payment. Only a signature-verified webhook can do
+// that, which is the whole distance between "asked for money" and "was paid".
+router.post(
+  '/:id/payment-intents',
+  ...operate,
+  asyncHandler(async (req, res) => {
+    const adapter = getAdapter();
+    const order = await loadOrder(req);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const cur = await tx.order.findUnique({
+        where: { id: order.id },
+        include: { payments: { select: { amount: true } } },
+      });
+      if (cur.status !== 'BILLED') throw conflict('Online payment is offered on billed orders only');
+      const due = paiseOf(cur.total) - cur.payments.reduce((a, p) => a + paiseOf(p.amount), 0);
+      if (due <= 0) throw conflict('Order has no amount due');
+
+      // One payable session per order at a time. Handing out a second would
+      // show the customer two live payment pages for one bill, and both
+      // could be paid.
+      const open = await tx.paymentIntent.findFirst({
+        where: { orderId: order.id, status: { in: ['CREATED', 'PENDING'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (open) {
+        if (paiseOf(open.amount) !== due) {
+          throw conflict('An online payment for a different amount is already open on this order');
+        }
+        return { intent: open, reused: true };
+      }
+
+      const idempotencyKey = randomUUID();
+      const session = await adapter.createSession({
+        amountPaise: due,
+        currency: 'INR',
+        orderId: order.id,
+        idempotencyKey,
+      });
+      const intent = await tx.paymentIntent.create({
+        data: {
+          orderId: order.id,
+          provider: adapter.name,
+          providerRef: session.providerRef ?? null,
+          amount: (due / 100).toFixed(2),
+          currency: 'INR',
+          status: 'PENDING',
+          idempotencyKey,
+          createdById: req.user.id,
+        },
+      });
+      return { intent, checkoutUrl: session.checkoutUrl ?? null, reused: false };
+    });
+
+    if (!result.reused) {
+      await audit(req, {
+        action: 'GATEWAY_INTENT_CREATED',
+        entity: 'PaymentIntent',
+        entityId: result.intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, provider: adapter.name, amount: String(result.intent.amount) },
+      });
+    }
+    res.status(result.reused ? 200 : 201).json({
+      intent: publicIntent(result.intent),
+      checkoutUrl: result.checkoutUrl ?? null,
     });
   }),
 );
