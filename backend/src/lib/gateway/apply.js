@@ -16,7 +16,14 @@ export const EVENT_FAILED = 'payment.failed';
 export const EVENT_REFUND_SUCCEEDED = 'refund.succeeded';
 export const EVENT_REFUND_FAILED = 'refund.failed';
 
-const REFUND_EVENTS = new Set([EVENT_REFUND_SUCCEEDED, EVENT_REFUND_FAILED]);
+// Everything in the refund family, not merely the two we act upon. An
+// unmapped refund event carries a refund reference, so routing it by prefix
+// gets it looked up as a refund and skipped with a reason that names it —
+// rather than searched for among payment intents, where "no intent matches
+// this provider reference" would send whoever reads the reconciliation report
+// hunting for a missing payment that never existed.
+const isRefundEvent = (kind) =>
+  kind === EVENT_REFUND_SUCCEEDED || kind === EVENT_REFUND_FAILED || String(kind).startsWith('refund.');
 
 // The provider may name the instrument it charged. Anything we do not
 // recognise is recorded as OTHER rather than guessed at, because this feeds
@@ -57,6 +64,14 @@ const applyRefundEvent = async (tx, { providerRef, kind, amountPaise }) => {
              companyId: refund.order.companyId, branchId: refund.order.branchId };
   }
 
+  // Settlement is opt-in, never a fall-through. Reaching this point with
+  // anything other than an explicit success would otherwise mark money as
+  // returned because an event was merely *not* the failure one — which is how
+  // a provider's new event type, months from now, silently pays a customer.
+  if (kind !== EVENT_REFUND_SUCCEEDED) {
+    return { ...base, skippedReason: `unhandled refund event type "${kind}"` };
+  }
+
   await tx.refund.update({
     where: { id: refund.id },
     data: { status: 'SUCCEEDED', settledAt: new Date() },
@@ -81,8 +96,8 @@ const applyRefundEvent = async (tx, { providerRef, kind, amountPaise }) => {
            companyId: order.companyId, branchId: order.branchId };
 };
 
-export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, method }) => {
-  if (REFUND_EVENTS.has(kind)) {
+export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, method, chargeRef }) => {
+  if (isRefundEvent(kind)) {
     return applyRefundEvent(tx, { providerRef, kind, amountPaise });
   }
 
@@ -147,6 +162,9 @@ export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amoun
       tendered: null,
       receivedById: null,
       intentId: intent.id,
+      // The provider's id for the charge, kept because the refund route needs
+      // it: this row is the only place it is ever recorded.
+      providerRef: typeof chargeRef === 'string' && chargeRef ? chargeRef : null,
     },
   });
 

@@ -9,7 +9,8 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { getAdapter, gatewayAvailable } from '../../lib/gateway/index.js';
-import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+import { asyncHandler, badGateway, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+import { env } from '../../config/env.js';
 import { audit } from '../../lib/audit.js';
 import {
   requirePosAuth,
@@ -599,6 +600,13 @@ router.post(
 //
 // Nothing here records a payment. Only a signature-verified webhook can do
 // that, which is the whole distance between "asked for money" and "was paid".
+//
+// Two phases, for the same reason refunds have two: the provider is reached
+// over the network and must not be called with a database transaction open.
+// A real provider's round trip can outlast Prisma's transaction timeout, and a
+// timeout there would roll back the intent row while the provider keeps the
+// payable order it just created — a page the customer can pay against a
+// reservation that no longer exists.
 router.post(
   '/:id/payment-intents',
   ...operate,
@@ -606,7 +614,14 @@ router.post(
     const adapter = getAdapter();
     const order = await loadOrder(req);
 
-    const result = await prisma.$transaction(async (tx) => {
+    // PHASE 1 — reserve the attempt locally and commit, provider untouched.
+    const reservation = await prisma.$transaction(async (tx) => {
+      // Serialises intent creation on this order. Without it two concurrent
+      // requests each read a state with the other's row invisible, both find
+      // no open intent, and both create one — which is the two live payment
+      // pages for one bill that the check below exists to prevent.
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
       const cur = await tx.order.findUnique({
         where: { id: order.id },
         include: { payments: { select: { amount: true } } },
@@ -626,43 +641,82 @@ router.post(
         if (paiseOf(open.amount) !== due) {
           throw conflict('An online payment for a different amount is already open on this order');
         }
-        return { intent: open, reused: true };
+        // An intent with no providerRef never got an answer out of phase 2.
+        // Retrying it carries the SAME idempotency key, so the provider
+        // returns the attempt it already has instead of opening a second one.
+        return { intent: open, due, resume: open.providerRef === null };
       }
 
-      const idempotencyKey = randomUUID();
-      const session = await adapter.createSession({
-        amountPaise: due,
-        currency: 'INR',
-        orderId: order.id,
-        idempotencyKey,
-      });
       const intent = await tx.paymentIntent.create({
         data: {
           orderId: order.id,
           provider: adapter.name,
-          providerRef: session.providerRef ?? null,
+          // Null until the provider answers. CREATED, not PENDING: nothing has
+          // been asked of anyone yet, and the difference is what phase 2 fills in.
+          providerRef: null,
           amount: (due / 100).toFixed(2),
           currency: 'INR',
-          status: 'PENDING',
-          idempotencyKey,
+          status: 'CREATED',
+          idempotencyKey: randomUUID(),
           createdById: req.user.id,
         },
       });
-      return { intent, checkoutUrl: session.checkoutUrl ?? null, reused: false };
+      return { intent, due, resume: true, fresh: true };
     });
 
-    if (!result.reused) {
+    // PHASE 2 — now open the session with the provider.
+    let intent = reservation.intent;
+    let checkoutUrl = null;
+    if (reservation.resume) {
+      try {
+        const session = await adapter.createSession({
+          amountPaise: reservation.due,
+          currency: 'INR',
+          orderId: order.id,
+          idempotencyKey: intent.idempotencyKey,
+        });
+        checkoutUrl = session.checkoutUrl ?? null;
+        intent = await prisma.paymentIntent.update({
+          where: { id: intent.id },
+          data: { providerRef: session.providerRef ?? null, status: 'PENDING', failureReason: null },
+        });
+      } catch (err) {
+        // Refused by the provider means no session exists and none is coming,
+        // so the intent is closed and the cashier can open a fresh one or take
+        // the money manually. Anything else is UNKNOWN: the provider may hold
+        // a payable session we never saw the id of, so the row stays open and
+        // the next attempt resumes it under the same key rather than creating
+        // a second page the customer could also pay.
+        const detail = err?.message ? String(err.message).slice(0, 200) : 'no answer from the provider';
+        if (err?.providerRefused === true) {
+          await prisma.paymentIntent.update({
+            where: { id: intent.id },
+            data: { status: 'FAILED', failureReason: detail, closedAt: new Date() },
+          });
+        } else {
+          await prisma.paymentIntent.update({ where: { id: intent.id }, data: { failureReason: detail } });
+        }
+        throw badGateway('The payment provider could not open a payment for this order');
+      }
+    }
+
+    if (reservation.fresh) {
       await audit(req, {
         action: 'GATEWAY_INTENT_CREATED',
         entity: 'PaymentIntent',
-        entityId: result.intent.id,
+        entityId: intent.id,
         companyId: req.companyScope.id,
-        meta: { orderId: order.id, provider: adapter.name, amount: String(result.intent.amount) },
+        meta: { orderId: order.id, provider: adapter.name, amount: String(intent.amount) },
       });
     }
-    res.status(result.reused ? 200 : 201).json({
-      intent: publicIntent(result.intent),
-      checkoutUrl: result.checkoutUrl ?? null,
+    res.status(reservation.fresh ? 201 : 200).json({
+      intent: publicIntent(intent),
+      checkoutUrl,
+      // Razorpay Checkout opens in the browser with the order id and the key
+      // id. The key id is the publishable half of the pair and is designed to
+      // ship to the client; the secret never leaves this process.
+      provider: adapter.name,
+      keyId: env.POS_GATEWAY_KEY_ID,
     });
   }),
 );
@@ -674,6 +728,9 @@ const REFUND_PAYMENT_INCLUDE = {
     amount: true,
     channel: true,
     intentId: true,
+    // The provider's id for the charge. Without it a gateway refund has no
+    // route to post to, so it has to travel with the leg.
+    providerRef: true,
     intent: { select: { id: true, providerRef: true, provider: true } },
   },
 };
@@ -693,10 +750,11 @@ const rupees = (paise) => (paise / 100).toFixed(2);
 // paying out this second. Unknown must never be reported as refused, because
 // a refused refund frees its money to be requested again, and doing that to a
 // request that did go through pays the customer twice.
-const sendRefundToProvider = async (refund, intentProviderRef, orderId) => {
+const sendRefundToProvider = async (refund, leg, orderId) => {
   try {
     const result = await getAdapter().createRefund({
-      intentProviderRef,
+      intentProviderRef: leg.intentProviderRef,
+      chargeProviderRef: leg.chargeProviderRef,
       amountPaise: paiseOf(refund.amount),
       currency: 'INR',
       orderId,
@@ -708,26 +766,46 @@ const sendRefundToProvider = async (refund, intentProviderRef, orderId) => {
     }
     return { confirmed: true, providerRef };
   } catch (err) {
-    return { confirmed: false, detail: err?.message ? String(err.message).slice(0, 200) : 'no answer from the provider' };
+    const detail = err?.message ? String(err.message).slice(0, 200) : 'no answer from the provider';
+    // providerRefused is the adapter asserting that the provider received this
+    // request, said no, and moved nothing — the one case where releasing the
+    // reserved money is safe. It is opt-in precisely so that a thrown Error
+    // from anywhere else, which carries no such assertion, stays UNKNOWN.
+    return { confirmed: false, refused: err?.providerRefused === true, detail };
   }
 };
 
-// Records whichever of the two outcomes we actually got. The row already
-// exists and already holds the money either way; this only fills in what the
-// provider told us.
+// Records whichever of the three outcomes we actually got. The row already
+// exists and already holds the money; this only fills in what the provider
+// told us — and releases the reservation in the single case where the provider
+// is known to have moved nothing.
 //
 // A provider that webhooks faster than this UPDATE lands leaves an event that
 // matches no refund. That fails in the safe direction — the event is stored
 // with its reason and counted as a reconciliation exception, and the refund
 // stays visibly unconfirmed rather than being reported as money returned.
-const recordProviderAnswer = async (refundId, answer) =>
-  prisma.refund.update({
+const recordProviderAnswer = async (refundId, answer) => {
+  let data;
+  if (answer.confirmed) {
+    data = { providerRef: answer.providerRef, failureReason: null };
+  } else if (answer.refused) {
+    // FAILED, not left pending: the provider refused, so this amount was never
+    // going to move and holding it would block every later refund on the order
+    // behind a reconciliation that has nothing to reconcile.
+    data = {
+      status: 'FAILED',
+      settledAt: new Date(),
+      failureReason: `the payment provider refused the refund: ${answer.detail}`,
+    };
+  } else {
+    data = { failureReason: `provider did not confirm the request: ${answer.detail}` };
+  }
+  return prisma.refund.update({
     where: { id: refundId },
-    data: answer.confirmed
-      ? { providerRef: answer.providerRef, failureReason: null }
-      : { failureReason: `provider did not confirm the request: ${answer.detail}` },
+    data,
     include: { by: { select: { id: true, fullName: true } } },
   });
+};
 
 router.post(
   '/:id/refunds',
@@ -831,7 +909,7 @@ router.post(
     let refund = reservation.refund;
     let answer = { confirmed: true };
     if (refund.channel === 'GATEWAY') {
-      answer = await sendRefundToProvider(refund, reservation.leg.intentProviderRef, order.id);
+      answer = await sendRefundToProvider(refund, reservation.leg, order.id);
       refund = await recordProviderAnswer(refund.id, answer);
     }
 

@@ -24,6 +24,11 @@ export const gatewayNotConfigured = () =>
     'Online payment is not enabled on this deployment. Record the payment manually.',
   );
 
+// 502, not 500: nothing here is broken. The provider is a separate system that
+// did not answer, and the cashier's next move is to take the money another way
+// rather than to report a bug.
+export const badGateway = (message) => new AppError(502, 'POS_GATEWAY_UNAVAILABLE', message);
+
 export const licenseBlocked = (state) =>
   new AppError(
     403,

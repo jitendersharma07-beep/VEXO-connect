@@ -462,6 +462,12 @@ model Payment {
   // redelivers. This is the last line of defence behind webhook idempotency.
   intentId     String?        @unique
   intent       PaymentIntent? @relation(fields: [intentId], references: [id])
+  // The provider's id for the CHARGE, which is not its id for the attempt.
+  // A Razorpay refund posts to /payments/<this>/refund, while the attempt is
+  // an order_… held on PaymentIntent.providerRef — so without this column a
+  // gateway payment cannot be refunded at all. Null for MANUAL, and for any
+  // provider that names the attempt and the charge with one id.
+  providerRef  String?        @unique
   createdAt    DateTime       @default(now())
 
   @@index([orderId])

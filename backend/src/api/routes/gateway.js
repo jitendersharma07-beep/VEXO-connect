@@ -77,6 +77,7 @@ router.post(
           kind: verified.kind,
           amountPaise: verified.amountPaise,
           method: verified.method,
+          chargeRef: verified.chargeRef,
         });
 
         await tx.gatewayWebhookEvent.update({

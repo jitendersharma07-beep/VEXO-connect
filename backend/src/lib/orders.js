@@ -213,6 +213,10 @@ export const refundLegs = (order) => {
       channel: 'GATEWAY',
       intentId: p.intentId,
       intentProviderRef: p.intent.providerRef,
+      // The provider's id for the charge itself. Razorpay refunds post to it
+      // and cannot use the attempt's id; null means this payment predates the
+      // column, and the adapter refuses rather than guessing a reference.
+      chargeProviderRef: p.providerRef ?? null,
       available: paiseOf(p.amount) - held((r) => r.intentId === p.intentId),
     }));
 
@@ -224,6 +228,7 @@ export const refundLegs = (order) => {
     channel: 'MANUAL',
     intentId: null,
     intentProviderRef: null,
+    chargeProviderRef: null,
     available: manualCollected - held((r) => r.channel === 'MANUAL'),
   };
 

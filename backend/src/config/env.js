@@ -35,6 +35,14 @@ export const env = {
   // variables. The test adapter needs neither: it never leaves the process.
   POS_GATEWAY_KEY_ID: process.env.POS_GATEWAY_KEY_ID || null,
   POS_GATEWAY_KEY_SECRET: process.env.POS_GATEWAY_KEY_SECRET || null,
+  // Overridable so the adapter's HTTP behaviour — idempotency headers, error
+  // classification, timeouts — can be exercised against a local stub with no
+  // provider account. Guarded below: outside test and development this may
+  // only ever be an https:// origin.
+  POS_GATEWAY_API_BASE: process.env.POS_GATEWAY_API_BASE || null,
+  // A provider call that never returns must not hold a cashier, or a request
+  // handler, forever. Exceeding this is UNKNOWN, never "refused".
+  POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
@@ -78,4 +86,24 @@ if (env.NODE_ENV !== 'production' && env.POS_GATEWAY_KEY_ID?.includes('_live_'))
 if (!Number.isFinite(env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS) ||
     env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS <= 0) {
   throw new Error('POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS must be a positive number of seconds');
+}
+// A redirected API base is how a test points the adapter at a stub. Outside
+// test and development it is how an attacker who can set one variable would
+// send every API key and every charge to a host of their choosing, so plain
+// http and non-URLs are refused there — and the whitelist is on the safe
+// environments, so an unset NODE_ENV refuses rather than allows.
+if (env.POS_GATEWAY_API_BASE) {
+  const overridable = env.NODE_ENV === 'test' || env.NODE_ENV === 'development';
+  let parsed;
+  try {
+    parsed = new URL(env.POS_GATEWAY_API_BASE);
+  } catch {
+    throw new Error('POS_GATEWAY_API_BASE must be an absolute URL');
+  }
+  if (!overridable && parsed.protocol !== 'https:') {
+    throw new Error('POS_GATEWAY_API_BASE must be an https:// origin outside test and development');
+  }
+}
+if (!Number.isFinite(env.POS_GATEWAY_TIMEOUT_MS) || env.POS_GATEWAY_TIMEOUT_MS <= 0) {
+  throw new Error('POS_GATEWAY_TIMEOUT_MS must be a positive number of milliseconds');
 }
