@@ -39,6 +39,7 @@
 //   Fetch All Orders           https://razorpay.com/docs/api/orders/fetch-all/
 //   Create a Normal Refund     https://razorpay.com/docs/api/refunds/create-normal/
 //   Refund idempotency         https://razorpay.com/docs/api/refunds/normal-refunds-idempotent/
+//   Refunds for a Payment      https://razorpay.com/docs/api/refunds/fetch-multiple-refund-payment/
 //   Validate/Test Webhooks     https://razorpay.com/docs/webhooks/validate-test/
 //   API Authentication         https://razorpay.com/docs/api/authentication/
 //
@@ -260,6 +261,45 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
 
 // --- refunds ----------------------------------------------------------------
 
+// The most refunds one fetch can return (docs: default 10, maximum 100). It
+// matters below: a full page may be a truncated page, and a key that is not on
+// a truncated page has not been shown to be absent.
+const REFUND_PAGE_MAX = 100;
+
+// Did a refund under OUR key already happen?
+//
+// A 4xx on the refund POST says Razorpay would not accept THAT REQUEST. It does
+// not say no refund exists. Razorpay rejects a replayed idempotency key whose
+// payload differs, and a conflict means a concurrent attempt may have created
+// one already — in both cases a refund can be on its way to the customer while
+// the status code reads like a refusal. Releasing the reservation on the status
+// alone is how the same money gets refunded twice.
+//
+// So the status is only the question. This is the answer: every refund on the
+// charge carries notes.pos_refund_key, so the key we sent is findable. It
+// reports three outcomes and never guesses between them.
+//   FOUND     — a refund under this key exists; the provider acted.
+//   ABSENT    — the whole list was read and this key is not in it.
+//   AMBIGUOUS — could not be established. Not the same as ABSENT.
+const findRefundByKey = async (chargeProviderRef, idempotencyKey) => {
+  const page = await request(
+    'GET',
+    `/v1/payments/${encodeURIComponent(chargeProviderRef)}/refunds?count=${REFUND_PAGE_MAX}`,
+  );
+  const items = Array.isArray(page?.items) ? page.items : null;
+  if (!items) return { state: 'AMBIGUOUS', refund: null };
+
+  const matches = items.filter((item) => item?.notes?.pos_refund_key === idempotencyKey);
+  if (matches.length === 1) return { state: 'FOUND', refund: matches[0] };
+  // Two refunds under one key is a state this adapter cannot have created, and
+  // choosing one of them would be a guess about which money moved.
+  if (matches.length > 1) return { state: 'AMBIGUOUS', refund: null };
+  // Absence is only evidence when the list was complete. A full page might have
+  // a second page behind it holding the very refund being looked for.
+  if (items.length >= REFUND_PAGE_MAX) return { state: 'AMBIGUOUS', refund: null };
+  return { state: 'ABSENT', refund: null };
+};
+
 // chargeProviderRef is the pay_… the money actually landed on. intentProviderRef
 // — the order_… — cannot be refunded; Razorpay has no such route, and passing
 // it would 400 on every gateway refund ever raised.
@@ -275,18 +315,57 @@ const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId,
       { kind: 'LOCAL' },
     );
   }
-  const refund = await request('POST', `/v1/payments/${encodeURIComponent(chargeProviderRef)}/refund`, {
-    // Razorpay's own idempotency header for this route. With it, a retry of a
-    // request we never saw the answer to returns the FIRST refund instead of
-    // creating a second one — which is the difference between an unknown
-    // outcome and paying the customer back twice.
-    headers: { 'x-refund-idempotency': idempotencyKey },
-    body: {
-      amount: amountPaise,
-      speed: 'normal',
-      notes: { pos_order_id: orderId, pos_refund_key: idempotencyKey },
-    },
-  });
+  let refund;
+  try {
+    refund = await request('POST', `/v1/payments/${encodeURIComponent(chargeProviderRef)}/refund`, {
+      // Razorpay's own idempotency header for this route. With it, a retry of a
+      // request we never saw the answer to returns the FIRST refund instead of
+      // creating a second one — which is the difference between an unknown
+      // outcome and paying the customer back twice.
+      headers: { 'x-refund-idempotency': idempotencyKey },
+      body: {
+        amount: amountPaise,
+        speed: 'normal',
+        notes: { pos_order_id: orderId, pos_refund_key: idempotencyKey },
+      },
+    });
+  } catch (err) {
+    // Only a client error is worth a second look. A 5xx or a request that was
+    // never answered already holds the money — there is nothing to improve and
+    // an extra call would only add a way to fail.
+    const status = err instanceof RazorpayError ? err.status : null;
+    if (status === null || status < 400 || status >= 500) throw err;
+
+    // This is the rule the whole file turns on: a 4xx is a claim about the
+    // request, and the reservation is only released once that claim is checked
+    // against the refunds that actually exist on the charge.
+    let outcome;
+    try {
+      outcome = await findRefundByKey(chargeProviderRef, idempotencyKey);
+    } catch {
+      // The lookup failed, so the question stands unanswered.
+      outcome = { state: 'AMBIGUOUS', refund: null };
+    }
+
+    if (outcome.state === 'ABSENT') {
+      // 4xx AND no refund on the charge under our key. Now the refusal is
+      // evidenced, and only now may the held amount go back on sale.
+      throw err;
+    }
+    if (outcome.state !== 'FOUND') {
+      // UNKNOWN carries no status, so providerRefused is false and the
+      // reservation stands. The operator is told which two facts conflict
+      // rather than being shown a refusal the provider may not have made.
+      throw new RazorpayError(
+        `Razorpay answered ${status} but a refund under this key may already exist, so the money stays held: ${err.message}`,
+        { kind: 'UNKNOWN', code: err.code },
+      );
+    }
+    // FOUND: the earlier request did go through. Fall through to the same
+    // amount and currency checks a fresh refund gets — a recovered refund is
+    // not trusted any further than a created one.
+    refund = outcome.refund;
+  }
 
   if (typeof refund.id !== 'string' || !refund.id) {
     throw new RazorpayError('Razorpay accepted the refund without returning a reference', { kind: 'UNKNOWN' });
