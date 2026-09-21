@@ -7,14 +7,18 @@ import { useToast } from '../components/toast.jsx';
 import { EmptyState, ErrorNote, Modal, PageHeader, ReasonModal } from '../components/ui.jsx';
 import { KotListModal, ReceiptModal } from '../components/Receipt.jsx';
 import {
-  MANUAL_PAYMENT_LABEL,
   ORDER_STATUS_STYLES,
   canSell,
+  channelStyle,
   fmtDateTime,
   fmtINR,
   getAtcScope,
   isAtc,
   isManagerUp,
+  isUnconfirmedRefund,
+  paymentLabelFor,
+  refundLabelFor,
+  refundStatusStyle,
 } from '../lib/pos.js';
 
 // /orders — history with filters + detail drawer (contract §5.3 reads,
@@ -29,6 +33,7 @@ function StatusChip({ status }) {
 
 // Refund needs amount + mandatory reason (§5.3) — its own modal.
 function RefundModal({ open, order, onClose, onDone }) {
+  const toast = useToast();
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
@@ -45,6 +50,13 @@ function RefundModal({ open, order, onClose, onDone }) {
 
   if (!open || !order) return null;
 
+  // Display-only hint. The server picks the leg and is the authority; this
+  // only warns that provider money cannot come back across the counter, so
+  // submitting may REQUEST rather than return.
+  const payments = order.payments || [];
+  const viaProvider = payments.some((p) => p.channel === 'GATEWAY');
+  const mixed = viaProvider && payments.some((p) => p.channel !== 'GATEWAY');
+
   const submit = async (e) => {
     e.preventDefault();
     setError('');
@@ -54,6 +66,10 @@ function RefundModal({ open, order, onClose, onDone }) {
         amount: Number(amount),
         reason: reason.trim(),
       });
+      // 202 — recorded and holding its money, but the provider never answered.
+      // Closing silently here would hide the one state that must be
+      // reconciled rather than retried as a fresh refund.
+      if (data.warning) toast(data.warning, 'error');
       onDone(data.order);
       onClose();
     } catch (err) {
@@ -64,11 +80,25 @@ function RefundModal({ open, order, onClose, onDone }) {
   };
 
   return (
-    <Modal open title="Record refund" onClose={onClose}>
+    <Modal open title={viaProvider ? 'Request refund' : 'Record refund'} onClose={onClose}>
       <p className="mb-3 text-sm text-slate-500">
-        Collected so far {fmtINR(order.amountPaid)} · already refunded {fmtINR(order.amountRefunded)}. The
-        server refuses refunds beyond the collected amount. This action is audited.
+        Collected so far {fmtINR(order.amountPaid)} · already refunded {fmtINR(order.amountRefunded)}
+        {Number(order.amountRefundPending) > 0
+          ? ` · requested, not yet paid out ${fmtINR(order.amountRefundPending)}`
+          : ''}
+        . The server refuses refunds beyond the collected amount. This action is audited.
       </p>
+      {viaProvider ? (
+        <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Money collected by the payment provider can only be returned by the provider, so a refund
+          of that part stays REQUESTED until the provider confirms the payout — submitting it
+          returns nothing by itself.
+          {mixed
+            ? ' This order was paid in more than one part, and a refund has to come out of one of'
+              + ' them: refund the card share and the cash share separately.'
+            : ''}
+        </p>
+      ) : null}
       <form onSubmit={submit} className="space-y-3">
         <div>
           <label className="label" htmlFor="refund-amount">Refund amount (₹)</label>
@@ -101,7 +131,13 @@ function RefundModal({ open, order, onClose, onDone }) {
           className="btn-primary w-full"
           disabled={busy || amount === '' || Number(amount) <= 0 || reason.trim().length < 3}
         >
-          {busy ? 'Recording…' : 'Record refund'}
+          {busy
+            ? viaProvider
+              ? 'Requesting…'
+              : 'Recording…'
+            : viaProvider
+              ? 'Request refund'
+              : 'Record refund'}
         </button>
       </form>
     </Modal>
@@ -155,6 +191,26 @@ function DetailDrawer({ orderId, onClose, onChanged }) {
     }
   };
 
+  // Re-sends an unanswered request under its ORIGINAL idempotency key, so the
+  // provider returns the same refund rather than opening a second one. This is
+  // the only safe response to an unconfirmed refund — never a new refund.
+  const reconcile = async (refundId) => {
+    setBusy(true);
+    try {
+      const { data } = await api.post(`/orders/${orderId}/refunds/${refundId}/reconcile`, {});
+      updated(data.order);
+      toast(data.warning || 'The provider confirmed the refund; awaiting payout', data.warning ? 'error' : 'success');
+    } catch (err) {
+      toast(apiError(err, 'Could not reconcile the refund'), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Non-authoritative hint (§3): the server refuses a second refund while one
+  // is unconfirmed. Mirroring it here means the screen never offers an action
+  // whose only outcome is a refusal — and never invites paying the customer twice.
+  const holdsUnconfirmed = order ? order.refunds.some(isUnconfirmedRefund) : false;
   const netCollected = order ? Number(order.amountPaid ?? 0) - Number(order.amountRefunded ?? 0) === 0 : false;
   const anyKot = order ? order.items.some((i) => i.kotSeq !== null && i.kotSeq !== undefined) : false;
 
@@ -302,6 +358,15 @@ function DetailDrawer({ orderId, onClose, onChanged }) {
                     <span>-{fmtINR(order.amountRefunded)}</span>
                   </div>
                 ) : null}
+                {/* Kept apart from Refunded, exactly as the server keeps them:
+                    requested money has not come back, so it never gets the
+                    minus sign or a place in the refunded figure. */}
+                {Number(order.amountRefundPending) > 0 ? (
+                  <div className="flex justify-between text-xs font-semibold text-amber-700">
+                    <span>Refund requested (not yet paid out)</span>
+                    <span>{fmtINR(order.amountRefundPending)}</span>
+                  </div>
+                ) : null}
                 {Number(order.amountDue) > 0 ? (
                   <div className="flex justify-between text-xs font-bold text-pos-ember">
                     <span>Balance due</span>
@@ -328,10 +393,16 @@ function DetailDrawer({ orderId, onClose, onChanged }) {
                         ) : null}
                         {p.note ? <div className="text-slate-500">{p.note}</div> : null}
                         <div className="mt-0.5 text-slate-400">
-                          {p.receivedBy?.fullName} · {fmtDateTime(p.createdAt)}
+                          {/* A gateway payment has no receiver: the provider
+                              settled it and no member of staff took anything.
+                              Naming nobody beats a dangling separator. */}
+                          {p.receivedBy?.fullName || 'Settled by the provider'} · {fmtDateTime(p.createdAt)}
                         </div>
-                        <div className="mt-1 text-[9px] font-bold uppercase tracking-wide text-amber-700">
-                          {MANUAL_PAYMENT_LABEL}
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className={`badge px-2 py-0 text-[9px] ${channelStyle(p.channel)}`}>{p.channel}</span>
+                          <span className="text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                            {paymentLabelFor(p.channel)}
+                          </span>
                         </div>
                       </li>
                     ))}
@@ -343,18 +414,81 @@ function DetailDrawer({ orderId, onClose, onChanged }) {
                 <>
                   <h3 className="label mt-4">Refunds</h3>
                   <ul className="space-y-2">
-                    {order.refunds.map((f) => (
-                      <li key={f.id} className="rounded-lg border border-red-100 bg-red-50/50 px-3 py-2 text-xs">
-                        <div className="flex justify-between font-semibold text-red-700">
-                          <span>Refund</span>
-                          <span>-{fmtINR(f.amount)}</span>
-                        </div>
-                        <div className="text-slate-600">{f.reason}</div>
-                        <div className="mt-0.5 text-slate-400">
-                          {f.by?.fullName} · {fmtDateTime(f.createdAt)}
-                        </div>
-                      </li>
-                    ))}
+                    {order.refunds.map((f) => {
+                      // The minus sign is earned by settlement: a PENDING
+                      // request has returned nothing yet, and a FAILED one
+                      // never moved any money at all.
+                      const settled = f.status === 'SUCCEEDED';
+                      const failed = f.status === 'FAILED';
+                      const unconfirmed = isUnconfirmedRefund(f);
+                      return (
+                        <li
+                          key={f.id}
+                          className={`rounded-lg border px-3 py-2 text-xs ${
+                            settled
+                              ? 'border-red-100 bg-red-50/50'
+                              : failed
+                                ? 'border-slate-200 bg-slate-50'
+                                : unconfirmed
+                                  ? 'border-orange-300 bg-orange-50'
+                                  : 'border-amber-200 bg-amber-50/60'
+                          }`}
+                        >
+                          <div
+                            className={`flex justify-between font-semibold ${
+                              settled ? 'text-red-700' : failed ? 'text-slate-500' : 'text-amber-700'
+                            }`}
+                          >
+                            <span>
+                              {settled
+                                ? 'Refund'
+                                : failed
+                                  ? 'Refund (failed)'
+                                  : unconfirmed
+                                    ? 'Refund unconfirmed'
+                                    : 'Refund requested'}
+                            </span>
+                            <span>{settled ? `-${fmtINR(f.amount)}` : fmtINR(f.amount)}</span>
+                          </div>
+                          <div className="text-slate-600">{f.reason}</div>
+                          {failed && f.failureReason ? (
+                            <div className="mt-0.5 font-semibold text-red-600">{f.failureReason}</div>
+                          ) : null}
+                          {unconfirmed ? (
+                            <div className="mt-1 rounded border border-orange-200 bg-white/70 px-2 py-1.5 text-orange-800">
+                              <div className="font-semibold">
+                                The provider never confirmed this request.
+                              </div>
+                              <div className="mt-0.5">
+                                It may still pay out, so its amount stays held. Reconcile it — raising a
+                                new refund could return this money twice.
+                              </div>
+                              {managerUp ? (
+                                <button
+                                  type="button"
+                                  onClick={() => reconcile(f.id)}
+                                  disabled={busy}
+                                  className="mt-1.5 rounded-lg bg-orange-600 px-2.5 py-1 text-[11px] font-bold text-white disabled:opacity-50"
+                                >
+                                  {busy ? 'Reconciling…' : 'Reconcile with the provider'}
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          <div className="mt-0.5 text-slate-400">
+                            {f.by?.fullName} · {fmtDateTime(f.createdAt)}
+                            {settled && f.settledAt ? ` · paid out ${fmtDateTime(f.settledAt)}` : ''}
+                          </div>
+                          <div className="mt-1 flex items-center gap-1.5">
+                            <span className={`badge px-2 py-0 text-[9px] ${channelStyle(f.channel)}`}>{f.channel}</span>
+                            <span className={`badge px-2 py-0 text-[9px] ${refundStatusStyle(f.status)}`}>{f.status}</span>
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                              {refundLabelFor(f)}
+                            </span>
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </>
               ) : null}
@@ -386,7 +520,13 @@ function DetailDrawer({ orderId, onClose, onChanged }) {
                 {['BILLED', 'PAID'].includes(order.status) ? (
                   <button
                     type="button"
-                    className="flex items-center gap-1 font-semibold text-pos-royal hover:underline"
+                    className="flex items-center gap-1 font-semibold text-pos-royal hover:underline disabled:cursor-not-allowed disabled:text-slate-400 disabled:no-underline"
+                    disabled={holdsUnconfirmed}
+                    title={
+                      holdsUnconfirmed
+                        ? 'A refund on this order was never confirmed by the provider. Reconcile that one first — a second refund could return the money twice.'
+                        : undefined
+                    }
                     onClick={() => setRefundOpen(true)}
                   >
                     <RotateCcw className="h-3.5 w-3.5" /> Refund…

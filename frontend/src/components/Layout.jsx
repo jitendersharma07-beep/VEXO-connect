@@ -7,6 +7,7 @@ import {
   Building2,
   KeyRound,
   LayoutDashboard,
+  ListChecks,
   LogOut,
   Package,
   ReceiptText,
@@ -156,7 +157,8 @@ export default function Layout() {
                   <NavItem to="/orders" icon={ReceiptText} label="Orders" />
                   <NavItem to="/catalog" icon={Package} label="Catalog" />
                   <NavItem to="/tables" icon={Armchair} label="Tables" />
-                  <NavItem to="/reports" icon={BarChart3} label="Sales report" />
+                  <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                  <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
                 </>
               ) : null}
             </>
@@ -171,7 +173,12 @@ export default function Layout() {
                   <NavItem to="/orders" icon={ReceiptText} label="Orders" />
                   {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
                   {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
-                  {canSeeReports(user) ? <NavItem to="/reports" icon={BarChart3} label="Sales report" /> : null}
+                  {canSeeReports(user) ? (
+                    <>
+                      <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                      <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
+                    </>
+                  ) : null}
                   <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
                     Manage
                   </div>
@@ -188,7 +195,11 @@ export default function Layout() {
           <div className="flex items-center gap-1.5 font-bold text-white">
             <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> ATC POS
           </div>
-          Phase 2 — all payments are manual records; gateway payments arrive in a later phase.
+          {/* States the rule, never a count. Both channels coexist, so any
+              sentence beginning "all payments..." is wrong the moment one
+              order is settled the other way. */}
+          Every payment shows how it was taken — recorded by staff, or confirmed by the payment
+          provider.
         </div>
       </aside>
 

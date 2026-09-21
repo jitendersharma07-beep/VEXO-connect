@@ -26,6 +26,7 @@ export function StatCard({ icon: Icon, label, value, hint, accent = 'royal' }) {
     royal: 'bg-pos-royal/10 text-pos-royal',
     orange: 'bg-pos-orange/10 text-pos-ember',
     green: 'bg-emerald-100 text-emerald-700',
+    red: 'bg-red-100 text-red-700',
     slate: 'bg-slate-100 text-slate-600',
   };
   return (

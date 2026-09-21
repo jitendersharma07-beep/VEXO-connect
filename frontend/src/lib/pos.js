@@ -5,10 +5,54 @@
 // allowed solely for non-authoritative hints (disable a button), never for
 // showing an amount.
 
-// §5.3 — every phase-2 payment is a hand-recorded entry. This exact label is
-// rendered wherever a payment appears; the receipt additionally prints the
-// server-sent `label` verbatim.
+// §5.3 — a payment is either hand-recorded by a member of staff or settled by
+// a provider and confirmed by a signature-verified webhook. The two are never
+// shown alike: the label states which, and is chosen from the payment's own
+// channel rather than assumed. The receipt prints the server-sent `label`.
 export const MANUAL_PAYMENT_LABEL = 'MANUAL PAYMENT RECORD — not gateway-verified';
+export const GATEWAY_PAYMENT_LABEL = 'GATEWAY PAYMENT — confirmed by the provider';
+
+export const paymentLabelFor = (channel) =>
+  channel === 'GATEWAY' ? GATEWAY_PAYMENT_LABEL : MANUAL_PAYMENT_LABEL;
+
+// Amber is the caution colour used for BILLED-but-unsettled elsewhere, and
+// hand-recorded money carries the same "somebody asserted this" weight.
+// Emerald matches PAID: provider-confirmed and not in question.
+export const CHANNEL_STYLES = {
+  MANUAL: 'bg-amber-100 text-amber-700',
+  GATEWAY: 'bg-emerald-100 text-emerald-700',
+};
+
+export const channelStyle = (channel) => CHANNEL_STYLES[channel] || 'bg-slate-200 text-slate-600';
+
+// Refund labels mirror the server's refundLabelFor (backend lib/orders.js):
+// a gateway refund is only "paid out" once the provider's webhook confirmed
+// it. Labelling it returned any earlier would tell the customer their money
+// is back while the provider has moved nothing.
+// The server sends its own `label` on every refund; that is the authority and
+// is used whenever present. This is the fallback for an older payload.
+export const refundLabelFor = (r) => {
+  if (r?.label) return r.label;
+  if (r?.channel !== 'GATEWAY') return 'REFUND HANDED BACK — recorded by staff';
+  if (r?.status === 'SUCCEEDED') return 'REFUND PAID OUT — confirmed by the provider';
+  if (r?.status === 'FAILED') return 'REFUND FAILED — the provider did not pay this out';
+  if (r?.providerConfirmed === false) return 'REFUND SENT — awaiting confirmation from the provider';
+  return 'REFUND REQUESTED — not yet paid out by the provider';
+};
+
+// A gateway refund the provider never acknowledged. It may already be paying
+// out, so the screen must not offer "refund again" — only reconcile.
+export const isUnconfirmedRefund = (r) =>
+  r?.channel === 'GATEWAY' && r?.status === 'PENDING' && r?.providerConfirmed === false;
+
+export const REFUND_STATUS_STYLES = {
+  PENDING: 'bg-amber-100 text-amber-700',
+  SUCCEEDED: 'bg-emerald-100 text-emerald-700',
+  FAILED: 'bg-red-100 text-red-700',
+};
+
+export const refundStatusStyle = (status) =>
+  REFUND_STATUS_STYLES[status] || 'bg-slate-200 text-slate-600';
 
 export const fmtINR = (v) => {
   const n = Number(v);

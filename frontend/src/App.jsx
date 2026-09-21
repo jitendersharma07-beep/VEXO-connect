@@ -14,6 +14,7 @@ import Orders from './pages/Orders.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
+import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import NotFound from './pages/NotFound.jsx';
 
 function Home() {
@@ -75,6 +76,14 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <SalesReport />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="reports/reconciliation"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <GatewayReconciliation />
                   </RequireRoles>
                 }
               />

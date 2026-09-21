@@ -3,7 +3,7 @@ import { BarChart3, IndianRupee, Percent, ReceiptText, RotateCcw, Wallet } from 
 import api, { apiError } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { EmptyState, ErrorNote, PageHeader, StatCard } from '../components/ui.jsx';
-import { fmtINR, getAtcScope, isAtc, istDaysAgo, istToday } from '../lib/pos.js';
+import { channelStyle, fmtINR, getAtcScope, isAtc, istDaysAgo, istToday } from '../lib/pos.js';
 
 // /reports — sales report (contract §10). Every figure is rendered from the
 // server's report object; the note is rendered verbatim. CASHIER gets 403 by
@@ -141,6 +141,30 @@ export default function SalesReport() {
             <span className="text-slate-500">voided {report.orders.voided}</span>
           </div>
 
+          {/* How much of the collected money a person asserted versus how much
+              a provider confirmed. Given its own row rather than buried in the
+              method table, because it is the one figure an owner reconciles. */}
+          {report.byChannel?.length ? (
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              {report.byChannel.map((c) => (
+                <div key={c.channel} className="card flex items-center justify-between px-5 py-4">
+                  <div>
+                    <span className={`badge ${channelStyle(c.channel)}`}>{c.channel}</span>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {c.channel === 'GATEWAY'
+                        ? 'Settled by the provider, confirmed by webhook'
+                        : 'Hand-recorded by staff, not provider-verified'}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-extrabold text-pos-ink">{fmtINR(c.amount)}</p>
+                    <p className="text-xs text-slate-400">{c.count} payment{c.count === 1 ? '' : 's'}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
             <div className="card p-5">
               <h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-500">By payment method</h2>
@@ -161,7 +185,7 @@ export default function SalesReport() {
                       <tr key={i} className="border-t border-slate-100">
                         <td className="py-2 font-semibold text-pos-ink">{m.method}</td>
                         <td className="py-2">
-                          <span className="badge bg-amber-100 text-amber-700">{m.channel}</span>
+                          <span className={`badge ${channelStyle(m.channel)}`}>{m.channel}</span>
                         </td>
                         <td className="py-2 text-right text-slate-600">{m.count}</td>
                         <td className="py-2 text-right font-semibold text-pos-ink">{fmtINR(m.amount)}</td>

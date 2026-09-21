@@ -77,18 +77,32 @@ export function ReceiptView({ receipt }) {
           {p.changeDue !== null && p.changeDue !== undefined ? (
             <Row left="Change due" right={fmtINR(p.changeDue)} />
           ) : null}
-          {/* §9: the manual-payment label prints verbatim. */}
+          {/* §9: the server-sent label prints verbatim. It states whether this
+              payment was hand-recorded or confirmed by the provider, so it is
+              never substituted client-side. */}
           {p.label ? <div className="text-[9px] font-bold uppercase">{p.label}</div> : null}
         </div>
       ))}
       {(r.refunds || []).length > 0 ? (
         <>
           <Line />
-          {r.refunds.map((f, i) => (
-            <div key={i}>
-              <Row left={`Refund${f.reason ? ` — ${f.reason}` : ''}`} right={`-${fmtINR(f.amount)}`} />
-            </div>
-          ))}
+          {r.refunds.map((f, i) => {
+            // §9: the minus prints only for settled money. A REQUESTED
+            // gateway refund has moved nothing yet, and this paper is the
+            // customer's evidence of what happened to their money — it must
+            // not say returned before the provider paid out. The server-sent
+            // label prints verbatim, like the payment labels above.
+            const settled = f.status ? f.status === 'SUCCEEDED' : true;
+            return (
+              <div key={i} className="mb-1">
+                <Row
+                  left={`${settled ? 'Refund' : 'Refund requested'}${f.reason ? ` — ${f.reason}` : ''}`}
+                  right={settled ? `-${fmtINR(f.amount)}` : fmtINR(f.amount)}
+                />
+                {f.label ? <div className="text-[9px] font-bold uppercase">{f.label}</div> : null}
+              </div>
+            );
+          })}
         </>
       ) : null}
       <Row left="Amount paid" right={fmtINR(r.amountPaid)} />

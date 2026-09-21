@@ -25,8 +25,10 @@ import { KotListModal, KotModal, ReceiptModal } from '../components/Receipt.jsx'
 import {
   MANUAL_PAYMENT_LABEL,
   ORDER_STATUS_STYLES,
+  channelStyle,
   fmtINR,
   fmtTime,
+  paymentLabelFor,
   isLicenseError,
   isManagerUp,
   licenseUsable,
@@ -1080,7 +1082,12 @@ export default function Sell() {
                           </span>
                           <span>{fmtINR(p.amount)}</span>
                         </div>
-                        <div className="text-[9px] font-bold uppercase tracking-wide text-amber-700">{MANUAL_PAYMENT_LABEL}</div>
+                        <div className="mt-0.5 flex items-center gap-1">
+                          <span className={`badge px-1.5 py-0 text-[9px] ${channelStyle(p.channel)}`}>{p.channel}</span>
+                          <span className="text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                            {paymentLabelFor(p.channel)}
+                          </span>
+                        </div>
                       </div>
                     ))}
                     <div className="flex justify-between text-xs font-semibold text-slate-700">
