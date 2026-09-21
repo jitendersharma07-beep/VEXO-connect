@@ -30,6 +30,24 @@
 //    through unmapped so it lands in reconciliation for a human, which is the
 //    correct outcome for "the customer thinks they paid and we have not been
 //    paid".
+//
+// The pages each wire-format decision was read off, so the next person can
+// re-check them rather than re-derive them:
+//
+//   Create an Order            https://razorpay.com/docs/api/orders/create/
+//   Payment capture settings   https://razorpay.com/docs/payment-gateway/rainy-day/capture-settings/api
+//   Fetch All Orders           https://razorpay.com/docs/api/orders/fetch-all/
+//   Create a Normal Refund     https://razorpay.com/docs/api/refunds/create-normal/
+//   Refund idempotency         https://razorpay.com/docs/api/refunds/normal-refunds-idempotent/
+//   Validate/Test Webhooks     https://razorpay.com/docs/webhooks/validate-test/
+//   API Authentication         https://razorpay.com/docs/api/authentication/
+//
+// Two of those are worth stating outright because they are easy to get wrong.
+// The refund idempotency key must be at least 10 characters of alphanumerics,
+// hyphens and underscores, and `receipt` is capped at 40 — randomUUID() meets
+// both, which is why the same value serves as key and receipt. And test and
+// live share one hostname; the key pair alone decides which account is hit, so
+// there is no sandbox base URL to point at.
 
 import { Buffer } from 'node:buffer';
 
@@ -59,6 +77,12 @@ const authHeader = () =>
 // timeout, socket reset — may already have moved money, so it is never
 // reported as a refusal. orders.js turns anything non-terminal into an
 // unconfirmed refund that keeps holding its amount.
+//
+// LOCAL and MISMATCH are failures on our side of the wire, and neither is a
+// refusal. LOCAL means the request never left: a precondition we check
+// ourselves, so the provider has no opinion about it. MISMATCH means Razorpay
+// answered 200 and acted, but not as asked — which is the opposite of a
+// refusal, because money may well have moved.
 export class RazorpayError extends Error {
   constructor(message, { kind, status = null, code = null }) {
     super(message);
@@ -67,12 +91,17 @@ export class RazorpayError extends Error {
     this.status = status;
     this.code = code;
     this.retryable = kind === 'RETRYABLE' || kind === 'UNKNOWN';
-    // Part of the adapter contract, and deliberately opt-in: it asserts that
-    // the provider received the request, refused it, and moved no money, which
-    // is what lets orders.js release the reserved amount. An adapter that does
-    // not set it gets the conservative outcome — an unconfirmed refund that
-    // keeps holding its money until a human reconciles it.
-    this.providerRefused = kind === 'TERMINAL';
+    // Part of the adapter contract: it asserts that the provider received the
+    // request, refused it, and moved no money, which is what lets orders.js
+    // release the reserved amount and hand it back to be refunded again.
+    //
+    // So it is not derived from the label alone. It also requires the HTTP
+    // client-error status that is the evidence for the claim, and only
+    // request() — which has actually spoken to Razorpay — can supply one. A
+    // throw raised locally carries status null and therefore cannot release
+    // money however it is classified, which is the guarantee wanted here: a
+    // bug in our own precondition must never read as a decision by Razorpay.
+    this.providerRefused = kind === 'TERMINAL' && status >= 400 && status < 500;
   }
 }
 
@@ -167,11 +196,30 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
     amount: amountPaise,
     currency,
     receipt: idempotencyKey,
-    // Nested form; the flat `payment_capture` is deprecated. Automatic capture
-    // matters for correctness, not convenience: an authorized-but-uncaptured
-    // payment is money the shop has not received, and this POS only ever
-    // records captures.
-    payment: { capture: 'automatic' },
+    // Automatic capture matters for correctness, not convenience: an
+    // authorized-but-uncaptured payment is money the shop has not received,
+    // and this POS only ever records captures.
+    //
+    // capture_options is not optional here, whatever the field list says. Per
+    // "Configure Payment Capture Settings using Orders API"
+    // (https://razorpay.com/docs/payment-gateway/rainy-day/capture-settings/api),
+    // automatic_expiry_period is mandatory when capture is "automatic", and
+    // refund_speed is mandatory outright — so `{ capture: 'automatic' }` alone
+    // is an incomplete request, not a shorter spelling of this one.
+    payment: {
+      capture: 'automatic',
+      capture_options: {
+        // Minutes an authorized payment may sit before it is auto-captured.
+        // 12 is the documented minimum, and the right end of the range for a
+        // counter: the customer is standing there, so the shop wants the money
+        // taken now rather than held pending.
+        automatic_expiry_period: 12,
+        // The refund default for payments on this order. 'normal' matches the
+        // speed createRefund asks for explicitly; 'optimum' would quietly bill
+        // the shop for instant refunds it never chose.
+        refund_speed: 'normal',
+      },
+    },
     notes: { pos_order_id: orderId },
   };
 
@@ -179,11 +227,14 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
   try {
     created = await request('POST', '/v1/orders', { body: payload });
   } catch (err) {
-    // Terminal means Razorpay refused and created nothing, so there is nothing
-    // to recover. Anything else may have created an order we never saw the id
-    // of; opening a second one would show the customer two payable pages for
+    // A refusal created nothing, so there is nothing to recover. The test is
+    // providerRefused rather than the TERMINAL label because only the former
+    // carries the answered-and-declined evidence: a 501 is classified terminal
+    // too, and that one is a server fault which may well have created an order.
+    // Anything short of a refusal may have created an order we never saw the id
+    // of, and opening a second would show the customer two payable pages for
     // one bill.
-    if (err instanceof RazorpayError && err.kind === 'TERMINAL') throw err;
+    if (err instanceof RazorpayError && err.providerRefused) throw err;
     const recovered = await findOrderByReceipt(idempotencyKey).catch(() => null);
     if (!recovered?.id) throw err;
     created = recovered;
@@ -192,9 +243,10 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
   if (typeof created.id !== 'string' || !created.id) {
     throw new RazorpayError('Razorpay created an order without an id', { kind: 'UNKNOWN' });
   }
-  // A charge for a different amount than we asked for is not our charge.
+  // A charge for a different amount than we asked for is not our charge. An
+  // order was nonetheless created, so this is a mismatch rather than a refusal.
   if (paiseFrom(created.amount) !== amountPaise) {
-    throw new RazorpayError('Razorpay created an order for a different amount', { kind: 'TERMINAL' });
+    throw new RazorpayError('Razorpay created an order for a different amount', { kind: 'MISMATCH' });
   }
 
   return {
@@ -212,10 +264,15 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
 // — the order_… — cannot be refunded; Razorpay has no such route, and passing
 // it would 400 on every gateway refund ever raised.
 const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId, idempotencyKey }) => {
+  // LOCAL, not TERMINAL. Razorpay is never asked, so it cannot have refused:
+  // this is our own record missing the charge id, and the refund is very
+  // possibly still payable once that is put right. Calling it a refusal would
+  // release the held amount and write "the payment provider refused" against a
+  // provider that was never contacted.
   if (typeof chargeProviderRef !== 'string' || !chargeProviderRef.startsWith('pay_')) {
     throw new RazorpayError(
       'this payment has no Razorpay payment id recorded, so it cannot be refunded through the API',
-      { kind: 'TERMINAL' },
+      { kind: 'LOCAL' },
     );
   }
   const refund = await request('POST', `/v1/payments/${encodeURIComponent(chargeProviderRef)}/refund`, {
@@ -234,11 +291,16 @@ const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId,
   if (typeof refund.id !== 'string' || !refund.id) {
     throw new RazorpayError('Razorpay accepted the refund without returning a reference', { kind: 'UNKNOWN' });
   }
+  // MISMATCH, emphatically not a refusal. Razorpay answered 200 with a refund
+  // entity, so a refund exists and an amount is on its way to the customer —
+  // just not the one asked for. Releasing the reservation here would free that
+  // money to be refunded a second time on top of a payout already in flight.
+  // It holds, and a human is told exactly what does not line up.
   if (paiseFrom(refund.amount) !== amountPaise) {
-    throw new RazorpayError('Razorpay refunded a different amount than was requested', { kind: 'TERMINAL' });
+    throw new RazorpayError('Razorpay refunded a different amount than was requested', { kind: 'MISMATCH' });
   }
   if (currency && typeof refund.currency === 'string' && refund.currency !== currency) {
-    throw new RazorpayError('Razorpay refunded in a different currency', { kind: 'TERMINAL' });
+    throw new RazorpayError('Razorpay refunded in a different currency', { kind: 'MISMATCH' });
   }
 
   // Deliberately NOT reporting refund.status here even when Razorpay already

@@ -476,7 +476,10 @@ describe('refunding a Razorpay payment', () => {
     expect(reserved).toBeLessThanOrEqual(order.totalPaise);
   }, 20000);
 
-  it('refuses to refund a gateway payment whose pay_ id was never recorded', async () => {
+  // A fault on OUR side of the wire is not the provider declining. The
+  // distinction decides whether the reserved amount is handed back to be
+  // refunded again, so it is asserted on the money, not just on the label.
+  it('holds the money when our own precondition fails, because Razorpay never answered', async () => {
     const order = await paidOrder();
     // A payment settled before Payment.providerRef existed.
     await prisma.payment.updateMany({ where: { orderId: order.id }, data: { providerRef: null } });
@@ -484,14 +487,145 @@ describe('refunding a Razorpay payment', () => {
     const res = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
       .send({ amount: 100, reason: 'no reference' });
     expect(res.status).toBe(202);
+    expect(res.body.warning).toMatch(/did not confirm/);
 
     const row = await refundOf(order.id);
-    // Terminal and refused before any network call, so the money is released
-    // rather than stranded — and the reason names what a human must do.
-    expect(row.status).toBe('FAILED');
+    // PENDING, not FAILED. Nothing left this process, so Razorpay has no
+    // opinion to record — and "the payment provider refused the refund" would
+    // be a straight untruth about a provider that was never contacted.
+    expect(row.status).toBe('PENDING');
+    expect(row.settledAt).toBeNull();
+    expect(row.failureReason).toMatch(/did not confirm/);
     expect(row.failureReason).toMatch(/no Razorpay payment id/);
     expect(calls.filter((c) => c.path.includes('/refund'))).toHaveLength(0);
+
+    // The assertion that matters. The amount stays reserved, so the order
+    // cannot be refunded a second time on top of it. Were this classified as a
+    // refusal the reservation would be released, and the operator could raise
+    // the same refund again the moment the missing pay_ id was backfilled —
+    // paying the customer twice for one order.
+    queue(answer(200, refundBody(10000, nextId('rfnd_'), order.payRef)));
+    const second = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'trying again' });
+    expect(second.status).toBe(409);
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(1);
   });
+
+  // A 200 carrying a refund for the wrong amount is the most dangerous answer
+  // Razorpay can give: a payout is under way and it is not the one we asked
+  // for. It must not be read as a refusal, or the difference gets refunded on
+  // top of it.
+  it('holds the money when Razorpay refunds an amount other than the one asked for', async () => {
+    const order = await paidOrder();
+    queue(answer(200, refundBody(9999, nextId('rfnd_'), order.payRef)));
+
+    const res = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'amount mismatch' });
+    expect(res.status).toBe(202);
+
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('PENDING');
+    expect(row.failureReason).toMatch(/did not confirm/);
+    expect(row.failureReason).toMatch(/different amount/);
+  });
+});
+
+// Reconcile re-sends a refund the provider never answered, and it is only safe
+// because it re-sends THE SAME request: same charge, same key, same body.
+// Razorpay then hands back the original refund instead of creating a second
+// one. Get any of the three wrong and the retry is a second payout.
+describe('reconciling a refund the provider never confirmed', () => {
+  // A refund that was sent and never answered: PENDING, holding its amount,
+  // with no provider reference. This is the only state reconcile accepts.
+  const unanswered = async () => {
+    const order = await paidOrder();
+    queue(({ res }) => { res.writeHead(200, { 'content-type': 'application/json' }); return undefined; });
+    const res = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'customer changed mind' });
+    expect(res.status).toBe(202);
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('PENDING');
+    expect(row.providerRef).toBeNull();
+    expect(row.idempotencyKey).toBeTruthy();
+    return { order, row };
+  };
+
+  it('re-sends to the same pay_ id under the original idempotency key', async () => {
+    const { order, row } = await unanswered();
+    const first = calls.filter((c) => c.path.includes('/refund')).at(-1);
+    expect(first).toBeTruthy();
+    calls.length = 0;
+
+    const settledRef = nextId('rfnd_');
+    queue(answer(200, refundBody(10000, settledRef, order.payRef)));
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const retry = calls.filter((c) => c.path.includes('/refund'));
+    // One call, which is already the regression: the route used to hand the
+    // adapter the order_… string instead of a leg, so the charge id arrived
+    // undefined, the adapter threw before reaching the network, and reconcile
+    // silently made NO request at all.
+    expect(retry).toHaveLength(1);
+    // The charge, not the attempt. Only a pay_ can be refunded, and reaching
+    // it means going through the intent to the Payment it settled into.
+    expect(retry[0].path).toBe(`/v1/payments/${order.payRef}/refund`);
+    // The ORIGINAL key. A fresh one is a brand new refund at Razorpay, raised
+    // against a request that may be paying out as this runs.
+    expect(retry[0].headers['x-refund-idempotency']).toBe(row.idempotencyKey);
+    expect(retry[0].headers['x-refund-idempotency']).toBe(first.headers['x-refund-idempotency']);
+    // And the same body byte for byte: Razorpay answers 409 to a replayed key
+    // whose body differs, which would strand the refund permanently
+    // unreconcilable.
+    expect(retry[0].body).toBe(first.body);
+
+    const after = await refundOf(order.id);
+    expect(after.providerRef).toBe(settledRef);
+    // A reference to track, not money returned. Only the signed
+    // refund.processed settles it.
+    expect(after.status).toBe('PENDING');
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(1);
+  }, 15000);
+
+  // The negative control for the change above: tightening what counts as a
+  // refusal must not stop a real one releasing. If this goes green while the
+  // local-fault tests also pass, the two paths are genuinely distinguished
+  // rather than both being held.
+  it('still releases the money when the provider refuses on the retry', async () => {
+    const { order, row } = await unanswered();
+    queue(answer(400, { error: { description: 'the payment has been fully refunded already' } }));
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(res.status).toBe(202);
+
+    const after = await refundOf(order.id);
+    expect(after.status).toBe('FAILED');
+    expect(after.failureReason).toMatch(/refused the refund/);
+
+    // Released, so the order is refundable again.
+    queue(answer(200, refundBody(order.totalPaise, nextId('rfnd_'), order.payRef)));
+    const second = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: order.totalPaise / 100, reason: 'retry in full' });
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+  }, 15000);
+
+  it('keeps holding the money when the retry is unanswered too', async () => {
+    const { order, row } = await unanswered();
+    queue(({ res }) => { res.writeHead(200, { 'content-type': 'application/json' }); return undefined; });
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/refunds/${row.id}/reconcile`)
+      .set(auth(tokens.owner)).send({});
+    expect(res.status).toBe(202);
+    expect(res.body.warning).toMatch(/stays held/);
+
+    const after = await refundOf(order.id);
+    expect(after.status).toBe('PENDING');
+    expect(after.providerRef).toBeNull();
+    expect(await prisma.refund.count({ where: { orderId: order.id } })).toBe(1);
+  }, 20000);
 });
 
 describe('out-of-order and unmatched events', () => {
