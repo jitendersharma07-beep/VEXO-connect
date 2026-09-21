@@ -1025,7 +1025,14 @@ router.post(
     const order = await loadOrder(req);
     const existing = await prisma.refund.findFirst({
       where: { id: req.params.refundId, orderId: order.id },
-      include: { intent: { select: { providerRef: true } } },
+      // The charge id lives on the Payment the intent settled into, and a
+      // refund posts to the charge — so the reconcile leg has to reach through
+      // the intent to it, exactly as the original request did.
+      include: {
+        intent: {
+          select: { providerRef: true, payment: { select: { providerRef: true } } },
+        },
+      },
     });
     if (!existing) throw notFound('Refund not found');
     if (existing.channel !== 'GATEWAY') {
@@ -1043,7 +1050,14 @@ router.post(
       );
     }
 
-    const answer = await sendRefundToProvider(existing, existing.intent?.providerRef ?? null, order.id);
+    const answer = await sendRefundToProvider(
+      existing,
+      {
+        intentProviderRef: existing.intent?.providerRef ?? null,
+        chargeProviderRef: existing.intent?.payment?.providerRef ?? null,
+      },
+      order.id,
+    );
     const refund = await recordProviderAnswer(existing.id, answer);
 
     await audit(req, {

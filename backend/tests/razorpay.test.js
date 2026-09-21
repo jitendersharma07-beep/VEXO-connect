@@ -188,7 +188,16 @@ describe('createSession opens a Razorpay order', () => {
     expect(sent.receipt).toBe('key-one');
     // Nested capture, not the deprecated flat payment_capture. Automatic
     // matters: an authorized-but-uncaptured payment is money not received.
-    expect(sent.payment).toEqual({ capture: 'automatic' });
+    //
+    // capture_options is asserted in full because Razorpay documents both of
+    // these as mandatory once capture is "automatic", and omitting them is an
+    // incomplete request rather than a terser one. The expiry period is in
+    // MINUTES and 12 is the documented floor — a bare number here is easy to
+    // mistake for seconds and quietly leave payments uncaptured for hours.
+    expect(sent.payment).toEqual({
+      capture: 'automatic',
+      capture_options: { automatic_expiry_period: 12, refund_speed: 'normal' },
+    });
     expect(sent.payment_capture).toBeUndefined();
     expect(sent.notes.pos_order_id).toBe('ord_local_1');
   });
@@ -330,20 +339,53 @@ describe('createRefund', () => {
     expect(JSON.parse(calls[0].body).amount).toBe(10000);
   });
 
-  it('refuses before calling out when no payment id was ever recorded', async () => {
+  it('stops before calling out when no payment id was ever recorded, and does not call it a refusal', async () => {
     const err = await razorpayAdapter.createRefund({ ...args, chargeProviderRef: null }).catch((e) => e);
-    expect(err.kind).toBe('TERMINAL');
+    expect(err.kind).toBe('LOCAL');
     expect(err.message).toMatch(/no Razorpay payment id/);
     // Never reached the network, so nothing can have moved.
     expect(calls).toHaveLength(0);
+    // And therefore Razorpay cannot have refused it. This is the flag that
+    // releases a reservation, so a fault in our own precondition must not
+    // raise it — otherwise a missing charge id hands the amount back to be
+    // refunded again.
+    expect(err.providerRefused).toBe(false);
+    expect(err.status).toBe(null);
   });
 
-  it('refuses an order id passed where a payment id belongs', async () => {
+  it('stops on an order id passed where a payment id belongs, still not a refusal', async () => {
     const err = await razorpayAdapter
       .createRefund({ ...args, chargeProviderRef: 'order_TESTfakeorder01' })
       .catch((e) => e);
-    expect(err.kind).toBe('TERMINAL');
+    expect(err.kind).toBe('LOCAL');
     expect(calls).toHaveLength(0);
+    expect(err.providerRefused).toBe(false);
+  });
+
+  // The label is not the evidence. Even spelled TERMINAL, a throw that never
+  // reached Razorpay carries no status and so cannot release money — the
+  // guarantee is structural rather than a convention each call site remembers.
+  it('cannot report a refusal without the HTTP status that evidences one', () => {
+    expect(new RazorpayError('local fault', { kind: 'TERMINAL' }).providerRefused).toBe(false);
+    expect(new RazorpayError('bad gateway', { kind: 'TERMINAL', status: 502 }).providerRefused).toBe(false);
+    expect(new RazorpayError('not implemented', { kind: 'TERMINAL', status: 501 }).providerRefused).toBe(false);
+    expect(new RazorpayError('declined', { kind: 'TERMINAL', status: 400 }).providerRefused).toBe(true);
+  });
+
+  it('treats a refund Razorpay made for the wrong amount as a mismatch, never a refusal', async () => {
+    queue(answer(200, refundEntity({ amount: 5000 })));
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    // Razorpay answered 200 and a refund exists: money is moving. Releasing
+    // the reservation here would free it to be paid out a second time.
+    expect(err.kind).toBe('MISMATCH');
+    expect(err.providerRefused).toBe(false);
+  });
+
+  it('treats a refund made in the wrong currency as a mismatch too', async () => {
+    queue(answer(200, refundEntity({ currency: 'USD' })));
+    const err = await razorpayAdapter.createRefund(args).catch((e) => e);
+    expect(err.kind).toBe('MISMATCH');
+    expect(err.providerRefused).toBe(false);
   });
 
   it('does not report a refund as settled even when Razorpay already says processed', async () => {
