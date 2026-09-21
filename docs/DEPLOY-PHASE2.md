@@ -177,6 +177,12 @@ migration name in the log → STOP and roll back (§6).
 
 ## 4. Verify (read-only, in this order)
 
+Checks 7–10 prompt for the ATC admin email and password, so **run this from a
+real terminal, not a pipe or a non-interactive runner** — otherwise the script
+stops at `interactive sign-in needs a TTY` and you get 8/10. The password is
+read with echo off and is never printed, logged or sent anywhere but
+`/api/auth/login`.
+
 ```sh
 node deploy/prod-verify.mjs                                   # loopback 8110 — expect 12/12 PASS
 BASE_URL=https://atcworkspace.com/pos node deploy/prod-verify.mjs   # public mount — expect 12/12 PASS

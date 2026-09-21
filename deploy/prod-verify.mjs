@@ -4,8 +4,6 @@
 // public mount after go-live: BASE_URL=https://atcworkspace.com/pos node deploy/prod-verify.mjs
 // Prints PASS/FAIL lines only — never prints credentials. Exit 0 = all green.
 
-import readline from 'node:readline';
-
 const BASE = (process.env.BASE_URL || 'http://127.0.0.1:8110').replace(/\/$/, '');
 // Served-at-/pos (public) vs prefix-stripped loopback: assets in index.html are
 // always /pos/assets/*; on loopback the fetchable path has the /pos stripped.
@@ -18,16 +16,86 @@ const record = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`);
 };
 
+// ONE reader for the whole run. The previous version opened a fresh readline
+// interface per prompt: characters typed or pasted ahead of the second prompt
+// were consumed by the first interface and discarded when it closed, so the
+// password arrived truncated or empty. An empty password is a schema violation,
+// not a credential failure, so the API answered 400 — which reads like "the
+// admin password is wrong" when the same password works fine in a browser.
+const CR = '\r';
+const LF = '\n';
+const EOT = String.fromCharCode(4); // ctrl-D
+const ETX = String.fromCharCode(3); // ctrl-C
+const DEL = String.fromCharCode(127);
+const BS = String.fromCharCode(8);
+
+let reading = false;
+let pending = null; // { resolve, hidden } — the prompt currently awaiting a line
+let partial = '';
+const typedAhead = [];
+
+const closeReader = () => {
+  if (!reading) return;
+  process.stdin.removeListener('data', onData);
+  process.stdin.setRawMode(false);
+  process.stdin.pause();
+  reading = false;
+};
+
+const deliver = () => {
+  if (pending && typedAhead.length) {
+    const { resolve } = pending;
+    pending = null;
+    // Written here rather than where Enter was pressed, so a line that was
+    // typed ahead still ends its prompt cleanly — exactly once, either way.
+    process.stdout.write('\n');
+    resolve(typedAhead.shift());
+  }
+};
+
+function onData(chunk) {
+  for (const ch of chunk) {
+    if (ch === ETX) {
+      closeReader();
+      process.stdout.write('\n');
+      process.exit(130);
+    }
+    if (ch === CR || ch === LF || ch === EOT) {
+      typedAhead.push(partial);
+      partial = '';
+      deliver();
+      continue;
+    }
+    if (ch === DEL || ch === BS) {
+      if (partial) {
+        partial = partial.slice(0, -1);
+        if (pending) process.stdout.write('\b \b');
+      }
+      continue;
+    }
+    partial += ch;
+    // Echo only while a prompt is live, so a pasted line that arrives early is
+    // buffered rather than printed.
+    if (pending) process.stdout.write(pending.hidden ? '*' : ch);
+  }
+}
+
 const ask = (prompt, { hidden = false } = {}) =>
-  new Promise((resolve) => {
+  new Promise((resolve, reject) => {
+    if (!process.stdin.isTTY) {
+      reject(new Error('interactive sign-in needs a TTY — re-run from a terminal, not a pipe'));
+      return;
+    }
+    if (!reading) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', onData);
+      reading = true;
+    }
     process.stdout.write(prompt);
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    if (hidden) rl._writeToOutput = function () { this.output.write('*'); };
-    rl.question('', (answer) => {
-      rl.close();
-      if (hidden) process.stdout.write('\n');
-      resolve(answer.trim());
-    });
+    pending = { resolve, hidden };
+    deliver();
   });
 
 const get = (path, opts = {}) => fetch(BASE + path, { redirect: 'manual', ...opts });
@@ -81,13 +149,31 @@ try {
     `status ${badLogin.status}`);
 
   // 7. Real sign-in (prompted; nothing echoed or printed)
-  const email = (await ask('ATC admin email [pos.admin@atcinfocom.in]: ')) || 'pos.admin@atcinfocom.in';
+  const email = (await ask('ATC admin email [pos.admin@atcinfocom.in]: ')).trim() || 'pos.admin@atcinfocom.in';
+  // Deliberately NOT trimmed: a password may legitimately start or end with a
+  // space, and silently stripping it turns a correct password into a 401.
   const password = await ask('Password (hidden): ', { hidden: true });
-  const login = await json('/api/auth/login', { email, password });
-  const loginBody = await login.json().catch(() => ({}));
-  const token = loginBody?.token;
-  record('admin sign-in', login.status === 200 && Boolean(token) && loginBody?.user?.role === 'POS_SUPER_ADMIN',
-    `status ${login.status}`);
+  closeReader();
+
+  // Check what the schema checks, before sending. A malformed payload comes
+  // back as 400 and is indistinguishable, at a glance, from a rejected
+  // credential — so refuse locally and say which field is wrong.
+  let token;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    record('admin sign-in', false, 'field=email: not an email address — nothing was sent');
+  } else if (password.length === 0) {
+    record('admin sign-in', false, 'field=password: empty input — nothing was sent');
+  } else {
+    const login = await json('/api/auth/login', { email, password });
+    const loginBody = await login.json().catch(() => ({}));
+    token = loginBody?.token;
+    // Only the API's own code/message/field are surfaced. Never the request
+    // body, the response body, the token or the session cookie.
+    const e = loginBody?.error;
+    const why = e ? `, ${e.code}${e.field ? ` field=${e.field}` : ''}: ${e.message}` : '';
+    record('admin sign-in', login.status === 200 && Boolean(token) && loginBody?.user?.role === 'POS_SUPER_ADMIN',
+      `status ${login.status}${why}`);
+  }
 
   if (token) {
     const auth = { authorization: `Bearer ${token}` };
@@ -112,6 +198,7 @@ try {
     record('authenticated checks', false, 'skipped — sign-in failed');
   }
 } catch (err) {
+  closeReader(); // never leave the operator's terminal in raw mode
   record('verification run', false, err?.message || String(err));
 }
 
