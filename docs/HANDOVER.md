@@ -14,19 +14,24 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Application commit | `2c3acb1` |
-| Deployed | 2026-09-22 12:54 UTC |
-| Frontend bundle | `assets/index-BYn8TH7l.js` |
-| Rollback tags | `pos-prod-backend:20260922-dayclose`, `pos-prod-frontend:20260922-dayclose` |
+| Backend commit | `2c3acb1`, image `pos-prod-backend:20260922-dayclose`, deployed 12:54 UTC |
+| Frontend commit | `652732f`, image `pos-prod-frontend:20260922-honest-screens`, deployed 13:41 UTC |
+| Frontend bundle | `assets/index-CuAz2wOg.js` |
+| Rollback tags | `pos-prod-backend:20260922-dayclose`, `pos-prod-frontend:rollback-20260922-1340` |
 | Database migrations applied | 8 |
 
-Commits after `2c3acb1` on `phase2-gateway` (`5e92e52`, `1bcd200`) touch only
-`deploy/` and `docs/`; the running application is `2c3acb1`. Confirm before
-quoting this — re-read the bundle name from the live page rather than trusting
-this table:
+**The two halves are on different commits and that is deliberate.** `652732f`
+changes three frontend screens and nothing else, so the backend was left alone
+rather than restarted for no reason. Commits after `652732f` (`9bd3133`,
+`ce841bb`) touch only `deploy/` and `docs/`.
+
+Confirm before quoting any of this. Re-read it from the live site rather than
+trusting the table — a docs table is a claim, the served bundle is the fact:
 
 ```sh
 curl -fsS https://atcworkspace.com/pos/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.js'
+docker exec pos-prod-postgres-1 sh -lc \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "select count(*) from _prisma_migrations where finished_at is not null and rolled_back_at is null;"'
 ```
 
 Deploy procedure, rollback and the migration gate: `docs/DEPLOY-PHASE2.md`.
@@ -234,6 +239,35 @@ note requirement releasing the button.
 The harness was then pointed at a route that does not exist and **failed**.
 A check that has never failed is a decoration, not evidence.
 
+### Against the bundle production actually serves
+
+The three fixes in `652732f` were re-verified after deployment against the
+bundle **copied back out of the running container**, not against the working
+tree. Those are different artefacts today — the tree builds a different product
+name — so "the tree passes" would have been the wrong claim to make.
+
+Six scenarios, 45 assertions, all green, each one paired with a sibling that
+catches its inverse:
+
+| | Condition | Must be true |
+|---|---|---|
+| A | no provider, no rows | KPI grid **absent** |
+| B | no provider, one unpaid refund | KPI grid **present**, refund listed |
+| C | provider live and clean | KPI grid **present**, all-clear shown |
+| D | `branchLimit: 0` | must **not** say "of 0 allowed" |
+| E | `branchLimit: 3` | must say "2 active of 3 allowed" |
+| F | browser forced to New York | stamp still reads 22 Sept 01:00 IST |
+
+A gate stuck open fails A. A gate stuck shut fails B, C and E. The pairing is
+the point: either direction of breakage goes red, so a green means the gate is
+deciding rather than merely defaulting.
+
+The first run of this against production failed all six — every asset came back
+as `index.html` because the deployed build is served under `/pos` and the
+harness was rooted at `/`. Worth recording: the page still returned 200 and
+still painted a shell, so a check that looked only at status codes would have
+called a completely dead app healthy.
+
 ### Backup and restore
 
 The nightly schedule is **installed and has run** (2026-09-22 13:33 UTC, next
@@ -270,17 +304,20 @@ Written down so they are disclosed rather than discovered.
    This survives a bad migration; it does not survive losing the server.
 7. **No alerting on a failed backup.** Someone must look.
 8. ~~Reconciliation zero KPIs, Branches "0 of 0", Team browser-locale dates.~~
-   Fixed in `652732f`; verified by rendering the built bundle in six scenarios,
-   each assertion paired with one that catches its inverse. **Not yet deployed**
-   — see §1.
-9. **Licence expiry in the top bar uses the browser's timezone.** The same
-   licence reads "until 3/31/2027" in UTC and "3/30/2027" in New York. Same
-   defect as the Team one above, in `Layout.jsx`, which a parallel session has
-   uncommitted; left alone rather than overwritten.
-10. **The product name is unsettled.** The built UI now says "VEXO Connect"
-    while all three guides say "ATC POS". The client must not be handed guides
-    naming a product that appears nowhere on their screen — decide the shipping
-    name before handover.
+   Fixed in `652732f` and **deployed** (§1). Verified against the bundle pulled
+   back out of the running container — not the working tree, which builds
+   something else entirely — in six scenarios, every assertion paired with one
+   that catches its inverse: 45/45.
+9. **Licence expiry in the top bar uses the browser's timezone.** Visible in
+   production right now: the top bar reads "until 3/31/2027", which is US
+   format, and the same licence would read 3/30/2027 from a New York browser.
+   The same defect as the Team one fixed above, in `Layout.jsx`, which a
+   parallel session has uncommitted — left alone rather than overwritten.
+10. **The product name is unsettled.** Production says "ATC POS" and matches the
+    guides. The working tree does not: it builds "VEXO Connect" throughout,
+    including the page title. Whichever name ships, the guides and the screen
+    must agree before a client sees either, and that is the owner's call, not a
+    rename to be made quietly on the way past.
 11. **No pull-based payment recovery.** If a gateway `payment.captured` webhook
     is missed, nothing polls the provider to find out. Only relevant once the
     gateway is switched on, and it should be built before it is.
