@@ -20,19 +20,65 @@ and a surprise on a live counter. As of 2026-09-22:
 | Unsigned webhook is refused | **Verified** — HTTP 400 from the public hostname |
 | `payment.authorized` does not create a Payment | **Verified** — recorded with `skippedReason`, no `Payment` row |
 | A webhook is registered on the account | **NO** — the account reports **0 webhooks**. Nothing will ever be delivered until this is fixed. |
-| Automatic capture actually honoured | **Not verified** — needs a real payment |
-| Webhook delivery, signature, and application | **Not verified** — blocked on the row above |
+| Automatic capture actually honoured | **Verified** — a real card payment reads back `status=captured`, `captured=true`, order `paid` |
+| A captured payment does **not** settle the order without a webhook | **Verified** — and deliberate; see below |
+| Webhook delivery, signature, and application | **Not verified** — blocked on the 0-webhooks row |
 | Refund create / settle / replay | **Not verified** |
 
 Everything in the unverified rows is backed only by a stub of Razorpay's API
 and by published documentation. That proves the wire format and the failure
 handling; it proves nothing about a real account.
 
-**The sandbox account currently holds 0 payments and 0 refunds.** Any `pay_…`
-that appears is therefore attributable to the next run. Events in
-`/tmp/pos-demo/webhook-capture.jsonl` whose ids start `evt_probe_` are
-synthetic posts from a local probe, not Razorpay deliveries; they were briefly
-misread as genuine, which is why they are called out here.
+**That "0 payments" note is now out of date: the account holds 5 payments as of
+2026-09-22, all from the run described below, all on `order_Tf48NDUY0t0Xfu`.**
+Refunds are still 0. Events in `/tmp/pos-demo/webhook-capture.jsonl` whose ids
+start `evt_probe_` are synthetic posts from a local probe, not Razorpay
+deliveries; they were briefly misread as genuine, which is why they are called
+out here.
+
+### The first real payment, and what it proved
+
+A ₹105 test-mode card payment was driven through the genuine checkout widget
+(headless Chromium — the adapter returns `checkoutUrl: null`, so there is no URL
+a script can post to). Razorpay's own record: `pay_Tf4bqZCtM4GOU2`,
+`status=captured`, `captured=true`, order `paid`, `amount_paid=10500`.
+
+At that same moment the POS held the order at `BILLED`, the intent at `PENDING`,
+and had **no `Payment` row**.
+
+That is correct, and the reason is worth stating plainly: nothing here settles an
+order on the browser's say-so. The checkout handler returned a valid
+`razorpay_payment_id` *and* a valid signature, and the POS still did not record
+payment, because only a webhook does that. A browser can be closed mid-redirect,
+or lied to; the webhook is the provider speaking for itself.
+
+**The gap this exposes is operational, not a bug.** A webhook that is merely
+*late* — tunnel restarted, retries exhausted — leaves exactly this state: the
+customer has paid and the POS shows the bill as due. There is no pull-based
+reconcile for payments. `/:id/refunds/:refundId/reconcile` exists but covers
+refunds only. Until a payment equivalent exists, a missed `payment.captured`
+has to be caught by a human comparing the Razorpay dashboard against the day's
+outstanding bills. **Do not hand this to a café without telling them that.**
+
+Four things about the real checkout that no stub would have taught us, all of
+which cost a failed attempt each:
+
+- **The account takes domestic cards only.** The universal test number
+  `4111 1111 1111 1111` fails with `international_transaction_not_allowed`,
+  `source=business`, at `step=payment_initiation`. Use Razorpay's domestic
+  card `5267 3181 8797 5449`. For an Indian café the account setting is right
+  and the card is what has to change.
+- **The checkout rejects patterned phone numbers.** Both `9999999999` and
+  `9876543210` are refused as "not a valid mobile number" — they are
+  format-valid Indian mobiles, so this is a fake-pattern blacklist. It also
+  refuses them *silently* inside `prefill`, which is why the contact modal
+  appears at all when a number was supplied.
+- **Test-mode OTP is `1111`,** at an Axis Bank simulator, and the attempt has a
+  visible ~3-minute timeout.
+- **`payment_cancelled` / `source=customer` can be a lie.** It was reported
+  when an automated retry typed the OTP into an already-filled field. It reads
+  like a customer abandoning the payment and was nothing of the kind — worth
+  remembering before trusting that reason code in a report.
 
 One documented claim has already turned out to be wrong, which is the reason
 this table exists. The adapter used to carry a comment saying Razorpay rejects
