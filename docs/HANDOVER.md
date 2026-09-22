@@ -29,6 +29,13 @@ The two documents the client actually receives are `guide-owner.md` and
 thing in this document: production is redeployed by whoever is working on it,
 and the table does not update itself. Treat every row as a claim to re-check.
 
+**Two frontend fixes are in git but not in this build.** `1ca40bc` (six licence
+dates render in the viewer's timezone — item 9) and `1e64b24` (a render error
+blanks the screen — item 13). Both are frontend-only: no migration, no backend
+change, and they ship together with the next frontend deploy. Until that
+happens the live site still has both faults, and this is the list to check
+against `git log 269b0f5..HEAD -- frontend/` rather than trusted as written.
+
 The frontend commit is not read off an image tag or a directory name. Both lie
 — the worktree this was first traced through was named `atc-pos-deploy-269b0f5`
 and had already been deleted by the time it was looked at. It is proven by
@@ -385,11 +392,35 @@ Written down so they are disclosed rather than discovered.
     cannot reach Orders to reprint a bill. **The POS needs a tablet or larger**
     — said plainly in `guide-owner.md` §9. A mobile menu is a small change if
     the client wants phones, and `Layout.jsx` is the only file it touches.
-13. **No error boundary.** There is none anywhere in the frontend, so any
-    unexpected render error takes the whole page white with no message and no
-    way back but a reload. Not currently reachable through the real API — it
-    was found by feeding the Dashboard a malformed response from a test stub —
-    but a till is the wrong place to discover it.
+13. ~~**No error boundary.**~~ Fixed 2026-09-22 in `1e64b24`, **not yet
+    deployed** — see item 9 for why that sentence keeps appearing. The measured
+    before-and-after: a 200 whose body the Dashboard could not render left the
+    page with **zero characters of text**, and now leaves a readable screen of
+    951 with the sidebar still usable. React 18 unmounts the whole tree on an
+    uncaught render error, which is why the old failure was a genuinely blank
+    white page rather than a broken-looking one.
+
+    There are two boundaries and they cover different things. The inner one is
+    inside `Layout`'s `<main>`, so the navigation survives a single screen
+    crashing; it is keyed on the pathname so the error **resets** when the
+    cashier navigates, instead of latching onto every subsequent screen. The
+    outer one in `main.jsx` catches what the inner cannot, because the inner is
+    a child of it: a throw in `Layout` itself, in the auth provider, or in the
+    router. Both are exercised by `render-errorboundary.mjs`, and the two cases
+    are told apart by whether the sidebar and footer survive — detecting merely
+    that "an error screen appeared" would not distinguish them.
+
+    The error screen leads with plain English and puts the exception last,
+    labelled as the line to read out. That ordering is deliberate: a cashier who
+    can only tell support "it says something went wrong" is no better off than
+    one staring at a white page, so the technical string stays — just not first.
+
+    **What this does not do.** It does not catch errors thrown in event handlers
+    or in async code, which is most of them — an axios rejection inside a click
+    handler is still caught where it happens, by the per-page `try/catch` and
+    `ErrorNote`. This is not a general safety net and should not be described to
+    the client as one. It guarantees one narrow thing: a *render* failure
+    degrades to a readable screen instead of a white one.
 
 ---
 
