@@ -15,7 +15,7 @@ import { logger } from '../../lib/logger.js';
 import { env } from '../../config/env.js';
 import { getAdapter } from '../../lib/gateway/index.js';
 import { sha256Hex } from '../../lib/gateway/signature.js';
-import { applyGatewayEvent } from '../../lib/gateway/apply.js';
+import { applyGatewayEvent, isDuplicateOf } from '../../lib/gateway/apply.js';
 import { audit } from '../../lib/audit.js';
 import { asyncHandler } from '../../lib/errors.js';
 
@@ -24,9 +24,6 @@ const router = express.Router();
 // The exact bytes that were signed. Re-serialising a parsed body would
 // reorder keys and drop whitespace, breaking every signature ever sent.
 const rawBody = express.raw({ type: '*/*', limit: '256kb' });
-
-const duplicateOf = (err, field) =>
-  err?.code === 'P2002' && [].concat(err.meta?.target ?? []).some((t) => String(t).includes(field));
 
 router.post(
   '/webhook',
@@ -68,6 +65,10 @@ router.post(
             eventId: verified.eventId,
             kind: verified.kind,
             payloadHash: sha256Hex(body),
+            // This route is the only writer of WEBHOOK rows. Stated rather
+            // than defaulted, so nothing else can acquire the label by
+            // omission.
+            source: 'WEBHOOK',
           },
         });
 
@@ -94,10 +95,13 @@ router.post(
     } catch (err) {
       // Both of these mean the money has already been accounted for exactly
       // once. The provider is told 200 so it stops retrying.
-      if (duplicateOf(err, 'eventId')) {
+      if (isDuplicateOf(err, 'eventId')) {
         return res.json({ received: true, duplicate: true });
       }
-      if (duplicateOf(err, 'intentId')) {
+      // Reached when a pull-based reconcile settled this intent while this
+      // delivery was in flight. The money is recorded once, by whichever got
+      // there first, and the provider is told to stop retrying either way.
+      if (isDuplicateOf(err, 'intentId')) {
         return res.json({ received: true, duplicate: true });
       }
       throw err;

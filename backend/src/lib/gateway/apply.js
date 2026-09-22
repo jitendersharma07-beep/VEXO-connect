@@ -11,6 +11,27 @@
 
 import { paiseOf } from '../orders.js';
 
+// Two unique keys make gateway settlement exactly-once, and hitting either one
+// means the money has already been accounted for exactly once:
+//
+//   GatewayWebhookEvent(provider, eventId)  — this delivery was already seen
+//   Payment(intentId)                       — this intent was already settled
+//
+// The status checks inside applyGatewayEvent read before they write, so two
+// transactions running at once can both find an unsettled intent and both go
+// on to insert. Those checks turn the common case into a recorded skipReason
+// rather than an exception; THESE INDEXES are what actually make it
+// impossible, and every caller that settles money has to handle them. Shared
+// rather than copied so the push path (the webhook) and the pull path
+// (recovery) cannot drift into disagreeing about what a duplicate is.
+export const isDuplicateOf = (err, field) =>
+  err?.code === 'P2002' && [].concat(err.meta?.target ?? []).some((t) => String(t).includes(field));
+
+// Either one. Both mean "already recorded", and no caller so far has needed to
+// tell them apart — a reconcile that loses the race to a webhook and one that
+// loses it to a second reconcile have the same correct outcome.
+export const isAlreadySettled = (err) => isDuplicateOf(err, 'eventId') || isDuplicateOf(err, 'intentId');
+
 export const EVENT_SUCCEEDED = 'payment.succeeded';
 export const EVENT_FAILED = 'payment.failed';
 export const EVENT_REFUND_SUCCEEDED = 'refund.succeeded';

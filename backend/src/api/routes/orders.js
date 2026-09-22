@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { getAdapter, gatewayAvailable } from '../../lib/gateway/index.js';
+import { applyGatewayEvent, isAlreadySettled, EVENT_SUCCEEDED } from '../../lib/gateway/apply.js';
+import { sha256Hex } from '../../lib/gateway/signature.js';
 import { asyncHandler, badGateway, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { env } from '../../config/env.js';
 import { audit } from '../../lib/audit.js';
@@ -805,6 +807,247 @@ router.post(
       // the browser usually beats the webhook by a second or two.
       settled: current.payments.some((p) => p.intentId === intent.id),
       order: serializeOrder(current),
+    });
+  }),
+);
+
+// --- pull-based settlement recovery -----------------------------------------
+
+// Asks the provider what actually happened to one attempt, and records the
+// payment if it says the money was captured.
+//
+// WHY THIS EXISTS
+//
+// Everything else here is push: the provider sends a webhook and the POS
+// believes it. That is the right default — a signature over the raw body is
+// the strongest evidence available — but it has one failure mode no amount of
+// care inside the webhook route can fix. If the delivery never arrives at all
+// (tunnel down, endpoint misconfigured, retries exhausted, webhook not
+// registered on the account), the customer has paid and the POS shows the bill
+// as still due. That is not hypothetical here: a captured sandbox payment from
+// 2026-09-22 11:54Z is absent from this database for exactly that reason,
+// because the account had no webhook registered at the time.
+//
+// So this is the pull half. It is deliberately a manager action rather than a
+// background sweep: it is the manager who is standing in front of the customer
+// with the provider's dashboard open, and a sweep that settles orders on its
+// own would be making that judgement unattended.
+//
+// WHAT IT IS NOT
+//
+// It is not a second way to record money on weaker evidence. It records a
+// payment only where the provider's own API says the charge was CAPTURED, and
+// it routes that through applyGatewayEvent — the same function, with the same
+// amount, order-state and amount-due checks, that the webhook uses. There is
+// exactly one place in this codebase where a GATEWAY payment row is written,
+// and this route did not become a second one.
+router.post(
+  '/:id/payment-intents/:intentId/reconcile',
+  ...managerUp,
+  asyncHandler(async (req, res) => {
+    const adapter = getAdapter();
+    const order = await loadOrder(req);
+
+    // Found via the order, so an intent belonging to another company or
+    // another bill is simply absent rather than probeable.
+    const intent = await prisma.paymentIntent.findFirst({
+      where: { id: req.params.intentId, orderId: order.id },
+    });
+    if (!intent) throw notFound('Payment intent not found');
+
+    // Optional on the contract, so its absence is a refusal and never a
+    // fallback to something that writes money on a weaker basis.
+    if (typeof adapter.fetchSettlement !== 'function') {
+      throw conflict('This payment provider cannot be asked what it did, so this payment cannot be reconciled here');
+    }
+    if (intent.provider !== adapter.name) {
+      throw conflict('This payment was opened with a different provider from the one configured now');
+    }
+    if (!intent.providerRef) {
+      throw conflict('This payment was never opened with the provider, so there is nothing to ask about');
+    }
+    if (intent.status === 'SUCCEEDED') {
+      throw conflict('This payment has already been recorded');
+    }
+
+    // Reached over the network, so no transaction is open — same rule as
+    // createSession and createRefund. A provider round trip that outlasts
+    // Prisma's transaction timeout would roll back whatever the transaction
+    // held while the provider carried on regardless.
+    let answer;
+    try {
+      answer = await adapter.fetchSettlement({ intentProviderRef: intent.providerRef });
+    } catch (err) {
+      // Every failure mode of the fetch lands here and changes NOTHING. An
+      // unreadable answer, two captures on one order, a network timeout — all
+      // of them mean the provider's position could not be established, and
+      // none of them is a reason to write a payment or to close the intent.
+      const detail = err?.message ? String(err.message).slice(0, 200) : 'no answer from the provider';
+      await audit(req, {
+        action: 'GATEWAY_SETTLEMENT_RECONCILE_FAILED',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, provider: adapter.name, detail },
+      });
+      throw badGateway('The payment provider could not be asked what happened to this payment');
+    }
+
+    if (!answer?.settled) {
+      // A real answer, and the answer is no. The intent is left open on
+      // purpose: "not captured yet" is not "will never be captured", and
+      // closing it here would stop the customer paying against a page the
+      // provider still considers live.
+      await audit(req, {
+        action: 'GATEWAY_SETTLEMENT_RECONCILED',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, provider: adapter.name, settled: false, reason: answer?.reason ?? null },
+      });
+      return res.status(200).json({
+        settled: false,
+        reason: answer?.reason ?? 'the provider reported no captured payment on this attempt',
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    // --- is what we just fetched actually ours? ---
+    //
+    // Everything above this point trusts the configured key pair to still
+    // point at the account the intent was opened on. Nothing guarantees that:
+    // keys get rotated, environments get pointed at the wrong account, and a
+    // sandbox key and a live key differ by four characters. These are the
+    // checks that make the fetch self-proving instead — receipt and
+    // pos_order_id are values THIS code sent at createSession, and they are
+    // compared against our own row rather than against configuration.
+    const mismatch =
+      answer.providerRef && answer.providerRef !== intent.providerRef
+        ? 'the provider answered about a different payment attempt'
+        : answer.posOrderId && answer.posOrderId !== order.id
+          ? 'the provider has this payment against a different order'
+          : answer.receipt && answer.receipt !== intent.idempotencyKey
+            ? 'the provider has this payment under a different reference'
+            : !answer.posOrderId && !answer.receipt
+              ? 'the provider returned nothing that ties this payment to this order'
+              : answer.captured !== true
+                // Authorized is money blocked on a card that the shop has not
+                // received. Recording it would close an order nobody has been
+                // paid for.
+                ? 'the provider reports this payment as not captured'
+                : null;
+    if (mismatch) {
+      await audit(req, {
+        action: 'GATEWAY_SETTLEMENT_REFUSED',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, provider: adapter.name, reason: mismatch, chargeRef: answer.chargeRef ?? null },
+      });
+      throw conflict(`This payment could not be reconciled: ${mismatch}`);
+    }
+    if (!answer.chargeRef) {
+      throw conflict('This payment could not be reconciled: the provider did not name the charge');
+    }
+
+    // The charge id is the event id, which is what makes running this twice
+    // harmless: the second run collides on (provider, eventId) rather than
+    // settling anything again. A genuine webhook for the same money carries
+    // the PROVIDER's event id, which is a different value, so it does not
+    // collide here — it collides on Payment.intentId instead, one layer down,
+    // and is recorded as the skip it is.
+    const eventId = answer.chargeRef;
+    let outcome;
+    try {
+      outcome = await prisma.$transaction(async (tx) => {
+        const event = await tx.gatewayWebhookEvent.create({
+          data: {
+            provider: adapter.name,
+            eventId,
+            kind: EVENT_SUCCEEDED,
+            // Hash of the answer we acted on, not of a delivery: there were no
+            // signed bytes here. It is still the record of what this decision
+            // was made from.
+            payloadHash: sha256Hex(JSON.stringify(answer)),
+            // Never WEBHOOK. Nobody delivered this; we went and asked.
+            source: 'RECOVERY',
+          },
+        });
+
+        const applied = await applyGatewayEvent(tx, {
+          provider: adapter.name,
+          providerRef: intent.providerRef,
+          kind: EVENT_SUCCEEDED,
+          amountPaise: answer.amountPaise,
+          method: answer.method,
+          chargeRef: answer.chargeRef,
+        });
+
+        await tx.gatewayWebhookEvent.update({
+          where: { id: event.id },
+          data: {
+            processedAt: new Date(),
+            intentId: applied.intentId ?? null,
+            skippedReason: applied.skippedReason ?? null,
+          },
+        });
+
+        return applied;
+      });
+    } catch (err) {
+      // The race this route is most likely to lose, and the one it must lose
+      // safely: the webhook landed while we were asking the provider. The
+      // unique index refused the second write, the whole transaction rolled
+      // back with it, and the money is recorded exactly once — by the webhook.
+      // Nothing to repair, so this is a 200 describing what is true now.
+      if (isAlreadySettled(err)) {
+        return res.status(200).json({
+          settled: true,
+          recorded: false,
+          alreadyRecorded: true,
+          reason: 'this payment was already recorded — the provider’s webhook arrived first',
+          order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+        });
+      }
+      throw err;
+    }
+
+    if (!outcome.payment) {
+      // Verified, fetched, and still deliberately not applied — the amount
+      // disagreed, or the order moved on. Recorded on the event row and
+      // surfaced by the reconciliation report for a human to judge.
+      return res.status(200).json({
+        settled: true,
+        recorded: false,
+        reason: outcome.skippedReason ?? 'the payment was not applied',
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    // ORDER_PAYMENT, exactly as the webhook writes it, because this is the
+    // same money arriving by a different route and every report that reads
+    // takings has to see both. `via` is what tells them apart afterwards.
+    await audit(req, {
+      action: 'ORDER_PAYMENT',
+      entity: 'Order',
+      entityId: order.id,
+      companyId: req.companyScope.id,
+      meta: {
+        method: outcome.payment.method,
+        amount: String(outcome.payment.amount),
+        channel: 'GATEWAY',
+        provider: adapter.name,
+        intentId: outcome.intentId,
+        via: 'RECOVERY',
+        chargeRef: answer.chargeRef,
+      },
+    });
+
+    res.status(200).json({
+      settled: true,
+      recorded: true,
+      payment: publicPayment(outcome.payment),
+      order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
     });
   }),
 );

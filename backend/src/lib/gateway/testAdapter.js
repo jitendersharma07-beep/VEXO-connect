@@ -18,8 +18,33 @@ export const signingPayload = (timestamp, rawBody) => `${timestamp}.${rawBody}`;
 export const signPayload = (secret, timestamp, rawBody) =>
   `t=${timestamp},v1=${hmacHex(secret, signingPayload(timestamp, rawBody))}`;
 
+// What this fake provider will answer when asked about an attempt. Empty by
+// default, so an adapter nobody has primed reports no payment — the same
+// answer a real provider gives for an attempt the customer abandoned, and the
+// safe one to default to.
+//
+// A value may be a function, which is called on each fetch. That is not a
+// convenience: it is the only way to test the race that matters. Recovery has
+// to reach the provider over the network, and a webhook can land during that
+// call, so a test needs a hook that runs WHILE the reconcile is mid-flight.
+const settlements = new Map();
+
+export const setTestSettlement = (intentProviderRef, answer) => {
+  settlements.set(intentProviderRef, answer);
+};
+
+export const clearTestSettlements = () => settlements.clear();
+
 export const testAdapter = {
   name: 'test',
+
+  async fetchSettlement({ intentProviderRef }) {
+    const answer = settlements.get(intentProviderRef);
+    if (answer === undefined) {
+      return { settled: false, reason: 'the provider has no payment on this attempt' };
+    }
+    return typeof answer === 'function' ? answer() : answer;
+  },
 
   async createSession({ idempotencyKey }) {
     // Derived from the key, so a retried create yields the same reference

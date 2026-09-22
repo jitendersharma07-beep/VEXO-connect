@@ -509,6 +509,20 @@ model PaymentIntent {
   @@index([status])
 }
 
+// Which code path wrote the row. WEBHOOK is a delivery that arrived at
+// /api/gateway/webhook and passed signature verification. RECOVERY is one the
+// pull-based reconcile built after ASKING the provider what it has, for an
+// intent whose webhook never turned up.
+//
+// Authoritative about our side only. It records which of our code paths ran;
+// it is not a claim about who originated the event, because a verified
+// delivery can be signed by anything holding the webhook secret — which on a
+// dev box includes this repository's own scripts.
+enum GatewayEventSource {
+  WEBHOOK
+  RECOVERY
+}
+
 // One row per signature-VERIFIED delivery. Rejected deliveries are deliberately
 // NOT stored here: eventId comes from the payload, so recording unverified ones
 // would let anyone squat the unique key with a forged id and permanently block
@@ -519,6 +533,9 @@ model GatewayWebhookEvent {
   eventId     String
   kind        String
   payloadHash String
+  // No default, so every writer has to say which it is. A default of WEBHOOK
+  // would quietly label a future path's rows as provider deliveries.
+  source      GatewayEventSource
   // Set only when the delivery matched a real intent. This is also the only
   // route by which an event can be attributed to a company, since events
   // carry no tenant of their own.
@@ -533,6 +550,7 @@ model GatewayWebhookEvent {
   @@unique([provider, eventId])
   @@index([receivedAt])
   @@index([processedAt])
+  @@index([source])
 }
 
 model Refund {
