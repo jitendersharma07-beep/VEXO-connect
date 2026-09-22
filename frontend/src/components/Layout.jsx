@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
-import { canSeeReports, canSell, canWriteTables, clearAtcScope, getAtcScope } from '../lib/pos.js';
+import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope } from '../lib/pos.js';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
 
@@ -228,7 +228,7 @@ export default function Layout() {
                     <span className="font-semibold">{license.plan?.replace('_', ' ')}</span>
                     <StatusBadge status={license.status} />
                     {license.expiresAt ? (
-                      <span>until {new Date(license.expiresAt).toLocaleDateString()}</span>
+                      <span>until {fmtDate(license.expiresAt)}</span>
                     ) : null}
                   </div>
                 ) : null}

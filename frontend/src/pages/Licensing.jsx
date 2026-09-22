@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BadgeCheck, PackagePlus } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
+import { fmtDate } from '../lib/pos.js';
 import {
   PageHeader,
   StatusBadge,
@@ -60,11 +61,15 @@ export default function Licensing() {
             <dl className="mt-5 grid grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-sm">
               <div>
                 <dt className="text-xs uppercase tracking-wide text-slate-400">Starts</dt>
-                <dd className="mt-0.5 font-semibold text-pos-ink">{new Date(license.startsAt).toLocaleDateString()}</dd>
+                <dd className="mt-0.5 font-semibold text-pos-ink">{fmtDate(license.startsAt)}</dd>
               </div>
               <div>
+                {/* This is the screen the owner is sent to when they ask when the
+                    licence runs out, so it is the last place the answer should
+                    depend on the clock of whoever happens to be looking. fmtDate
+                    pins it to IST; the backend decides expiry in IST too. */}
                 <dt className="text-xs uppercase tracking-wide text-slate-400">Expires</dt>
-                <dd className="mt-0.5 font-semibold text-pos-ink">{new Date(license.expiresAt).toLocaleDateString()}</dd>
+                <dd className="mt-0.5 font-semibold text-pos-ink">{fmtDate(license.expiresAt)}</dd>
               </div>
               <div>
                 <dt className="text-xs uppercase tracking-wide text-slate-400">Base branch limit</dt>
@@ -92,7 +97,7 @@ export default function Licensing() {
                   <li key={a.id} className="flex items-center justify-between py-3">
                     <span className="font-semibold text-pos-ink">+{a.quantity} branch{a.quantity > 1 ? 'es' : ''}</span>
                     <span className="text-xs text-slate-500">
-                      {a.expiresAt ? `until ${new Date(a.expiresAt).toLocaleDateString()}` : 'follows licence expiry'}
+                      {a.expiresAt ? `until ${fmtDate(a.expiresAt)}` : 'follows licence expiry'}
                     </span>
                   </li>
                 ))}
