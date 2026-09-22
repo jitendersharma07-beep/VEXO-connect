@@ -15,6 +15,7 @@ import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
+import DayClose from './pages/DayClose.jsx';
 import NotFound from './pages/NotFound.jsx';
 
 function Home() {
@@ -84,6 +85,18 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <GatewayReconciliation />
+                  </RequireRoles>
+                }
+              />
+              {/* ATC is admitted here to READ. The server refuses it the
+                  closing itself (a count of someone else's drawer is not
+                  ATC's to file), and the page hides the form accordingly —
+                  but support cannot help with a variance it cannot see. */}
+              <Route
+                path="reports/day-close"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <DayClose />
                   </RequireRoles>
                 }
               />

@@ -118,7 +118,16 @@ if (!sellable) { console.log('FAIL: no sellable product in the catalog to build 
 const newOrder = async () => {
   const made = await call('POST', '/api/orders', {
     token: TOKEN,
-    body: { type: 'TAKEAWAY', branchId: BRANCH_ID, items: [{ productId: sellable.id, qty: 1 }] },
+    // Tagged so the orders this leaves behind are identifiable later. It
+    // deliberately does not delete them: a probe that cleans up after itself
+    // destroys the evidence for whichever check just failed, and the run you
+    // most want to inspect is exactly the one that went wrong.
+    body: {
+      type: 'TAKEAWAY',
+      branchId: BRANCH_ID,
+      note: `acceptance-probe ${new Date().toISOString()}`,
+      items: [{ productId: sellable.id, qty: 1 }],
+    },
   });
   if (made.status !== 201 && made.status !== 200) {
     console.log(`FAIL: could not create a probe order — HTTP ${made.status} ${JSON.stringify(made.body).slice(0, 200)}`);

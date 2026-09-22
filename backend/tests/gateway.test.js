@@ -29,6 +29,9 @@ const app = createApp();
 const SECRET = process.env.POS_GATEWAY_WEBHOOK_SECRET;
 
 const wipe = async () => {
+  // Before PosUser and Branch, which it references. Shared test database:
+  // another file's DayClose rows block this file's PosUser delete.
+  await prisma.dayClose.deleteMany();
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();

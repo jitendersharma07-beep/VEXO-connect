@@ -79,6 +79,7 @@ model Company {
   categories Category[]
   products   Product[]
   orders     Order[]
+  dayCloses  DayClose[]
 }
 
 model Branch {
@@ -100,6 +101,7 @@ model Branch {
   tables          DiningTable[]
   orders          Order[]
   invoiceCounters InvoiceCounter[]
+  dayCloses       DayClose[]
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -132,6 +134,7 @@ model PosUser {
   paymentsReceived Payment[]   @relation("PaymentReceivedBy")
   refundsIssued    Refund[]    @relation("RefundBy")
   intentsCreated   PaymentIntent[] @relation("PaymentIntentCreatedBy")
+  daysClosed       DayClose[]  @relation("DayClosedBy")
 
   @@index([companyId])
   @@index([branchId])
@@ -583,4 +586,66 @@ model InvoiceCounter {
   lastNumber Int    @default(0)
 
   @@unique([branchId, fyLabel])
+}
+
+// One branch's end-of-day cash count. The system already knows what it
+// BELIEVES is in the drawer; this records what someone actually counted, and
+// the difference between the two.
+//
+// The difference is the entire point. A POS that only ever reports its own
+// figures cannot tell an owner about a till that is short — it has no
+// independent measurement to disagree with. Cash is the only tender where the
+// business holds the money physically and can therefore lose it physically,
+// so it is the only one counted here; card and UPI are reported for the day
+// but not declared, because the bank's figure settles those, not a cashier's.
+//
+// Immutable once written. A closing that can be edited after the fact is not
+// evidence of anything, and the reason to reopen a day is almost always that
+// someone disliked the variance. A correction is a new row, which is why
+// (branchId, businessDate) is not unique and `supersededById` exists.
+model DayClose {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  branchId     String
+  branch       Branch   @relation(fields: [branchId], references: [id])
+  // IST calendar day, 'YYYY-MM-DD'. A café's day is not a UTC day, and a
+  // closing done at 23:40 IST must land on the day the staff were working.
+  businessDate String
+
+  // Counted by hand, in the drawer, including the float that started the day.
+  countedCashPaise  Int
+  openingFloatPaise Int @default(0)
+
+  // What the system believed, frozen at the moment of closing. Recomputed
+  // later these would drift — a refund settled the next morning would rewrite
+  // history — and a closing that changes after it is signed is worthless.
+  expectedCashPaise Int
+  cashSalesPaise    Int
+  cashRefundsPaise  Int
+  // Non-cash is recorded for the day's report but never declared.
+  cardSalesPaise    Int @default(0)
+  upiSalesPaise     Int @default(0)
+  otherSalesPaise   Int @default(0)
+  gatewaySalesPaise Int @default(0)
+  // countedCash − openingFloat − expectedCash. Positive is over, negative short.
+  variancePaise     Int
+  ordersBilled      Int @default(0)
+
+  // Required when the count disagrees, enforced in the route: an unexplained
+  // variance is the one an owner most needs explained.
+  note String?
+
+  closedById String
+  closedBy   PosUser @relation("DayClosedBy", fields: [closedById], references: [id])
+  closedAt   DateTime @default(now())
+
+  // A correcting closing points at the one it replaces. Reading the latest row
+  // per day gives the current truth; the chain keeps what was said before it.
+  supersededById String?   @unique
+  supersedes     DayClose? @relation("DayCloseCorrection", fields: [supersededById], references: [id])
+  correctedBy    DayClose? @relation("DayCloseCorrection")
+
+  @@index([companyId, businessDate])
+  @@index([branchId, businessDate])
 }

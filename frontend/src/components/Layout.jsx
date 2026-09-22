@@ -5,6 +5,7 @@ import {
   BadgeCheck,
   BarChart3,
   Building2,
+  CalendarCheck,
   KeyRound,
   LayoutDashboard,
   ListChecks,
@@ -159,6 +160,7 @@ export default function Layout() {
                   <NavItem to="/tables" icon={Armchair} label="Tables" />
                   <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
                   <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
+                  <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
                 </>
               ) : null}
             </>
@@ -177,6 +179,7 @@ export default function Layout() {
                     <>
                       <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
                       <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
+                      <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
                     </>
                   ) : null}
                   <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">

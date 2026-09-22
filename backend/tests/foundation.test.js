@@ -20,6 +20,12 @@ const { env } = await import('../src/config/env.js');
 const app = createApp();
 
 const wipe = async () => {
+  // Before PosUser and Branch, which it references. This file never creates a
+  // DayClose, but it shares one test database with the files that do, and a
+  // wipe that only clears its own tables leaves the other file's rows holding
+  // a foreign key — so the failure lands here, in a suite that has nothing to
+  // do with cash counts.
+  await prisma.dayClose.deleteMany();
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
   // Before Order: PaymentIntent references it ON DELETE RESTRICT, so an

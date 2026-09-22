@@ -20,6 +20,9 @@ const { istDateOf, MANUAL_PAYMENT_LABEL } = await import('../src/lib/orders.js')
 const app = createApp();
 
 const wipe = async () => {
+  // Before PosUser and Branch, which it references. The self-relation is
+  // ON DELETE SET NULL so a bulk delete needs no ordering of its own.
+  await prisma.dayClose.deleteMany();
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
   // Before Order: PaymentIntent references it ON DELETE RESTRICT, so an
@@ -674,5 +677,160 @@ describe('sales report', () => {
     const foreign = await request(app).get(`/api/reports/sales?from=${today}&to=${today}&branchId=${branchB1.id}`)
       .set(auth(tokens.ownerA));
     expect(foreign.status).toBe(404);
+  });
+});
+
+// Daily closing. The one report that carries a number the POS did not
+// compute, so it is the only one that can contradict the POS.
+describe('daily closing', () => {
+  const today = istDateOf(new Date());
+  const preview = (token, qs = '') =>
+    request(app).get(`/api/reports/day-close/preview?date=${today}${qs}`).set(auth(token));
+
+  it('a cashier may see the expected drawer but may not close the day', async () => {
+    const seen = await preview(tokens.cashierA1);
+    expect(seen.status, JSON.stringify(seen.body)).toBe(200);
+    expect(seen.body.preview.branchId).toBe(branchA1.id);
+
+    const closed = await request(app).post('/api/reports/day-close').set(auth(tokens.cashierA1))
+      .send({ date: today, countedCash: 100 });
+    expect(closed.status).toBe(403);
+  });
+
+  it('expected cash counts manual cash only, never card, UPI or gateway', async () => {
+    const res = await preview(tokens.managerA1);
+    expect(res.status).toBe(200);
+    const p = res.body.preview;
+    // The §6 flagship order was settled in cash and partly refunded, and the
+    // transitions block added more cash. The exact figure is not the point —
+    // what matters is that expected = cash in − cash refunds out, and that
+    // the non-cash buckets are reported beside it rather than folded into it.
+    expect(p.expectedCash).toBeCloseTo(p.cashSales - p.cashRefunds, 2);
+    expect(p.cashSales).toBeGreaterThan(0);
+    expect(typeof p.openOrders).toBe('number');
+    expect(p.note).toMatch(/opening float/i);
+
+    // Asserting gatewaySales === 0 here would pass with the channel test
+    // inverted, because this suite configures no provider. So plant a
+    // GATEWAY payment and a GATEWAY refund on a real order and check they
+    // land in the buckets that do NOT touch the drawer. Getting this wrong
+    // is not a reporting nicety: it would tell a cashier to produce card
+    // money in cash, every evening, and call them short when they could not.
+    const o = await request(app).post('/api/orders').set(auth(tokens.cashierA1))
+      .send({ type: 'TAKEAWAY', items: [{ productId: cat.cappuccino, qty: 1 }] });
+    const orderId = o.body.order.id;
+    await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
+    await prisma.payment.create({
+      data: { orderId, method: 'CARD', channel: 'GATEWAY', amount: '500.00', providerRef: `pay_probe_${Date.now()}` },
+    });
+    const mgr = await prisma.posUser.findFirst({ where: { branchId: branchA1.id, role: 'BRANCH_MANAGER' } });
+    await prisma.refund.create({
+      data: { orderId, amount: '100.00', channel: 'GATEWAY', status: 'SUCCEEDED', reason: 'probe', byId: mgr.id },
+    });
+
+    const after = (await preview(tokens.managerA1)).body.preview;
+    expect(after.gatewaySales).toBeCloseTo(p.gatewaySales + 500, 2);
+    expect(after.cashSales).toBeCloseTo(p.cashSales, 2);
+    expect(after.cardSales).toBeCloseTo(p.cardSales, 2);
+    // The gateway refund did not come out of this till either.
+    expect(after.cashRefunds).toBeCloseTo(p.cashRefunds, 2);
+    expect(after.expectedCash).toBeCloseTo(p.expectedCash, 2);
+  });
+
+  it('a variance must be explained before it can be filed', async () => {
+    const p = (await preview(tokens.managerA1)).body.preview;
+    const short = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({ date: today, countedCash: p.expectedCash - 50 });
+    expect(short.status).toBe(400);
+    expect(short.body.error.field).toBe('note');
+    expect(short.body.error.message).toMatch(/short/i);
+
+    const over = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({ date: today, countedCash: p.expectedCash + 50 });
+    expect(over.status).toBe(400);
+    expect(over.body.error.message).toMatch(/over/i);
+  });
+
+  it('a balanced count is filed, and the float is not mistaken for a surplus', async () => {
+    const p = (await preview(tokens.managerA1)).body.preview;
+    // Counting the float along with the takings is what actually happens at a
+    // till. Declared separately, it must not register as money found.
+    const res = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({ date: today, countedCash: p.expectedCash + 2000, openingFloat: 2000 });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.close.variance).toBe(0);
+    expect(res.body.close.expectedCash).toBeCloseTo(p.expectedCash, 2);
+    expect(res.body.close.closedBy.id).toBeTruthy();
+    expect(res.body.close.isCorrection).toBe(false);
+  });
+
+  it('a second closing needs to say which one it corrects', async () => {
+    const p = (await preview(tokens.managerA1)).body.preview;
+    const blind = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({ date: today, countedCash: p.expectedCash });
+    expect(blind.status).toBe(409);
+    expect(blind.body.error.message).toMatch(/already closed/i);
+
+    const existing = (await preview(tokens.managerA1)).body.existingClose;
+    expect(existing).toBeTruthy();
+    const stale = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({ date: today, countedCash: p.expectedCash, correctsId: 'some-other-id' });
+    expect(stale.status).toBe(409);
+
+    const fixed = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({
+        date: today,
+        countedCash: p.expectedCash - 100,
+        note: 'recount: 100 was still in the tip jar',
+        correctsId: existing.id,
+      });
+    expect(fixed.status, JSON.stringify(fixed.body)).toBe(201);
+    expect(fixed.body.close.isCorrection).toBe(true);
+    expect(fixed.body.close.variance).toBeCloseTo(-100, 2);
+  });
+
+  it('history shows the correction and hides what it replaced, unless asked', async () => {
+    const list = await request(app).get(`/api/reports/day-close?from=${today}&to=${today}`)
+      .set(auth(tokens.managerA1));
+    expect(list.status).toBe(200);
+    expect(list.body.closes.length).toBe(1);
+    expect(list.body.closes[0].isCorrection).toBe(true);
+    expect(list.body.totals.shortDays).toBe(1);
+
+    const all = await request(app).get(`/api/reports/day-close?from=${today}&to=${today}&includeSuperseded=true`)
+      .set(auth(tokens.managerA1));
+    expect(all.body.closes.length).toBe(2);
+    // The replaced row is still readable, and says so.
+    expect(all.body.closes.some((c) => c.superseded)).toBe(true);
+  });
+
+  it('ATC may read a closing but may never declare one', async () => {
+    const read = await request(app)
+      .get(`/api/reports/day-close?from=${today}&to=${today}&companyId=${companyA.id}`)
+      .set(auth(tokens.atc));
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body.closes.length).toBeGreaterThan(0);
+    const write = await request(app).post(`/api/reports/day-close?companyId=${companyA.id}`)
+      .set(auth(tokens.atc))
+      .send({ date: today, branchId: branchA1.id, countedCash: 0 });
+    expect(write.status).toBe(403);
+  });
+
+  it('an owner must name a branch, and cannot reach another company\'s', async () => {
+    const vague = await request(app).get(`/api/reports/day-close/preview?date=${today}`).set(auth(tokens.ownerA));
+    expect(vague.status).toBe(400);
+    expect(vague.body.error.field).toBe('branchId');
+
+    const foreign = await request(app)
+      .get(`/api/reports/day-close/preview?date=${today}&branchId=${branchB1.id}`).set(auth(tokens.ownerA));
+    expect(foreign.status).toBe(404);
+  });
+
+  it('a day that has not happened cannot be closed', async () => {
+    const future = istDateOf(new Date(Date.now() + 3 * 86400e3));
+    const res = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))
+      .send({ date: future, countedCash: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.field).toBe('date');
   });
 });
