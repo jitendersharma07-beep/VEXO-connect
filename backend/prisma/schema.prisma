@@ -80,6 +80,8 @@ model Company {
   products   Product[]
   orders     Order[]
   dayCloses  DayClose[]
+
+  discountPolicies DiscountPolicy[]
 }
 
 model Branch {
@@ -102,6 +104,8 @@ model Branch {
   orders          Order[]
   invoiceCounters InvoiceCounter[]
   dayCloses       DayClose[]
+
+  discountPolicies DiscountPolicy[]
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -128,13 +132,16 @@ model PosUser {
 
   sessions PosSession[]
 
-  ordersOpened     Order[]     @relation("OrderOpenedBy")
-  ordersVoided     Order[]     @relation("OrderVoidedBy")
-  itemsVoided      OrderItem[] @relation("OrderItemVoidedBy")
-  paymentsReceived Payment[]   @relation("PaymentReceivedBy")
-  refundsIssued    Refund[]    @relation("RefundBy")
+  ordersOpened     Order[]         @relation("OrderOpenedBy")
+  ordersVoided     Order[]         @relation("OrderVoidedBy")
+  itemsVoided      OrderItem[]     @relation("OrderItemVoidedBy")
+  paymentsReceived Payment[]       @relation("PaymentReceivedBy")
+  refundsIssued    Refund[]        @relation("RefundBy")
   intentsCreated   PaymentIntent[] @relation("PaymentIntentCreatedBy")
-  daysClosed       DayClose[]  @relation("DayClosedBy")
+  daysClosed       DayClose[]      @relation("DayClosedBy")
+
+  discountPolicies  DiscountPolicy[] @relation("DiscountPolicySubject")
+  discountsApproved Order[]          @relation("OrderDiscountApprovedBy")
 
   @@index([companyId])
   @@index([branchId])
@@ -186,6 +193,73 @@ model LicenseAddon {
   createdAt DateTime         @default(now())
 
   @@index([licenseId])
+}
+
+// ---------------------------------------------------------------------------
+// Discount authority — who may take money off a bill, and how far.
+//
+// Resolved most-specific-first: USER override → BRANCH override → COMPANY
+// default → nothing. A company with no rows discounts nothing at all, which
+// is the right state for a till that has just been handed over: permission is
+// granted, never assumed. There is deliberately no constant in this codebase
+// that says "a cashier may give 10%" — every ceiling is data the customer's
+// own admin sets.
+// ---------------------------------------------------------------------------
+
+enum DiscountPolicyLevel {
+  COMPANY
+  BRANCH
+  USER
+}
+
+model DiscountPolicy {
+  id        String              @id @default(cuid())
+  companyId String
+  company   Company             @relation(fields: [companyId], references: [id])
+  level     DiscountPolicyLevel
+  // Restrict, not the Prisma default of SET NULL: a policy row silently
+  // widening from "this branch" to "the whole company" because somebody
+  // removed a branch is not a state this table should be able to reach.
+  branchId  String?
+  branch    Branch?             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  userId    String?
+  user      PosUser?            @relation("DiscountPolicySubject", fields: [userId], references: [id], onDelete: Restrict)
+
+  // Postgres counts NULLs in a unique index as distinct, so a nullable
+  // (branchId, userId) pair would happily hold a hundred "company defaults".
+  // scopeKey is the same fact written so the index can actually bite:
+  // "company" | "branch:<id>" | "user:<id>".
+  scopeKey String
+
+  // null = inherit from the level above. At COMPANY level there is nothing
+  // above, so null there reads as "not allowed".
+  allowLineDiscount  Boolean?
+  allowOrderDiscount Boolean?
+
+  // Ceilings on the COMBINED discount — every line discount plus the
+  // order-level discount — measured against the order's gross. Both kinds may
+  // be set at once, in which case both bind and the tighter one decides.
+  // Percent is Decimal(6,3) like the tax rates; the flat cap is integer paise,
+  // so no float ever takes part in a limit comparison.
+  maxPercent   Decimal? @db.Decimal(6, 3)
+  maxFlatPaise Int?
+
+  // What this principal may authorise — for somebody else, or for themselves
+  // above their own operating ceiling. A cashier approves nothing until an
+  // admin says otherwise.
+  canApprove           Boolean?
+  maxApprovalPercent   Decimal? @db.Decimal(6, 3)
+  maxApprovalFlatPaise Int?
+
+  note        String?
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([companyId, scopeKey])
+  @@index([companyId, level])
+  @@index([branchId])
+  @@index([userId])
 }
 
 model PosAuditLog {
@@ -360,34 +434,44 @@ model DiningTable {
 }
 
 model Order {
-  id             String        @id @default(cuid())
-  companyId      String
-  company        Company       @relation(fields: [companyId], references: [id])
-  branchId       String
-  branch         Branch        @relation(fields: [branchId], references: [id])
-  type           OrderType
-  status         OrderStatus   @default(OPEN)
-  tableId        String?
-  table          DiningTable?  @relation(fields: [tableId], references: [id])
+  id                   String        @id @default(cuid())
+  companyId            String
+  company              Company       @relation(fields: [companyId], references: [id])
+  branchId             String
+  branch               Branch        @relation(fields: [branchId], references: [id])
+  type                 OrderType
+  status               OrderStatus   @default(OPEN)
+  tableId              String?
+  table                DiningTable?  @relation(fields: [tableId], references: [id])
   // Assigned at bill time; format <branchCode>/<fy>/<seq5>. Unique per
   // company (branch codes are unique per company, not globally).
-  invoiceNumber  String?
-  openedById     String
-  openedBy       PosUser       @relation("OrderOpenedBy", fields: [openedById], references: [id])
-  discountType   DiscountType?
-  discountValue  Decimal?      @db.Decimal(10, 2)
-  discountAmount Decimal       @default(0) @db.Decimal(10, 2)
-  subtotal       Decimal       @default(0) @db.Decimal(10, 2)
-  taxAmount      Decimal       @default(0) @db.Decimal(10, 2)
-  total          Decimal       @default(0) @db.Decimal(10, 2)
-  note           String?
-  voidReason     String?
-  voidedById     String?
-  voidedBy       PosUser?      @relation("OrderVoidedBy", fields: [voidedById], references: [id])
-  billedAt       DateTime?
-  closedAt       DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  invoiceNumber        String?
+  openedById           String
+  openedBy             PosUser       @relation("OrderOpenedBy", fields: [openedById], references: [id])
+  discountType         DiscountType?
+  discountValue        Decimal?      @db.Decimal(10, 2)
+  discountAmount       Decimal       @default(0) @db.Decimal(10, 2)
+  // Who allowed the discount this bill carries, and why. Snapshotted, not
+  // re-derived: tomorrow's policy edit must never make yesterday's invoice
+  // unexplainable. Null means the discount sat inside the operator's own
+  // limit and needed nobody — or that there is no discount at all.
+  // Restrict: deleting the approver must not quietly turn an approved
+  // discount into an unexplained one.
+  discountApprovedById String?
+  discountApprovedBy   PosUser?      @relation("OrderDiscountApprovedBy", fields: [discountApprovedById], references: [id], onDelete: Restrict)
+  discountApprovedAt   DateTime?
+  discountReason       String?
+  subtotal             Decimal       @default(0) @db.Decimal(10, 2)
+  taxAmount            Decimal       @default(0) @db.Decimal(10, 2)
+  total                Decimal       @default(0) @db.Decimal(10, 2)
+  note                 String?
+  voidReason           String?
+  voidedById           String?
+  voidedBy             PosUser?      @relation("OrderVoidedBy", fields: [voidedById], references: [id])
+  billedAt             DateTime?
+  closedAt             DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
   items    OrderItem[]
   kots     Kot[]
@@ -399,6 +483,7 @@ model Order {
   @@index([companyId, branchId, status])
   @@index([companyId, billedAt])
   @@index([tableId])
+  @@index([discountApprovedById])
 }
 
 model OrderItem {
@@ -514,18 +599,18 @@ model PaymentIntent {
 // would let anyone squat the unique key with a forged id and permanently block
 // the genuine event from ever being applied. Rejections go to PosAuditLog.
 model GatewayWebhookEvent {
-  id          String    @id @default(cuid())
-  provider    String
-  eventId     String
-  kind        String
-  payloadHash String
+  id            String         @id @default(cuid())
+  provider      String
+  eventId       String
+  kind          String
+  payloadHash   String
   // Set only when the delivery matched a real intent. This is also the only
   // route by which an event can be attributed to a company, since events
   // carry no tenant of their own.
-  intentId    String?
-  intent      PaymentIntent? @relation(fields: [intentId], references: [id])
-  receivedAt  DateTime  @default(now())
-  processedAt DateTime?
+  intentId      String?
+  intent        PaymentIntent? @relation(fields: [intentId], references: [id])
+  receivedAt    DateTime       @default(now())
+  processedAt   DateTime?
   // Why a verified delivery still changed nothing — unknown intent, already
   // settled, order no longer billable. Null once it has been applied.
   skippedReason String?
@@ -536,11 +621,11 @@ model GatewayWebhookEvent {
 }
 
 model Refund {
-  id        String   @id @default(cuid())
-  orderId   String
-  order     Order    @relation(fields: [orderId], references: [id])
-  amount    Decimal  @db.Decimal(10, 2)
-  reason    String
+  id             String         @id @default(cuid())
+  orderId        String
+  order          Order          @relation(fields: [orderId], references: [id])
+  amount         Decimal        @db.Decimal(10, 2)
+  reason         String
   // MANUAL: cash or card handed back across the counter. Done the moment it
   // happens, because a person did it.
   //
@@ -548,8 +633,8 @@ model Refund {
   // returns nothing to anybody, so the refund stays a REQUEST until a
   // signature-verified webhook says the provider actually paid it out. A
   // PENDING refund must never be shown, totalled or reported as money returned.
-  channel       PaymentChannel @default(MANUAL)
-  status        RefundStatus   @default(SUCCEEDED)
+  channel        PaymentChannel @default(MANUAL)
+  status         RefundStatus   @default(SUCCEEDED)
   // The gateway payment being reversed, and the provider's own reference for
   // the reversal. providerRef is unique so a redelivered refund webhook lands
   // on exactly one row.
@@ -558,19 +643,19 @@ model Refund {
   // state: the request was reserved here, but the provider never told us
   // whether it took it. It may already be paying out. It therefore keeps
   // holding its amount and must be reconciled, never re-requested.
-  intentId      String?
-  intent        PaymentIntent? @relation("RefundIntent", fields: [intentId], references: [id])
-  providerRef   String?        @unique
+  intentId       String?
+  intent         PaymentIntent? @relation("RefundIntent", fields: [intentId], references: [id])
+  providerRef    String?        @unique
   // Sent to the provider, and kept, so a request whose outcome we never
   // learned can be re-sent as THE SAME request. Without a stored key a retry
   // is a second refund and the customer is paid twice. Null for MANUAL, where
   // there is no provider to deduplicate against.
-  idempotencyKey String?       @unique
-  failureReason String?
-  byId      String
-  by        PosUser  @relation("RefundBy", fields: [byId], references: [id])
-  createdAt DateTime @default(now())
-  settledAt DateTime?
+  idempotencyKey String?        @unique
+  failureReason  String?
+  byId           String
+  by             PosUser        @relation("RefundBy", fields: [byId], references: [id])
+  createdAt      DateTime       @default(now())
+  settledAt      DateTime?
 
   @@index([orderId])
   @@index([status])
@@ -604,11 +689,11 @@ model InvoiceCounter {
 // someone disliked the variance. A correction is a new row, which is why
 // (branchId, businessDate) is not unique and `supersededById` exists.
 model DayClose {
-  id           String   @id @default(cuid())
+  id           String  @id @default(cuid())
   companyId    String
-  company      Company  @relation(fields: [companyId], references: [id])
+  company      Company @relation(fields: [companyId], references: [id])
   branchId     String
-  branch       Branch   @relation(fields: [branchId], references: [id])
+  branch       Branch  @relation(fields: [branchId], references: [id])
   // IST calendar day, 'YYYY-MM-DD'. A café's day is not a UTC day, and a
   // closing done at 23:40 IST must land on the day the staff were working.
   businessDate String
@@ -637,7 +722,7 @@ model DayClose {
   note String?
 
   closedById String
-  closedBy   PosUser @relation("DayClosedBy", fields: [closedById], references: [id])
+  closedBy   PosUser  @relation("DayClosedBy", fields: [closedById], references: [id])
   closedAt   DateTime @default(now())
 
   // A correcting closing points at the one it replaces. Reading the latest row
