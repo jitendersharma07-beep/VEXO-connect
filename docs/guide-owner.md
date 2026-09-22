@@ -201,6 +201,12 @@ Stated plainly so nobody discovers it mid-service:
 - **No cap on how large a discount a cashier may give.** Any cashier can discount
   up to 100 %. If you want a ceiling above which a manager must approve, ask ATC
   — it is a small change, but ATC needs *you* to choose the number.
+- **No phone-sized screen.** Use a tablet, laptop or till monitor. Below about
+  768 pixels wide — which is every phone held upright — the menu down the left
+  disappears and there is nothing to replace it, so staff can see the page they
+  are on and cannot get to any other. It is not a rendering fault and it will
+  not look broken; they simply will not be able to navigate. If you want the POS
+  on phones, ask ATC.
 
 ---
 

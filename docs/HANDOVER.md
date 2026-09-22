@@ -308,11 +308,22 @@ Written down so they are disclosed rather than discovered.
    back out of the running container — not the working tree, which builds
    something else entirely — in six scenarios, every assertion paired with one
    that catches its inverse: 45/45.
-9. **Licence expiry in the top bar uses the browser's timezone.** Visible in
-   production right now: the top bar reads "until 3/31/2027", which is US
-   format, and the same licence would read 3/30/2027 from a New York browser.
-   The same defect as the Team one fixed above, in `Layout.jsx`, which a
-   parallel session has uncommitted — left alone rather than overwritten.
+9. **Four licence dates still render in the browser's timezone.** Six did.
+   `20dc41d` added `fmtDate` and fixed the two whose files were free; the rest
+   sit in files a parallel session has checked out, so they are named rather
+   than edited:
+
+   | File | Line | What the client sees |
+   |---|---|---|
+   | `components/Layout.jsx` | 231 | top bar "until …" — on every page |
+   | `pages/Licensing.jsx` | 63 | licence start date |
+   | `pages/Licensing.jsx` | 67 | licence expiry |
+   | `pages/Licensing.jsx` | 95 | add-on expiry |
+
+   All four are `new Date(x).toLocaleDateString()` → `fmtDate(x)` plus the
+   import. Measured, not theorised: rendering the Dashboard from a New York
+   browser puts "until 3/30/2027" in the top bar three inches from a StatCard
+   reading "31 Mar 2027", for the same licence.
 10. **The product name is unsettled.** Production says "ATC POS" and matches the
     guides. The working tree does not: it builds "VEXO Connect" throughout,
     including the page title. Whichever name ships, the guides and the screen
@@ -321,6 +332,20 @@ Written down so they are disclosed rather than discovered.
 11. **No pull-based payment recovery.** If a gateway `payment.captured` webhook
     is missed, nothing polls the provider to find out. Only relevant once the
     gateway is switched on, and it should be built before it is.
+12. **There is no navigation below 768 px.** Measured on the deployed bundle at
+    twelve widths: at 768 px a cashier on the Sell screen has four nav links;
+    at 767 px they have **zero** — the sidebar is `hidden … md:flex` and
+    nothing replaces it. The page itself is fine, with no horizontal overflow
+    even at 320 px, which is exactly why this was nearly missed: the layout
+    does not *look* broken, it is simply unusable, because a cashier on a phone
+    cannot reach Orders to reprint a bill. **The POS needs a tablet or larger**
+    — said plainly in `guide-owner.md` §9. A mobile menu is a small change if
+    the client wants phones, and `Layout.jsx` is the only file it touches.
+13. **No error boundary.** There is none anywhere in the frontend, so any
+    unexpected render error takes the whole page white with no message and no
+    way back but a reload. Not currently reachable through the real API — it
+    was found by feeding the Dashboard a malformed response from a test stub —
+    but a till is the wrong place to discover it.
 
 ---
 

@@ -6,6 +6,10 @@ Print this and keep it by the till. One page, in order of what you actually do.
 password your manager gave you. The first time, the system will make you choose
 a new password. Nobody at ATC can see it.
 
+**On the till screen, a tablet or a laptop — not a phone.** On a phone the left
+menu is not there, so you can see whichever page you are on and cannot get to
+any other.
+
 ---
 
 ## Taking an order
