@@ -150,6 +150,47 @@ describe('authentication', () => {
     const after = await request(app).get('/api/auth/me').set(auth(t));
     expect(after.status).toBe(401);
   });
+
+  it('records the client behind two proxies, not the proxy, and ignores a forged claim', async () => {
+    // Production puts two nginx hops in front of this app — the host one for
+    // atcworkspace.com and the one in the frontend container — and each
+    // APPENDS to X-Forwarded-For. So the shape the app really sees is
+    // "<client>, <docker gateway>", and the client is second from the right.
+    //
+    // This is not only about the audit column. `req.ip` keys both rate
+    // limiters, so reading the proxy here gives every till in the café one
+    // shared login-failure budget.
+    const CLIENT = '203.0.113.77'; // TEST-NET-3, never a real host
+    const HOP = '172.28.0.1'; // what the container nginx appends
+    const FORGED = '198.51.100.9'; // what an attacker would inject
+
+    const res = await request(app)
+      .post('/api/auth/login')
+      // The attacker's value is already in the header when the first proxy
+      // receives it, so it ends up LEFT of both appended entries.
+      .set('X-Forwarded-For', `${FORGED}, ${CLIENT}, ${HOP}`)
+      // Set by the container nginx to its own view, and wrong on purpose:
+      // if this header ever wins again, this assertion fails.
+      .set('X-Real-IP', HOP)
+      .send({ email: 'owner.b@test.local', password: PW });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const session = await prisma.posSession.findFirst({
+      where: { user: { email: 'owner.b@test.local' } },
+      orderBy: { createdAt: 'desc' },
+      select: { ip: true },
+    });
+    expect(session.ip).toBe(CLIENT);
+    expect(session.ip).not.toBe(HOP);
+    expect(session.ip).not.toBe(FORGED);
+
+    const logged = await prisma.posAuditLog.findFirst({
+      where: { action: 'LOGIN_SUCCESS' },
+      orderBy: { at: 'desc' },
+      select: { ip: true },
+    });
+    expect(logged.ip).toBe(CLIENT);
+  });
 });
 
 describe('company isolation', () => {

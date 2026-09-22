@@ -25,7 +25,24 @@ import gatewayRoutes from './api/routes/gateway.js';
 export const createApp = () => {
   const app = express();
 
-  app.set('trust proxy', 1);
+  // TWO proxies sit in front of this app in production, not one: the host
+  // nginx that owns atcworkspace.com, and the nginx inside the frontend
+  // container that serves the bundle and forwards /api. Each appends to
+  // X-Forwarded-For, so the client's real address is the second entry from
+  // the right and `1` lands on the docker bridge gateway instead.
+  //
+  // That is not a cosmetic difference. `req.ip` is the key for both rate
+  // limiters, so with the wrong count every device in the café shares one
+  // counter: ten mistyped passwords from a single cashier lock the entire
+  // shop out of sign-in for fifteen minutes, owner included, mid-service.
+  // Measured before the change — a request over the public URL and one over
+  // loopback, two completely different client addresses, drew down the same
+  // global counter (299 → 295 → 294).
+  //
+  // Counting from the right is also what makes it unspoofable. A client that
+  // sends its own X-Forwarded-For only pushes values further left, past the
+  // two entries the proxies guarantee.
+  app.set('trust proxy', 2);
 
   app.use(
     helmet({
