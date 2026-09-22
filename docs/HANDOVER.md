@@ -19,10 +19,10 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Backend commit | `817b438`…`0084936` — `0084936` is frontend-only, so `backend/` is byte-identical across that range and content cannot narrow it further. Proven by tree digest, not by tag: `/app/src` in the running container and `backend/src` in the clean working tree both hash `6b9cbcd3…`. Image `pos-prod-backend:20260922-dayclose-stale` (`b4de17df52df`), container created 15:21 UTC |
-| Frontend commit | **`0084936`**, image `pos-prod-frontend:20260922-dayclose-stale` (`b4e84ea39f19`), container created 15:22 UTC |
-| Frontend bundle | `assets/index-BKEWKpgq.js`, sha256 `6989289f…`. Reproduced byte-identical from `0084936` at 15:07 UTC |
-| Rollback tags | `pos-prod-frontend:rollback-20260922-1501` (`173962d8e5f1` — the frontend that was live before 15:03), `pos-prod-backend:rollback-20260922-1501` (`fd5e33f8a045`) |
+| Backend commit | **`9b85da3`**. Proven by digest, not by tag: `/app/src` in the running container and `backend/src` in the working tree agree on both the file listing (`f8e33f7f…`) and the set of content hashes (`1434a3d1…`). Image `pos-prod-backend:20260922-proxy-hops` (`96a494e650b3`), container created 15:42 UTC |
+| Frontend commit | **`0084936`**, image `39205084de0e`, container created 15:41 UTC by another session |
+| Frontend bundle | `assets/index-BKEWKpgq.js`, sha256 `6989289f…`, 420234 bytes. Unchanged by that 15:41 rebuild — re-hashed off the public URL at 15:46 UTC and identical to the byte-for-byte reproduction from `0084936` |
+| Rollback tags | `pos-prod-backend:rollback-20260922-1543` (`b4de17df52df`, the backend live before 15:42), `pos-prod-frontend:rollback-20260922-1501` (`173962d8e5f1`) |
 | Database migrations applied | 8, unchanged. This deploy carried no migration and the boot log says so: `8 migrations found` then `No pending migrations to apply.` |
 
 **This table went stale four times in one afternoon** — twice while this very
@@ -33,11 +33,24 @@ point it was already wrong again: `817b438` + `0084936` had gone out at 15:03,
 and the sentence announcing them as undeployed outlived the deploy by three
 minutes.
 
-A fifth time, differently: at 15:21 the healthchecks were applied, which
-recreated the backend and frontend **containers from the same images**. Both
-image IDs above are unchanged; only the creation timestamps moved. Worth
-noticing, because it is the case a commit-based check cannot see — the running
-service changed and no code did.
+A fifth and sixth time, both differently, and both worth keeping because they
+are the two cases a commit-based check cannot see:
+
+- **15:21 — new containers, same images.** Applying the healthchecks recreated
+  the backend and frontend from the images they were already running. No image
+  ID moved, no code changed, and the service was restarted anyway.
+- **15:41 — new image, same content.** Another session rebuilt and redeployed
+  the frontend. Its image ID moved (`b4e84ea39f19` → `39205084de0e`) with no
+  commit behind it — `git log` was unchanged — and the bundle it serves still
+  hashes to `6989289f…`. A rebuild yields fresh layer digests whether or not a
+  byte of output differs, so **an image ID is not evidence that anything
+  shipped.** Hash the artefact.
+
+One number in that row invites a wrong conclusion, so it is written out:
+`deploy/prod-verify.mjs` reports the bundle as 419854 while the file is 420234
+bytes. Nothing is truncated — the script measures a decoded JavaScript string,
+whose length counts UTF-16 units, and the difference is the multi-byte
+characters in it (₹ and the é in café among them). Compare hashes, not sizes.
 
 So: it is the most perishable thing in this document. Production is redeployed
 by whoever is working on it and the table does not update itself. Treat every
@@ -53,18 +66,38 @@ built from a commit:
 
 ```sh
 git log --oneline <deployed-commit>..HEAD -- \
-  frontend/ backend/src backend/prisma backend/scripts backend/package.json
+  frontend/ backend/src backend/prisma backend/scripts \
+  backend/package.json backend/package-lock.json
 ```
 
 using the commit you just *proved* by rebuild, not the one this table claims.
-Empty output is the only acceptable answer. It was empty at 15:29 UTC.
+Empty output is the only acceptable answer. It was empty at 15:54 UTC against
+`9b85da3` with the pathspec exactly as written above, and `compose --dry-run`
+reported all three services `Running`.
 
-**Scope that pathspec deliberately.** `backend/Dockerfile` copies exactly four
-things — `package*.json`, `prisma`, `src`, `scripts` — so `backend/tests/`
-never enters the image, and a bare `-- frontend/ backend/` reports a test-only
-commit as an undeployed change. That sends someone into a build-and-deploy
-cycle that cannot alter a single byte of the running service. Widen it only if
-the Dockerfile widens first.
+**Scope that pathspec deliberately, and keep it in step with the Dockerfile.**
+`backend/Dockerfile` copies exactly four things — `package*.json`, `prisma`,
+`src`, `scripts` — and the pathspec is that list, which is why the lockfile is
+named explicitly alongside `package.json`: a dependency change ships in the
+image without touching a line of `src`. It errs the other way too. Because
+`backend/tests/` never enters the image, a bare `-- frontend/ backend/` reports
+a test-only commit as an undeployed change, sending someone into a
+build-and-deploy cycle that cannot alter one byte of the running service.
+Widen or narrow it only when the Dockerfile does.
+
+One caution about editing that line at all: **a pathspec that matches nothing
+reports clean**, identically to a pathspec that matches everything and finds
+nothing outstanding. A typo here does not fail — it just stops looking, quietly
+and permanently. After changing it, confirm each path is real:
+
+```sh
+for p in frontend/ backend/src backend/prisma backend/scripts \
+         backend/package.json backend/package-lock.json; do
+  printf '%-28s %s\n' "$p" "$(git log --oneline -1 -- "$p")"
+done
+```
+
+Every line must name a commit. A blank one is a path git has never heard of.
 
 **Is the compose file applied?** Git cannot answer this one, and adding
 `docker-compose.prod.yml` to the pathspec above does not fix it — it makes
@@ -132,15 +165,30 @@ different way: digest the whole source tree on both sides and compare. Not one
 file — a single changed file is exactly what a stale image would still get
 right, since most of a deploy is unchanged:
 
+Compare it in two parts, because they fail differently — a file added or
+dropped shows up in the listing while every remaining hash still matches, and
+an edited file shows up in the content while the listing looks untouched:
+
 ```sh
-docker exec pos-prod-backend-1 sh -lc 'cd /app/src && find . -type f | sort | xargs sha256sum | sha256sum'
-find backend/src -type f -printf './%P\n' | sort | (cd backend/src && xargs sha256sum) | sha256sum
+# 1. the same files exist on both sides
+docker exec pos-prod-backend-1 find /app/src -type f -printf '%P\n' | sort | sha256sum
+find backend/src -type f -printf '%P\n' | sort | sha256sum
+
+# 2. those files hold the same bytes
+docker exec pos-prod-backend-1 find /app/src -type f -exec sha256sum {} + > /tmp/img-src.txt
+find backend/src -type f -exec sha256sum {} + > /tmp/tree-src.txt
+cut -c1-64 /tmp/img-src.txt  | sort | sha256sum
+cut -c1-64 /tmp/tree-src.txt | sort | sha256sum
 ```
 
-Both printed `6b9cbcd3…` at 15:05 UTC. This only proves the image matches the
-**working tree**, so it is worth something only when `git status --porcelain`
-is empty — otherwise it proves the image matches somebody's uncommitted edit,
-which is a different and much worse fact. Check that first.
+At 15:44 UTC against `9b85da3`: listings `f8e33f7f…`, contents `1434a3d1…`.
+The paths are cut away before hashing in step 2 precisely because they differ
+(`/app/src/...` against `backend/src/...`); step 1 is what covers them.
+
+This only proves the image matches the **working tree**, so it is worth
+something only when `git status --porcelain` is empty for `backend/` —
+otherwise it proves the image matches somebody's uncommitted edit, which is a
+different and much worse fact. Check that first.
 
 Confirm before quoting any of this. Re-read it from the live site rather than
 trusting the table — a docs table is a claim, the served bundle is the fact:
@@ -298,12 +346,13 @@ Separated by kind of evidence, because they are not equally strong.
 
 ### Automated tests — mocked, not a real provider
 
-Backend suite: **225 passed / 225**, 7 files (foundation 20, money 13,
+Backend suite: **227 passed / 227**, 7 files (foundation 22, money 13,
 logRedaction 7, phase2 45, razorpay 53, razorpayFlow 32, gateway 55), run
-against the dev test database and re-measured at `29d0ed3`, 15:32 UTC. Money
-arithmetic, order lifecycle, RBAC, tenant scoping, licence gating, refund
-states, log redaction, and the gateway adapter **against a mock**. Re-measure
-rather than quoting this number — it has been stale in this document twice:
+against the dev test database and re-measured at 15:52 UTC. Money arithmetic,
+order lifecycle, RBAC, tenant scoping, licence gating, refund states, log
+redaction, and the gateway adapter **against a mock**. Re-measure rather than
+quoting this number — it has been stale in this document three times, and was
+stale again by two within the hour this line was last corrected:
 
 ```sh
 cd backend
@@ -402,6 +451,56 @@ harness was rooted at `/`. Worth recording: the page still returned 200 and
 still painted a shell, so a check that looked only at status codes would have
 called a completely dead app healthy.
 
+### Rate limiting, measured against production rather than read off the config
+
+Worth its own section because a config file said the right thing while the
+running system did the wrong one, and no test in the suite could see it.
+
+`express-rate-limit` keys on `req.ip`. `app.js` had `trust proxy` set to `1`,
+but production runs **two** proxies that each append to `X-Forwarded-For` —
+the host nginx for `atcworkspace.com` and the nginx inside the frontend
+container. So `req.ip` resolved to the docker bridge gateway, `172.28.0.1`,
+for every client in the building. One shared key meant:
+
+- `loginLimiter`, 10 failed sign-ins per 15 minutes, **shared by everyone**.
+  One cashier mistyping their password ten times would have refused sign-in to
+  the whole shop, owner included, mid-service.
+- `globalLimiter`, 300 requests a minute, as the budget for every till, phone
+  and dashboard together rather than per device.
+
+Neither would have appeared in testing. Both limiters `skip` under
+`NODE_ENV=test`, and a single-device check never collides with itself.
+
+Measured, not inferred. A request over the public URL and one over loopback —
+two unrelated client addresses — drew down the same counter, `299 → 295 →
+294`. After `9b85da3` set the hop count to 2, the same two paths keep separate
+counters: loopback `299 → 298` while the public one independently read `296`.
+
+The audit trail was wrong for the same reason, plus one of its own:
+`clientIp()` preferred the `X-Real-IP` header, which the container nginx
+overwrites with its own view. Every audit and session row recorded
+`172.28.0.1` — which proxy delivered the request, never who made it. The
+before and after sit in adjacent rows of the same table, same probe, same
+query:
+
+```
+15:41:25  LOGIN_FAILED  172.28.0.1    <- before
+15:45:22  LOGIN_FAILED  20.20.20.1    <- after
+```
+
+`20.20.20.1` is the edge router, which is the correct answer for a request
+that left this host and came back in over the public URL.
+
+Both halves of the fix were proved load-bearing: reverting either one alone
+reddens the new `foundation.test.js` case, and each time it fails with the
+production symptom — `expected '172.28.0.1' to be '203.0.113.77'` — rather
+than a generic mismatch. The test also feeds a forged `X-Forwarded-For` entry,
+which counting from the right leaves harmlessly to the left of the two entries
+the proxies guarantee.
+
+**Rows already written keep the old value.** Nothing backfills them, and they
+should not be read as a claim about where those requests came from.
+
 ### Backup and restore
 
 The nightly schedule is **installed and has run** (2026-09-22 13:33 UTC, next
@@ -423,10 +522,31 @@ survive a restore. Full detail and caveats: `docs/BACKUP-RESTORE.md` §6.
 
 Written down so they are disclosed rather than discovered.
 
-1. **No cap on cashier discounts.** Any cashier can discount up to 100 % of a
-   bill without approval. For a café this is a cash-shrinkage hole. The fix is
-   small but ATC cannot pick the threshold — ask the owner for a number and a
-   rule ("above 10 %, manager approves").
+1. **No cap on cashier discounts, and no screen that shows them.** Any cashier
+   can discount up to 100 % of a bill without approval. For a café this is a
+   cash-shrinkage hole. The fix is small but ATC cannot pick the threshold —
+   ask the owner for a number and a rule ("above 10 %, manager approves").
+
+   Two things soften it and one thing does not, and the difference matters if
+   the owner is deciding how urgent this is:
+
+   - Every discount **is** recorded, with who applied it, what they applied,
+     to which order, and from where — `ORDER_DISCOUNT_SET` for a whole bill,
+     `ORDER_ITEM_UPDATE` carrying `lineDiscount` for a single line. So the
+     history exists from day one, and whenever the threshold is chosen there
+     is something to check it against.
+   - **No screen in the product reads that table.** Not the owner's, not
+     ATC's. The record is real and unreachable, which is worse than an
+     obvious gap because "discounts are audited" sounds like a control anyone
+     can check. Until a screen exists, `deploy/audit-queries.sql` is how you
+     look — discounts per cashier, refunds and voids, failed sign-ins per
+     account. Every query in it was run against production before it was
+     committed.
+   - The recording is **best effort, not transactional.** `audit()` wraps its
+     insert in try/catch so an audit failure can never fail a customer's
+     bill, which is the right trade. It does mean a missing row is not proof
+     an action did not happen — a failed write leaves only a `pos audit write
+     failed` warning in the backend log. Read those results as a lower bound.
 2. **Daily closing deliberately does not lock the day** — but it now says when
    it has stopped being true. `817b438` + `0084936`, **deployed** at 15:03 UTC
    and verified afterwards against the running build, not the working tree.
@@ -457,9 +577,11 @@ Written down so they are disclosed rather than discovered.
    that is the window the list queries.
 
    Evidence, measured rather than asserted: backend 225/225 across 7 files
-   (day-close 12). Five perturbations of `postCloseFor` reddened exactly the
-   new tests and left the pre-existing day-close tests green, each restored
-   byte-identical by sha256 afterwards.
+   (day-close 12) — the count **as it stood at that commit**, deliberately not
+   updated to match §3, since it records what this change was tested against
+   rather than what the suite totals today. Five perturbations of
+   `postCloseFor` reddened exactly the new tests and left the pre-existing
+   day-close tests green, each restored byte-identical by sha256 afterwards.
 
    Three of those five were worth the trouble on their own, because they found
    a gap rather than confirming one. The refund half of `postCloseFor` had no
@@ -678,8 +800,30 @@ Only if online payment is wanted:
   Expiry is computed from `expiresAt` at read time, so it cannot be missed by a
   failed job and cannot be postponed except by changing the date.
 - **ATC is read-only inside a customer's data**, and is refused the daily
-  closing outright. Every ATC access is written to the audit log and can be
-  shown to the client.
+  closing outright.
+- **ATC changes are audited; ATC reads are not.** The six actions that alter a
+  tenant — create company, change its status, issue a licence, add a branch
+  add-on, change licence status, create a user — each write a `PosAuditLog` row
+  naming the ATC admin who did it. `GET /pos/api/atc/companies` and
+  `GET /pos/api/atc/companies/:id` write nothing, and the second returns that
+  tenant's branches and its staff emails, roles and last-login times. So an ATC
+  admin can read a customer's staff list and leave no trace. Tell a client that
+  plainly; do not tell them every access is logged.
+- Showing that record to a client means running `deploy/audit-queries.sql`
+  (below) — **no screen in the product reads the audit table** (§6.1,
+  limitation 1). Query 5 lists every action present, which is where the ATC
+  ones appear.
+- In production that table holds **zero** ATC rows today, which is expected
+  rather than alarming: the single tenant was seeded straight into the database
+  instead of being created through the console. The consequence is that the ATC
+  audit path had never been watched run anywhere until the suite was made to
+  check it — `foundation.test.js`, "audits what ATC changes, and records nothing
+  when ATC only looks", which asserts both halves of the bullet above and was
+  confirmed to go red when the `COMPANY_CREATE` write is removed.
+- Audit queries, read-only and safe during service:
+  `docker exec -i pos-prod-postgres-1 psql -U atc_pos -d atc_pos < deploy/audit-queries.sql`.
+  Run query 0 first — it is a control, and if its `correct_ist` column is not
+  `stored` + 5:30 the rest of the output should not be trusted.
 - Logs: `docker compose -f docker-compose.prod.yml logs backend`.
 - Restart: `docker compose -f docker-compose.prod.yml up -d --no-deps backend`
   — `restart` alone re-runs the old container with the old environment.
