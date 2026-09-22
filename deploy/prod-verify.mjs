@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 // Verifies the ATC POS prod stack by content, without touching any other service.
-// Default target is the loopback edge (host-nginx-stripped paths). To verify the
-// public mount after go-live: BASE_URL=https://atcworkspace.com/pos node deploy/prod-verify.mjs
+// Default target is the loopback edge (host-nginx-stripped paths). To verify a
+// public mount:
+//   BASE_URL=https://atcworkspace.com/pos node deploy/prod-verify.mjs   (today)
+//   BASE_URL=https://vexoconnect.com    node deploy/prod-verify.mjs   (after cutover)
 // Prints PASS/FAIL lines only — never prints credentials. Exit 0 = all green.
 
 const BASE = (process.env.BASE_URL || 'http://127.0.0.1:8110').replace(/\/$/, '');
-// Served-at-/pos (public) vs prefix-stripped loopback: assets in index.html are
-// always /pos/assets/*; on loopback the fetchable path has the /pos stripped.
-const atPublicMount = BASE.endsWith('/pos');
-const ORIGIN = atPublicMount ? BASE.slice(0, -'/pos'.length) : BASE;
+// Where this run is pointed and what base path the bundle was built with are
+// two different facts, and the script must not assume either. Today the public
+// mount is /pos and the bundle base matches it; when VEXO Connect moves to its
+// own domain both become "". Hardcoding /pos would turn a *correct* deployment
+// red on cutover day — the worst possible moment to be debugging the verifier
+// instead of the deploy. So the mount is read from BASE_URL, the bundle base is
+// read out of index.html, and the two are compared against each other.
+const MOUNT = new URL(BASE).pathname.replace(/\/$/, ''); // "" or "/pos"
+const ORIGIN = new URL(BASE).origin;
 
 const results = [];
 const record = (name, ok, detail = '') => {
@@ -134,16 +141,21 @@ try {
   record('api health (edge→backend→db)', health.status === 200 && healthBody.service === 'atc-pos-api',
     `status ${health.status}`);
 
-  // 2. SPA shell served, with the /pos/ base baked into the bundle
+  // 2. SPA shell served, carrying whatever base path it was built with
   const index = await get('/');
   const indexHtml = await index.text();
-  const assetMatch = indexHtml.match(/src="(\/pos\/assets\/[^"]+\.js)"/);
-  record('index.html served with /pos/ asset base', index.status === 200 && Boolean(assetMatch),
-    assetMatch ? assetMatch[1] : 'asset ref not found');
+  const assetMatch = indexHtml.match(/src="((\/[^"]*?)?\/assets\/[^"]+\.js)"/);
+  const bundleBase = assetMatch ? (assetMatch[2] ?? '') : null;
+  record('index.html served with an asset base', index.status === 200 && Boolean(assetMatch),
+    assetMatch ? `base "${bundleBase || '/'}" → ${assetMatch[1]}` : 'asset ref not found');
 
   // 3. The referenced bundle actually loads through the same mount
   if (assetMatch) {
-    const assetPath = atPublicMount ? assetMatch[1] : assetMatch[1].replace(/^\/pos/, '');
+    // When mount and bundle base agree the declared path is already fetchable:
+    // that is the public /pos mount today, and the public root mount after
+    // cutover. They disagree on loopback, where the host-nginx prefix strip has
+    // not happened yet, so the base has to come off before the asset resolves.
+    const assetPath = MOUNT === bundleBase ? assetMatch[1] : assetMatch[1].slice(bundleBase.length);
     const asset = await fetch(ORIGIN + assetPath);
     const assetText = asset.status === 200 ? await asset.text() : '';
     record('js bundle fetch + content', asset.status === 200 && assetText.includes('VEXO Connect'),
@@ -156,7 +168,9 @@ try {
   for (const route of ['/login', '/dashboard', '/atc/companies']) {
     const page = await get(route);
     const html = await page.text();
-    record(`direct refresh ${route}`, page.status === 200 && html.includes('/pos/assets/'), `status ${page.status}`);
+    record(`direct refresh ${route}`,
+      page.status === 200 && bundleBase !== null && html.includes(`${bundleBase}/assets/`),
+      `status ${page.status}`);
   }
 
   // 5. Unauthenticated API access is refused
