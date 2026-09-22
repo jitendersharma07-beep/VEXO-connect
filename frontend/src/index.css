@@ -19,7 +19,8 @@
     @apply btn bg-pos-royal text-white hover:bg-pos-deep;
   }
   .btn-orange {
-    @apply btn bg-pos-orange text-white hover:bg-pos-ember;
+    /* Cyan accent reads best with dark text (white fails contrast on #12BEDE). */
+    @apply btn bg-pos-orange text-pos-deep hover:bg-pos-ember hover:text-white;
   }
   .btn-ghost {
     @apply btn border border-slate-200 bg-white text-slate-700 hover:bg-slate-50;

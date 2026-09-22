@@ -54,7 +54,7 @@ export const requirePosAuth = asyncHandler(async (req, _res, next) => {
   if (user.role !== 'POS_SUPER_ADMIN') {
     if (!user.company) throw forbidden('This account is not attached to a POS customer company');
     if (user.company.status === 'SUSPENDED') {
-      throw forbidden('Your company account is suspended. Please contact ATC support.');
+      throw forbidden('Your company account is suspended. Please contact VEXO support.');
     }
   }
 
@@ -69,7 +69,7 @@ export const requirePosAuth = asyncHandler(async (req, _res, next) => {
 export const resolveCompanyScope = asyncHandler(async (req, _res, next) => {
   if (req.user.role === 'POS_SUPER_ADMIN') {
     const companyId = req.query.companyId || req.headers['x-pos-company'] || null;
-    if (!companyId) throw badRequest('companyId is required for ATC operators on this route');
+    if (!companyId) throw badRequest('companyId is required for VEXO operators on this route');
     const company = await prisma.company.findUnique({ where: { id: String(companyId) } });
     if (!company) throw notFound('Company not found');
     req.companyScope = company;

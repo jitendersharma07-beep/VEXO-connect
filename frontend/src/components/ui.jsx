@@ -67,7 +67,7 @@ export function DemoBadge() {
 
 export function RoleBadge({ role }) {
   const labels = {
-    POS_SUPER_ADMIN: 'ATC Admin',
+    POS_SUPER_ADMIN: 'VEXO Admin',
     CUSTOMER_OWNER: 'Owner',
     BRANCH_MANAGER: 'Branch Manager',
     CASHIER: 'Cashier',

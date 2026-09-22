@@ -4,14 +4,17 @@ export default {
   theme: {
     extend: {
       colors: {
+        // VEXO brand palette (from vexo-website/src/app/globals.css). Legacy
+        // token names kept so existing classes need no sweep: "orange" now
+        // carries the VEXO cyan accent, "ember" its darker text/hover pair.
         pos: {
-          royal: '#1E40AF',
-          deep: '#172554',
-          bright: '#2563EB',
-          orange: '#F97316',
-          ember: '#EA580C',
-          surface: '#F8FAFC',
-          ink: '#0F172A',
+          royal: '#1550E6',
+          deep: '#0B1730',
+          bright: '#2D6BFF',
+          orange: '#12BEDE',
+          ember: '#0A97B4',
+          surface: '#F7F9FC',
+          ink: '#0A1424',
         },
       },
       fontFamily: {

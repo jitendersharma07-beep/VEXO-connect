@@ -34,10 +34,10 @@ export const licenseBlocked = (state) =>
     403,
     `POS_LICENSE_${state}`,
     state === 'EXPIRED'
-      ? 'Your ATC POS licence has expired. Please contact ATC to renew.'
+      ? 'Your VEXO Connect licence has expired. Please contact VEXO to renew.'
       : state === 'SUSPENDED'
-        ? 'Your ATC POS licence is suspended. Please contact ATC support.'
-        : 'No active ATC POS licence found for this account. Please contact ATC.',
+        ? 'Your VEXO Connect licence is suspended. Please contact VEXO support.'
+        : 'No active VEXO Connect licence found for this account. Please contact VEXO.',
   );
 
 export const asyncHandler = (fn) => (req, res, next) => {

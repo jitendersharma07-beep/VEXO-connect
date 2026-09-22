@@ -82,11 +82,11 @@ export default function GatewayReconciliation() {
   if (atc && !atcScope) {
     return (
       <div>
-        <PageHeader title="Gateway reconciliation" subtitle="ATC operators browse per company." />
+        <PageHeader title="Gateway reconciliation" subtitle="VEXO operators browse per company." />
         <EmptyState
           icon={ListChecks}
           title="No company selected"
-          note="Open a company from the ATC console and choose “Browse POS data” to scope these screens."
+          note="Open a company from the VEXO console and choose “Browse POS data” to scope these screens."
         />
       </div>
     );
@@ -234,7 +234,7 @@ export default function GatewayReconciliation() {
                 <span className="font-semibold text-pos-ink">Signature failures:</span>
                 {sum.signatureFailures === null ? (
                   <span className="text-slate-500">
-                    — not attributable to one company; ask ATC for the deployment-wide figure
+                    — not attributable to one company; ask VEXO for the deployment-wide figure
                   </span>
                 ) : (
                   <span className={sum.signatureFailures > 0 ? 'font-bold text-red-600' : 'text-slate-600'}>
@@ -244,7 +244,7 @@ export default function GatewayReconciliation() {
                 {ex.unprocessedEvents > 0 ? (
                   <span className="font-bold text-red-600">
                     {ex.unprocessedEvents} recorded event{ex.unprocessedEvents === 1 ? '' : 's'} never
-                    applied — this should be impossible; contact ATC
+                    applied — this should be impossible; contact VEXO
                   </span>
                 ) : null}
               </div>
@@ -457,7 +457,7 @@ export default function GatewayReconciliation() {
                   ))}
                 </tbody>
               </table>
-              <p className="mt-2 text-xs text-slate-500">This should be impossible — contact ATC.</p>
+              <p className="mt-2 text-xs text-slate-500">This should be impossible — contact VEXO.</p>
             </Section>
           ) : null}
 

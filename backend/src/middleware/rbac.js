@@ -10,7 +10,7 @@ export const requireRole = (...roles) => (req, _res, next) => {
 export const requireAtc = (req, _res, next) => {
   if (!req.user) return next(unauthorized());
   if (req.user.role !== 'POS_SUPER_ADMIN') {
-    return next(forbidden('This area is restricted to ATC POS administrators'));
+    return next(forbidden('This area is restricted to VEXO Connect administrators'));
   }
   return next();
 };

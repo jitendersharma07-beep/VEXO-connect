@@ -212,7 +212,7 @@ describe('role gates', () => {
   it('customer owner cannot reach the ATC console', async () => {
     const res = await request(app).get('/api/atc/companies').set(auth(tokens.ownerA));
     expect(res.status).toBe(403);
-    expect(res.body.error.message).toMatch(/ATC POS administrators/);
+    expect(res.body.error.message).toMatch(/VEXO Connect administrators/);
   });
 
   it('ATC operator must name a company on scoped routes', async () => {

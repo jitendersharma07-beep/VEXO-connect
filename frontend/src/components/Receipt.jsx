@@ -108,7 +108,7 @@ export function ReceiptView({ receipt }) {
       <Row left="Amount paid" right={fmtINR(r.amountPaid)} />
       {Number(r.amountDue) > 0 ? <Row left="BALANCE DUE" right={fmtINR(r.amountDue)} bold big /> : null}
       <Line />
-      <div className="text-center">Thank you — ATC POS</div>
+      <div className="text-center">Thank you — VEXO Connect</div>
     </div>
   );
 }

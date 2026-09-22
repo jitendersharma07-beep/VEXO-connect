@@ -62,14 +62,14 @@ router.post(
 
     // The branch limit is the licence's, counted server-side at write time.
     const license = req.license;
-    if (!license) throw badRequest('This company has no licence; ATC must issue one first');
+    if (!license) throw badRequest('This company has no licence; VEXO must issue one first');
     const activeBranches = await prisma.branch.count({
       where: { companyId: req.companyScope.id, status: 'ACTIVE' },
     });
     if (activeBranches >= license.branchLimit) {
       throw forbidden(
         `Your licence allows ${license.branchLimit} active branch${license.branchLimit === 1 ? '' : 'es'}. ` +
-          'Contact ATC to add branch licences.',
+          'Contact VEXO to add branch licences.',
       );
     }
 

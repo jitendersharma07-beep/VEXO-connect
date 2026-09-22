@@ -872,7 +872,7 @@ export default function Sell() {
         {licenseBlocked || licMsg ? (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {licMsg ||
-              'Your licence does not allow POS actions right now. Viewing stays available; new orders and payments are disabled. Contact ATC to restore the licence.'}
+              'Your licence does not allow POS actions right now. Viewing stays available; new orders and payments are disabled. Contact VEXO to restore the licence.'}
           </div>
         ) : null}
 

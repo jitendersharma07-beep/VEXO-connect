@@ -146,7 +146,7 @@ try {
     const assetPath = atPublicMount ? assetMatch[1] : assetMatch[1].replace(/^\/pos/, '');
     const asset = await fetch(ORIGIN + assetPath);
     const assetText = asset.status === 200 ? await asset.text() : '';
-    record('js bundle fetch + content', asset.status === 200 && assetText.includes('ATC POS'),
+    record('js bundle fetch + content', asset.status === 200 && assetText.includes('VEXO Connect'),
       `status ${asset.status}, ${assetText.length} bytes`);
   } else {
     record('js bundle fetch + content', false, 'skipped — no asset ref');

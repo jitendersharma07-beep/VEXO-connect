@@ -137,7 +137,7 @@ export default function Layout() {
           {isAtc ? (
             <>
               <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
-                ATC Console
+                VEXO Console
               </div>
               <NavItem to="/atc/companies" icon={Building2} label="Companies" />
               {atcScope ? (
@@ -196,7 +196,7 @@ export default function Layout() {
         </nav>
         <div className="rounded-lg bg-white/5 p-3 text-[11px] leading-relaxed text-blue-200">
           <div className="flex items-center gap-1.5 font-bold text-white">
-            <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> ATC POS
+            <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> VEXO Connect
           </div>
           {/* States the rule, never a count. Both channels coexist, so any
               sentence beginning "all payments..." is wrong the moment one
@@ -216,7 +216,7 @@ export default function Layout() {
               <div className="hidden min-w-0 md:block">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm font-bold text-pos-ink">
-                    {isAtc ? 'ATC Platform Console' : company?.name}
+                    {isAtc ? 'VEXO Platform Console' : company?.name}
                   </span>
                   {company?.isDemo ? <DemoBadge /> : null}
                   {branch ? (
@@ -264,7 +264,7 @@ export default function Layout() {
         </main>
 
         <footer className="border-t border-slate-200 bg-white px-4 py-3 text-center text-xs text-slate-400 md:px-6">
-          ATC POS · a product of ATC Infocom · isolated from ATC NOC/CRM
+          VEXO Connect · a product of ATC Infocom Solutions Pvt. Ltd.
         </footer>
       </div>
 

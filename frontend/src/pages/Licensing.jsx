@@ -10,9 +10,9 @@ import {
 } from '../components/ui.jsx';
 
 const PLAN_NOTES = {
-  FREE_TRIAL: 'Evaluation licence issued by ATC with a fixed expiry.',
+  FREE_TRIAL: 'Evaluation licence issued by VEXO with a fixed expiry.',
   SINGLE_STORE: 'One active branch. Upgrade to Multi-Store for more outlets.',
-  MULTI_STORE: 'Multiple branches; extra branch licences can be added by ATC.',
+  MULTI_STORE: 'Multiple branches; extra branch licences can be added by VEXO.',
 };
 
 export default function Licensing() {
@@ -37,14 +37,14 @@ export default function Licensing() {
     <div>
       <PageHeader
         title="Licence"
-        subtitle="Your ATC POS licence. Plans, expiry and branch limits are managed by ATC."
+        subtitle="Your VEXO Connect licence. Plans, expiry and branch limits are managed by VEXO."
       />
 
       {license === null ? (
         <EmptyState
           icon={BadgeCheck}
           title="No licence issued"
-          note="Contact ATC to activate a licence for this company."
+          note="Contact VEXO to activate a licence for this company."
         />
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
@@ -83,7 +83,7 @@ export default function Licensing() {
             </div>
             {license.addons.length === 0 ? (
               <p className="mt-4 text-sm text-slate-400">
-                No add-ons on this licence. To open more branches than your base limit, ask ATC to add
+                No add-ons on this licence. To open more branches than your base limit, ask VEXO to add
                 branch licences under the same account.
               </p>
             ) : (
@@ -99,8 +99,8 @@ export default function Licensing() {
               </ul>
             )}
             <div className="mt-5 rounded-lg bg-pos-surface p-3 text-xs text-slate-500">
-              Licence changes (renewals, upgrades, extra branches, suspension) are done by the ATC
-              team — reach your ATC contact to make changes.
+              Licence changes (renewals, upgrades, extra branches, suspension) are done by the VEXO
+              team — reach your VEXO contact to make changes.
             </div>
           </div>
         </div>

@@ -120,11 +120,11 @@ export default function Branches() {
             : // No licence on file reaches the client as a 0, and "0 allowed by
               // your licence" asserts a limit that no licence ever set. The
               // write path already refuses honestly — "this company has no
-              // licence; ATC must issue one first" — so say the same thing here
+              // licence; VEXO must issue one first" — so say the same thing here
               // rather than inventing a number to blame it on.
               data.branchLimit > 0
               ? `${activeCount} active of ${data.branchLimit} allowed by your licence`
-              : `${activeCount} active — no licence on file, so ATC must issue one before a branch can be added`
+              : `${activeCount} active — no licence on file, so VEXO must issue one before a branch can be added`
         }
         actions={
           canManage ? (
@@ -141,7 +141,7 @@ export default function Branches() {
         <EmptyState
           icon={Store}
           title="No branches yet"
-          note="Create your first branch to start setting up ATC POS."
+          note="Create your first branch to start setting up VEXO Connect."
         />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

@@ -50,7 +50,7 @@ export default function Login() {
           </h1>
           <p className="mt-4 text-sm leading-relaxed text-blue-100">
             Run every outlet under one account with company-level isolation, branch-level roles and
-            licences controlled by ATC.
+            licences controlled by VEXO.
           </p>
           <div className="mt-8 space-y-3 text-sm text-blue-100">
             <div className="flex items-center gap-3">
@@ -63,12 +63,12 @@ export default function Login() {
             </div>
             <div className="flex items-center gap-3">
               <span className="rounded-lg bg-white/10 p-2"><ShieldCheck className="h-4 w-4" /></span>
-              Access, expiry and branch limits managed by ATC
+              Access, expiry and branch limits managed by VEXO
             </div>
           </div>
         </div>
         <div className="relative text-xs text-blue-200">
-          © {new Date().getFullYear()} ATC Infocom · atcworkspace.com/pos
+          VEXO Connect · © {new Date().getFullYear()} ATC Infocom Solutions Pvt. Ltd.
         </div>
       </div>
 
@@ -81,8 +81,8 @@ export default function Login() {
             <div className="mb-6 flex items-center gap-3">
               <LogoMark className="h-10 w-10" />
               <div>
-                <h2 className="text-xl font-bold text-pos-ink">Sign in to ATC POS</h2>
-                <p className="text-xs text-slate-500">Use the POS account issued for your company.</p>
+                <h2 className="text-xl font-bold text-pos-ink">Sign in to VEXO Connect</h2>
+                <p className="text-xs text-slate-500">Use the account issued for your company.</p>
               </div>
             </div>
             <form onSubmit={submit} className="space-y-4">
@@ -120,7 +120,7 @@ export default function Login() {
             </form>
           </div>
           <p className="mt-6 text-center text-xs text-slate-400">
-            ATC POS accounts are separate from ATC NOC/CRM, Megatel and Review Manager logins.
+            VEXO Connect accounts are separate from other ATC and VEXO product logins.
           </p>
         </div>
       </div>
