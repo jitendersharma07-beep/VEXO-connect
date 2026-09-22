@@ -12,6 +12,7 @@ import {
   LogOut,
   Package,
   ReceiptText,
+  ScrollText,
   ShieldCheck,
   ShoppingCart,
   Store,
@@ -161,6 +162,7 @@ export default function Layout() {
                   <NavItem to="/catalog" icon={Package} label="Catalog" />
                   <NavItem to="/tables" icon={Armchair} label="Tables" />
                   <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                  <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
                   <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
                   <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
                 </>
@@ -180,6 +182,7 @@ export default function Layout() {
                   {canSeeReports(user) ? (
                     <>
                       <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                      <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
                       <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
                       <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
                     </>
