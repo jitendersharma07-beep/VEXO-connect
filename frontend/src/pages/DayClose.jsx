@@ -56,14 +56,22 @@ const listPhrase = (parts) =>
 // only teach a cashier to take the cash and keep it out of the system — so the
 // job of this banner is to make sure the stale closing cannot be mistaken for
 // a current one, and to say exactly how far out it now is.
-function PostCloseNotice({ existing }) {
-  const pc = existing?.postClose;
-  if (!pc) return null;
-
+// Shared by the banner and the history row on purpose: they describe the same
+// event, and two hand-rolled versions of "what landed late" would eventually
+// disagree in front of the owner.
+const postCloseParts = (pc) => {
   const parts = [];
   if (pc.payments) parts.push(countPhrase(pc.payments, 'payment', 'payments'));
   if (pc.refunds) parts.push(countPhrase(pc.refunds, 'refund', 'refunds'));
   if (pc.ordersBilled) parts.push(countPhrase(pc.ordersBilled, 'bill', 'bills'));
+  return parts;
+};
+
+function PostCloseNotice({ existing }) {
+  const pc = existing?.postClose;
+  if (!pc) return null;
+
+  const parts = postCloseParts(pc);
   const delta = pc.expectedCashDelta;
 
   return (
@@ -451,14 +459,28 @@ export default function DayClose() {
                     <span className="text-red-700"><strong>{history.totals.shortDays}</strong> short</span>
                     <span className="text-amber-700"><strong>{history.totals.overDays}</strong> over</span>
                     <span>net variance <strong>{fmtINR(history.totals.variance)}</strong></span>
+                    {/* Omitted entirely, not defaulted to 0, when the field is
+                        absent: a backend that does not send it has not told us
+                        there are none, and printing "0 stale" would be an
+                        assertion nobody made. */}
+                    {typeof history.totals.staleDays === 'number' ? (
+                      <span className={history.totals.staleDays ? 'text-pos-ember' : undefined}>
+                        <strong>{history.totals.staleDays}</strong> stale
+                      </span>
+                    ) : null}
                   </div>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs uppercase tracking-wide text-slate-400">
                         <th className="pb-2">Day</th>
-                        <th className="pb-2 text-right">Expected</th>
-                        <th className="pb-2 text-right">Counted</th>
-                        <th className="pb-2 text-right">Variance</th>
+                        {/* pl-3 + nowrap, not just text-right: the day column
+                            now carries a sentence when a closing is stale, and
+                            a table happily gives the money columns the slack
+                            back until the figures touch. Measured at 1440px —
+                            the ink gap fell from 15px to 2px. */}
+                        <th className="whitespace-nowrap pb-2 pl-3 text-right">Expected</th>
+                        <th className="whitespace-nowrap pb-2 pl-3 text-right">Counted</th>
+                        <th className="whitespace-nowrap pb-2 pl-3 text-right">Variance</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -469,15 +491,33 @@ export default function DayClose() {
                             {c.isCorrection ? (
                               <span className="badge ml-1.5 bg-amber-100 text-amber-800">corrected</span>
                             ) : null}
+                            {/* The banner above only ever describes the day
+                                currently selected. Without this, a closing that
+                                went stale last Tuesday stays invisible until
+                                somebody happens to pick that date — which is
+                                nobody. */}
+                            {c.postClose ? (
+                              <span className="badge ml-1.5 bg-cyan-100 text-pos-ember">stale</span>
+                            ) : null}
                             {c.note ? <p className="mt-0.5 text-xs text-slate-500">{c.note}</p> : null}
+                            {c.postClose ? (
+                              <p className="mt-0.5 text-xs text-pos-ember">
+                                {listPhrase(postCloseParts(c.postClose))} recorded after this count
+                                {c.postClose.expectedCashDelta
+                                  ? ` — drawer ${c.postClose.expectedCashDelta > 0 ? 'up' : 'down'} ` +
+                                    `${fmtINR(Math.abs(c.postClose.expectedCashDelta))} since, so the variance ` +
+                                    'beside it describes the count, not the drawer now'
+                                  : ' — no cash moved, but the sales figures no longer match the day'}
+                              </p>
+                            ) : null}
                             <p className="text-xs text-slate-400">
                               {c.closedBy?.fullName || '—'} · {fmtDateTime(c.closedAt)}
                             </p>
                           </td>
-                          <td className="py-2 text-right text-slate-600">{fmtINR(c.expectedCash)}</td>
-                          <td className="py-2 text-right text-slate-600">{fmtINR(c.countedCash)}</td>
+                          <td className="whitespace-nowrap py-2 pl-3 text-right text-slate-600">{fmtINR(c.expectedCash)}</td>
+                          <td className="whitespace-nowrap py-2 pl-3 text-right text-slate-600">{fmtINR(c.countedCash)}</td>
                           <td
-                            className={`py-2 text-right font-semibold ${
+                            className={`whitespace-nowrap py-2 pl-3 text-right font-semibold ${
                               c.variance === 0
                                 ? 'text-emerald-700'
                                 : c.variance < 0
