@@ -1045,6 +1045,35 @@ describe('activity report — who discounted, who voided, who refunded', () => {
     expect(mine[0].actorName).toBe('Owner A');
   });
 
+  it('taking a discount back off is not giving another one', async () => {
+    // Set an order discount, then remove it. Nothing was given away, but both
+    // edits carry the same name. Folded together they read as two discounts —
+    // inflating the one figure an owner acts on, and inflating it against the
+    // person who CORRECTED the mistake. deploy/audit-queries.sql keeps
+    // `cleared` in its own column; this holds the screen to the same shape.
+    const set = await request(app).post(`/api/orders/${a2Order}/discount`)
+      .set(auth(tokens.ownerA)).send({ type: 'PERCENT', value: 10 });
+    expect(set.status, JSON.stringify(set.body)).toBe(200);
+    const undo = await request(app).delete(`/api/orders/${a2Order}/discount`)
+      .set(auth(tokens.ownerA));
+    expect(undo.status, JSON.stringify(undo.body)).toBe(200);
+
+    const res = await activity(tokens.ownerA, `&branchId=${branchA2.id}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const kinds = res.body.events.filter((e) => e.orderId === a2Order).map((e) => e.kind);
+    expect(kinds.filter((k) => k === 'cleared')).toHaveLength(1);
+    // The line discount from the previous test, plus the order discount just
+    // set. The removal is NOT among them.
+    expect(kinds.filter((k) => k === 'discount')).toHaveLength(2);
+
+    // The summary has to agree with the list it summarises. This pair is what
+    // reddens if the removal is folded back into `discounts`.
+    const owner = res.body.byActor.find((x) => x.actorEmail === 'owner.a@test.local');
+    expect(owner.cleared).toBe(1);
+    expect(owner.discounts).toBe(2);
+  });
+
   it('a manager sees their own branch; the owner sees both', async () => {
     const manager = await activity(tokens.managerA1);
     expect(manager.status, JSON.stringify(manager.body)).toBe(200);
@@ -1141,7 +1170,10 @@ describe('activity report — who discounted, who voided, who refunded', () => {
     // stands out, not that a total is large.
     expect(byActor.map((x) => x.total)).toEqual([...byActor.map((x) => x.total)].sort((x, y) => y - x));
     for (const row of byActor) {
-      expect(row.discounts + row.voids + row.refunds).toBe(row.total);
+      // Every kind has to land in a counter. A kind added to kindOf with no
+      // field in KIND_FIELD would drop out of this sum rather than show up
+      // anywhere, which is how a whole category goes missing quietly.
+      expect(row.discounts + row.cleared + row.voids + row.refunds).toBe(row.total);
     }
     // The §6 worked example ran on the cashier's login, so the cashier must be
     // named here even though the cashier may not open this screen.

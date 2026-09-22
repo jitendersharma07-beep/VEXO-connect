@@ -905,10 +905,26 @@ const VOID_ACTIONS = ['ORDER_VOID', 'ORDER_ITEM_VOID'];
 // somebody adds without this file having to know about it.
 const REFUND_PREFIX = 'ORDER_REFUND';
 
+// Removing a discount is not giving one. Folding the two together inflates the
+// single figure an owner acts on — the person who set one discount and undid it
+// would read as having given two. deploy/audit-queries.sql keeps `cleared` in
+// its own column for the same reason; this matches that shape rather than
+// inventing a second one.
 const kindOf = (row) => {
   if (row.action.startsWith(REFUND_PREFIX)) return 'refund';
   if (VOID_ACTIONS.includes(row.action)) return 'void';
+  if (row.action === 'ORDER_DISCOUNT_CLEAR') return 'cleared';
   return 'discount';
+};
+
+// One declaration of the per-person counters, so a new kind cannot be added to
+// kindOf without a field to land in. Named here rather than built as
+// `${kind}s`, which would have turned 'cleared' into 'cleareds'.
+const KIND_FIELD = {
+  discount: 'discounts',
+  cleared: 'cleared',
+  void: 'voids',
+  refund: 'refunds',
 };
 
 // Only ever the fields named here. `meta` is written by six different call
@@ -1035,13 +1051,14 @@ router.get(
           // an owner going to look for somebody who no longer works there.
           stillActive: u ? u.status === 'ACTIVE' : null,
           discounts: 0,
+          cleared: 0,
           voids: 0,
           refunds: 0,
           total: 0,
         });
       }
       const agg = byActorMap.get(key);
-      agg[`${kindOf(r)}s`] += 1;
+      agg[KIND_FIELD[kindOf(r)]] += 1;
       agg.total += 1;
     }
 
