@@ -86,14 +86,25 @@ Leave **Maximum amount (₹) blank.** Save.
 - [ ] The **Company default** figure reads `10%` — not `0%`.
 
 ```sql
-SELECT "maxPctMilli", "maxFlatPaise" FROM "DiscountPolicy"
+SELECT "maxPercent", "maxFlatPaise" FROM "DiscountPolicy"
 WHERE "branchId" IS NULL AND "userId" IS NULL;
--- expect 10000 | NULL     <-- NULL, not 0
+-- expect 10.000 | (blank)     <-- blank means NULL, not 0
 ```
 
 > `maxFlatPaise` **must be NULL**. A blank amount box beside a filled percent
 > box is not a ceiling of zero; if it stores as `0` the company can give
-> nothing at all.
+> nothing at all. In `psql` a NULL prints as an empty field; run with `\pset
+> null '<NULL>'` first if you want to see the difference from an empty string
+> at a glance, because that distinction is the whole point of this step.
+
+> **The stored column is `maxPercent`, a `Decimal(6,3)` holding a percent —
+> `10.000`, not `10000`.** `maxPctMilli` is the integer milli-percent the
+> resolver hands the till *after* merging the three levels; it is not a column
+> and does not exist on a row. Earlier drafts of this document queried it.
+> That is worse than a typo: `SELECT "maxPctMilli"` errors, which at least
+> announces itself, but the same mistake made through Prisma returns
+> `undefined` and compares unequal to every expected value — a check that can
+> never pass for the right reason, and never fail for the right reason either.
 
 ## 3 · Branch override — Foxtrot Two only
 
@@ -102,9 +113,9 @@ Edit **Foxtrot Two**. Set *Maximum % of the bill* = `20`. Save.
 - [ ] Foxtrot Two shows the override; **Foxtrot One still shows *Not set***.
 
 ```sql
-SELECT b.code, p."maxPctMilli" FROM "DiscountPolicy" p
+SELECT b.code, p."maxPercent" FROM "DiscountPolicy" p
 JOIN "Branch" b ON b.id = p."branchId" WHERE p."userId" IS NULL;
--- expect exactly one row: F2 | 20000
+-- expect exactly one row: F2 | 20.000
 ```
 
 ## 4 · Staff grant — Manager F1 may approve to 50%
@@ -117,10 +128,10 @@ Edit **Manager F1**. Set *May approve above-limit discounts* = Yes and
 - [ ] Manager F1's **May give** column still reads `10%` — the company default.
 
 ```sql
-SELECT u.email, p."canApprove", p."maxApprovalPctMilli", p."maxPctMilli"
+SELECT u.email, p."canApprove", p."maxApprovalPercent", p."maxPercent"
 FROM "DiscountPolicy" p JOIN "PosUser" u ON u.id = p."userId";
--- mgr.f1: t | 50000 | NULL     <-- NULL: approving for others
--- mgr.f2: t | 50000 | NULL         did not raise their own limit
+-- mgr.f1: t | 50.000 | (blank)   <-- blank/NULL: approving for others
+-- mgr.f2: t | 50.000 | (blank)       did not raise their own limit
 ```
 
 ## 5 · The till states the limit before a number is typed
