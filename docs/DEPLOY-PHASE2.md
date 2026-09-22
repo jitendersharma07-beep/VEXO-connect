@@ -527,3 +527,80 @@ docker exec pos-prod-backend-1 rm /tmp/pos-demo-creds.txt
 4. Housekeeping, whenever convenient: `/tmp/pos-demo/` holds this release's
    throwaway probes, and `docker builder prune -a -f` reclaims the build cache
    (see the disk-capacity note — one volume backs `/`, `/tmp` and Docker).
+
+## 8. Execution record — 2026-09-22, `phase2-integration` @ `543a220`
+
+**What shipped:** the mobile-navigation drawer, the 72 mm receipt geometry and
+the measured `@page` size, plus docs and two browser gates. **Frontend only** —
+`git diff f014ab5..543a220 -- backend prisma` is empty, so the backend image was
+rebuilt from identical source and the release applied no migration.
+
+Deployed 18:17 UTC. `pos-prod-postgres-1` was never restarted.
+
+| | |
+|---|---|
+| Release commit | `543a220` (contains all of `main` — `phase2-integration..main` empty) |
+| Frontend image | `pos-prod-frontend:20260922-integration-543a220` `40a41c4e0c09` |
+| Backend image | `pos-prod-backend:20260922-integration-543a220` `f000ba8e3e89` |
+| Rollback anchors | `*:rollback-20260922-preintegration` → `0db76709b98b` / `055f9ae7f23f` |
+| Bundle | `/pos/assets/index-BYmQsKta.js` (was `index--BprIdMf.js`) |
+
+### The trap this deploy found: `VITE_BASE_PATH` is not optional
+
+`vite.config.js` reads `base: process.env.VITE_BASE_PATH || '/'`, and
+`docker-compose.prod.yml` passes `${VITE_BASE_PATH:-/}`. **Both default to the
+wrong value for this deployment.** A plain `npm run build` emits
+`/assets/index-*.js`; served under `/pos/` those 404, the bundle never
+executes, and the page is blank with `#root` empty — *not* an error boundary,
+because no React ever ran.
+
+It was caught because the nav gate asserts on rendered navigation rather than
+on a zero exit status: `npm run build` reported "✓ built in 3.66s" for the
+broken artefact. A build that exits 0 is not a build that works.
+
+The production `.env` does set `VITE_BASE_PATH=/pos/`, so the image is built
+correctly — but anyone reproducing the build **by hand** must pass it:
+
+```sh
+VITE_BASE_PATH=/pos/ npm run build     # as deploy/dev-verify.sh already does
+```
+
+Verify it in the artefact, before deploying, rather than after:
+
+```sh
+docker run --rm --entrypoint sh pos-prod-frontend:<tag> \
+  -c "grep -o 'src=\"[^\"]*\.js\"' /usr/share/nginx/html/index.html"
+# MUST print src="/pos/assets/index-<hash>.js" — a bare /assets/ prefix is the defect.
+```
+
+### Gates, and what each one is worth
+
+| Gate | Result | Against |
+|---|---|---|
+| `deploy/render-nav-widths.mjs` | 33/33 | built bundle, then **the live origin** |
+| `deploy/render-uat-screens.mjs` | 47/47 | dev fixture harness (`/uat-render.html` is not built) |
+| `deploy/prod-verify.mjs` | 8/9 loopback, 8/9 public | the 9th needs a TTY for interactive sign-in |
+| Backend suite | carried over | zero backend diff — by construction, not by re-running |
+
+The nav gate was re-run against `https://atcworkspace.com/pos` after the
+deploy. That run is the one that matters: it measures what a client's browser
+receives, not what a preview server holds. It needs no credentials — it
+intercepts `/api/**`, answers `/api/auth/me` with the role under test and
+refuses every non-GET with 405, so it cannot read or write production data.
+
+### Post-deploy state
+
+- `No pending migrations to apply.` in the backend log, 8 migrations found — matching 8 `finished_at IS NOT NULL` rows recorded before the build.
+- Data unchanged across the deploy: 10 `PosUser`, 1 `Company`, 2 `Order`, 2 `Payment`, 2 `Refund`.
+- Neighbours 200: `https://atcworkspace.com/` and `/reviews/`. Host nginx untouched.
+- Log redaction re-proved with a **positive control**: a request carrying both
+  `X-Redaction-Probe: CANARY-…` and `Authorization: Bearer CANARY-SECRET-…`
+  logged the probe header *with its value* and the authorization header as
+  `[REDACTED]`. The marker is what makes this evidence — without it, "no secret
+  in the log" is equally consistent with headers not being logged at all.
+- The reserved UAT till `BSC-CH` is still 0 orders ever / 0 closings. This
+  deploy did not consume the reservation.
+
+**Not tested by any of the above:** physical printing. Every print result here
+is browser geometry — what the renderer hands the driver. See
+`frontend/docs/HARDWARE-CHECKLIST.md`.
