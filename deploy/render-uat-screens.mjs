@@ -3,7 +3,7 @@
 // Renders the REAL frontend through the Vite dev server: the /login page for
 // branding proof, and /uat-render.html (dev-only fixture harness) for the
 // receipt/KOT thermal views — in screen media AND with print media emulated,
-// plus an overflow probe against the 302 px (80 mm) paper width.
+// plus an overflow probe against the 272 px (72 mm) PRINTABLE width.
 //
 //   BASE_URL=http://127.0.0.1:5177 node deploy/render-uat-screens.mjs
 //
@@ -18,7 +18,18 @@ import { chromium } from '/home/atc-noc/mg-bulk-probe/node_modules/playwright-co
 const BASE = (process.env.BASE_URL || 'http://127.0.0.1:5177').replace(/\/$/, '');
 const OUT = process.env.OUT_DIR || '/home/atc-noc/pos-uat-screens';
 const CHROME = '/home/atc-noc/.cache/ms-playwright/chromium-1117/chrome-linux/chrome';
-const PAPER_PX = 302; // 80 mm at CSS 96dpi, matches .print-area w-[302px]
+// 72 mm at CSS 96 dpi — the IMAGEABLE width of an 80 mm roll, not the paper
+// width. This constant used to read 302 (80 mm) and line 80 used to assert the
+// content box equalled it. That assertion was the defect written down as a
+// test: content at the full paper width inside a 72 mm printable window put
+// every right-aligned figure — amounts, invoice number, TOTAL — off the edge,
+// and the check stayed green through all of it because an element screenshot
+// cannot observe an @page margin.
+//
+// So the comparison below is one-sided on purpose. Narrower than the printable
+// width wastes paper; wider is silently cut. Only one of those is a defect, and
+// an equality band cannot tell them apart.
+const PRINTABLE_PX = 272;
 
 const results = [];
 const record = (name, ok, detail = '') => {
@@ -77,9 +88,15 @@ try {
       rect: Math.round(n.getBoundingClientRect().width),
     }));
     const noOverflow = m.scrollWidth <= m.clientWidth + 2;
-    const paperFit = Math.abs(m.rect - PAPER_PX) <= 3;
-    record(`${name} fits 80 mm paper without overflow`, noOverflow && paperFit,
-      `width ${m.rect}px vs ${PAPER_PX}px, scroll ${m.scrollWidth}/${m.clientWidth}`);
+    // The element is absolutely positioned at left:0 under print rules, so its
+    // width IS its right edge. Anything past PRINTABLE_PX is off the paper.
+    const withinPrintable = m.rect <= PRINTABLE_PX + 3;
+    const cutMm = ((m.rect - PRINTABLE_PX) / 96 * 25.4).toFixed(1);
+    record(`${name} fits the 72 mm printable width without overflow`,
+      noOverflow && withinPrintable,
+      `width ${m.rect}px vs printable ${PRINTABLE_PX}px` +
+      `${withinPrintable ? '' : `, ${cutMm} mm would be cut off`}` +
+      `, scroll ${m.scrollWidth}/${m.clientWidth}`);
   }
   await page.emulateMedia({ media: 'screen' });
 
