@@ -330,3 +330,37 @@ Only if online payment is wanted:
   — `restart` alone re-runs the old container with the old environment.
 - The POS stack is `pos-prod` and publishes only `127.0.0.1:8110`. Nothing here
   touches the other ATCWorkspace services.
+
+### Runtime, as measured
+
+| | |
+|---|---|
+| Restart policy | `unless-stopped` on all three containers |
+| Docker at boot | `enabled` |
+| Survives reboot | **observed** — Postgres has been up since the host's last boot, not restarted by hand |
+| Health endpoint | `GET /pos/api/health` → 200 |
+| Container healthcheck | Postgres only |
+
+The last row is a gap. The backend has an HTTP health endpoint but no Docker
+`healthcheck`, so Docker cannot tell a wedged backend from a running one and
+nothing restarts it. `depends_on: service_healthy` protects the *start* order
+only. Wiring the endpoint into a container healthcheck is a compose change and
+a container recreate — worth doing, but not in the middle of a handover week.
+
+### Live payments cannot happen, and this is verifiable
+
+Not a flag that could be flipped by accident: the credentials are not present.
+
+```sh
+docker exec pos-prod-backend-1 sh -c \
+  'for v in POS_GATEWAY_PROVIDER POS_GATEWAY_KEY_ID POS_GATEWAY_KEY_SECRET \
+            POS_GATEWAY_WEBHOOK_SECRET POS_GATEWAY_API_BASE; do
+     val=$(printenv "$v"); [ -z "$val" ] && echo "$v=<unset>" || echo "$v=<set, ${#val} chars>"
+   done'
+```
+
+All five read `<unset>` in production today. `gatewayEnabled` is
+`Boolean(POS_GATEWAY_PROVIDER)`, so every gateway route refuses and the
+"Pay online" button does not render at all. `config/env.js` additionally
+refuses to boot with a provider set but no webhook secret — a half-configured
+gateway is worse than none.
