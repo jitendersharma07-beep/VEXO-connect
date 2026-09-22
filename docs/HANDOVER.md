@@ -29,12 +29,23 @@ The two documents the client actually receives are `guide-owner.md` and
 thing in this document: production is redeployed by whoever is working on it,
 and the table does not update itself. Treat every row as a claim to re-check.
 
-**Two frontend fixes are in git but not in this build.** `1ca40bc` (six licence
-dates render in the viewer's timezone — item 9) and `1e64b24` (a render error
-blanks the screen — item 13). Both are frontend-only: no migration, no backend
-change, and they ship together with the next frontend deploy. Until that
-happens the live site still has both faults, and this is the list to check
-against `git log 269b0f5..HEAD -- frontend/` rather than trusted as written.
+**Four fixes are in git but not in this build.** `1ca40bc` (six licence dates
+render in the viewer's timezone — item 9), `1e64b24` (a render error blanks the
+screen — item 13), and `817b438` + `0084936` (a closing that has stopped being
+true says so — item 2). All are frontend-only except `817b438`, which adds
+`postCloseFor()` to `reports.js`; the backend must ship with it or the banner
+has no data and silently never appears, which is exactly the failure this
+feature exists to prevent. Still no migration anywhere in the four.
+
+Until that deploy the live site has all three faults. Check the list against
+`git log --oneline 269b0f5..HEAD -- frontend/ backend/` rather than trusting it
+as written; a fourth may have landed since.
+
+The two halves of `817b438` are not symmetric. Backend first is inert and
+harmless — the API returns a field nothing reads. Frontend first is the one to
+avoid: the page renders perfectly and the banner never appears, because
+`existing.postClose` is simply absent, which is indistinguishable on screen
+from "this day is clean". Ship the backend first, or ship both.
 
 The frontend commit is not read off an image tag or a directory name. Both lie
 — the worktree this was first traced through was named `atc-pos-deploy-269b0f5`
@@ -325,8 +336,52 @@ Written down so they are disclosed rather than discovered.
    bill without approval. For a café this is a cash-shrinkage hole. The fix is
    small but ATC cannot pick the threshold — ask the owner for a number and a
    rule ("above 10 %, manager approves").
-2. **Daily closing does not lock the day.** Sales can still be recorded against
-   a closed date; the closing then no longer matches and needs a correction.
+2. **Daily closing deliberately does not lock the day** — but it now says when
+   it has stopped being true. `817b438` + `0084936`. **In git, NOT yet in
+   production** (§1); unlike items 9 and 13 this one has a *backend* half, so
+   shipping it is a backend deploy too, not a frontend-only one.
+
+   Locking was the obvious fix and it is the wrong one. A cashier who cannot
+   record cash they have already been handed will take it and keep it out of
+   the system, which is worse than a stale figure. So nothing is refused.
+   Instead the closing reports its own drift: a banner on `/reports/day-close`
+   naming what was recorded after the count, when the last of it landed, and
+   how far the drawer is now from what that closing said — with card, UPI and
+   online money called out separately, because it never entered the drawer at
+   all. The 30-day list carries it too (`0084936`): a **stale** badge on the
+   row and a `staleDays` count in the summary. That second half matters more
+   than it looks — the banner only describes the date currently on screen, and
+   a closing that drifted last Tuesday is seen by nobody unless the list says
+   so.
+
+   It is derived from timestamps already stored, so **closings filed before
+   this change report correctly too**, and no money write path was touched. The
+   filed record is never rewritten — it is frozen on purpose, and the banner
+   says so and points at a correction.
+
+   What this does not do: it does not stop anyone recording late money, does
+   not file the correction for you, and does not alert anybody — it surfaces
+   on a page somebody has to open. It also only looks back 30 days, because
+   that is the window the list queries.
+
+   Evidence, measured rather than asserted: backend 224/224 across 7 files
+   (day-close 11). Two perturbations of `postCloseFor` reddened exactly the two
+   new tests and left the nine pre-existing day-close tests green, then
+   restored byte-identical by sha256. The screens were rendered, not reasoned
+   about — 34/34 in `/tmp/pos-render/render-postclose.mjs` across mixed,
+   refund-only, card-only, clean-day and absent-field fixtures; the same set
+   against the deployed `269b0f5` bundle scores 15/34, with every assertion
+   naming the feature red and only the controls green.
+
+   Two things that control run caught, worth repeating because neither would
+   have shown up any other way. First, two of my own assertions passed with no
+   banner on screen at all — the closer's name and "file a correction" are
+   printed elsewhere on the page regardless, so they were reading the page
+   rather than the thing under test; both are now scoped to the banner element.
+   Second, the longer day-column text squeezed the money columns until the
+   ink gap between EXPECTED and COUNTED fell from 15px to **2px** at 1440.
+   Fixed in the same commit and held at 13px across 1440/1024/768, stale or
+   clean, zero page overflow at each.
 3. **Every payment is a manual record.** Nothing is verified with a bank. See
    `guide-owner.md` §10 — this is stated to the client, not hidden.
 4. **No offline mode.** No connection, no billing.
