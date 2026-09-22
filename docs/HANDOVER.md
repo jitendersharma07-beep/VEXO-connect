@@ -19,12 +19,57 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Release | **`f014ab5`** — the merge of `phase2-gateway` `1849711` (activity report) into `main`. Both halves built from a detached worktree pinned at that commit, never from a shared tree |
-| Backend | Image `pos-prod-backend:20260922-merge-f014ab5` (`055f9ae7f23f`), container created 16:37 UTC. The `/activity` route is present in `/app/src/api/routes/reports.js` inside the image |
-| Frontend | Image `pos-prod-frontend:20260922-merge-f014ab5` (`0db76709b98b`), container created 16:37 UTC |
-| Frontend bundle | `assets/index--BprIdMf.js`, sha256 `c1d15e81…`, **430357 bytes** — hashed off the public URL, which is what the client actually receives. Carries `reports/activity` and the string `Discounts, voids and refunds` |
-| Rollback tags | `pos-prod-backend:rollback-20260922-preactivity` (`96a494e650b3`) and `pos-prod-frontend:rollback-20260922-preactivity` (`39205084de0e`) — the pair live before 16:37 |
-| Database migrations applied | 8, unchanged. The merge carried no migration: `git diff cdd6c20 f014ab5 -- backend/prisma/` is empty, and `_prisma_migrations` still reports 8 finished |
+| Release | **`543a220`** — `phase2-integration`, the touchscreen-UI and 80 mm print release. Built and deployed 18:17 UTC from a worktree pinned at that commit, never from a shared tree |
+| Backend | Image `pos-prod-backend:20260922-integration-543a220` (`f000ba8e3e89`), container created **18:17:02 UTC**. Also tagged `:latest` |
+| Frontend | Image `pos-prod-frontend:20260922-integration-543a220` (`40a41c4e0c09`), container created **18:17:13 UTC**. Also tagged `:latest` |
+| Frontend bundle | `assets/index-BYmQsKta.js`, sha256 `4a3bbd1ed1bd64fd…`, **434862 bytes** — hashed off the public URL, which is what the client actually receives. Carries `pos-print-page-size` ×1 and `beforeprint` ×1 (the print fix) **and** `reports/activity` ×4 + `Discounts, voids and refunds` ×2, so this build is a superset of `f014ab5` and the activity report did not regress |
+| Stylesheet | `assets/index-D4XA2h9n.css` — contains `@page{size:80mm auto;margin:0}` and `.print-area{…width:72mm;max-width:72mm;…padding:0 2mm…}` |
+| Database migrations applied | 8, unchanged. `select count(*) from _prisma_migrations where finished_at is not null` → **8**, and the backend log reads `8 migrations found in prisma/migrations` / `No pending migrations to apply.` Postgres was never restarted (up 20 h across this deploy) |
+
+### Rollback targets — NOT the running build
+
+Listed separately because the previous version of this table mixed the two, and
+the images it named as *current* had by then become the *rollback* pair. Anyone
+reading it during an incident would have rolled "back" onto what the table
+called live.
+
+| | |
+|---|---|
+| Backend rollback | `pos-prod-backend:rollback-20260922-preprintfix` → `055f9ae7f23f` |
+| Frontend rollback | `pos-prod-frontend:rollback-20260922-preprintfix` → `0db76709b98b` |
+| What that pair is | The `f014ab5` build that ran 16:37 → 18:17 UTC |
+| Database | `/home/atc-noc/pos-backups/pre-printfix-20260922.dump`, 75551 bytes. Verified to **parse**, not merely exist: `PGDMP` magic, 182 TOC entries, 22 tables carrying data (`pg_restore --list` via a throwaway `postgres:16-alpine`) |
+
+> **Tag-name hazard.** Three tags point at `055f9ae7f23f` — `rollback-20260922`,
+> `rollback-20260922-preintegration` and `rollback-20260922-preprintfix` — because
+> two sessions independently pinned the same running pair before deploying.
+> They are interchangeable *today*. Roll back by **image ID**, not by tag name:
+> the undated `rollback-20260922` will be reused and will drift.
+
+**This release fixed a live defect.** Production was serving
+`.print-area{width:80mm}` together with `@page{margin:4mm}` — 80 mm of content
+inside a 72 mm printable window, silently cutting every right-aligned value off
+the paper: the TOTAL's paise, the invoice number, every line amount. An "80 mm"
+roll is 80 mm of paper but only ~72 mm imageable (576 dots @ 203 dpi); the rest
+is dead margin under the head's edges.
+
+### Printing: fixed in the browser, PENDING on hardware
+
+The fix above is proven by Chromium print emulation and by PDFs generated at the
+80 mm page size — 47/47 geometric checks, including that the page height follows
+the content (155 mm long bill vs 66 mm KOT) rather than a fixed form. Artefacts:
+`/home/atc-noc/pos-uat-screens/`.
+
+**No receipt or KOT from this build has ever reached a thermal printer.**
+Physical printing is **NOT TESTED** and stays that way until a device is
+available. Per-site sign-off lives in `frontend/docs/HARDWARE-CHECKLIST.md`.
+
+Not implemented, and not to be offered as settings: silent printing (every job
+raises the browser dialog), app-triggered paper cut, cash-drawer kick, and
+automatic receipt-to-counter / KOT-to-kitchen routing. The operator may pick any
+printer in the dialog and change it per job, but nothing stops a KOT printing at
+the counter. Each would be a new integration — a local print agent or an ESC/POS
+bridge. See §6 for the standing limitation entries.
 
 **This table went stale four times in one afternoon** — twice while this very
 section was being edited. At 14:49 UTC another session deployed `1ca40bc` +
