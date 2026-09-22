@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Dev-server-only fixture harness for print-layout verification.
+         Never shipped: `vite build` has a single input (index.html), so this
+         page exists only under `npm run dev`. -->
+    <title>UAT render harness</title>
+  </head>
+  <body class="bg-white">
+    <div id="root"></div>
+    <script type="module" src="/src/uat-render.jsx"></script>
+  </body>
+</html>

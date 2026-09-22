@@ -248,8 +248,33 @@ try {
     ? pass('4.3', 'cashier cannot read sales reports', `HTTP ${cashierReport.status}`)
     : fail('4.3', 'cashier cannot read sales reports', `HTTP ${cashierReport.status}`);
 
-  skip('4.4', 'daily closing / cash-drawer reconciliation',
-    'no such route or table exists in this build — see the report');
+  // Daily closing (phase 2). The preview must agree with the till's own
+  // records: same IST business day, same branch, cash only, SUCCEEDED
+  // non-gateway refunds subtracted. Read-only on purpose — committing a
+  // closing files a permanent record for the day; the correction chain and
+  // commit path are exercised by the vitest day-close suite in staging.
+  const dcPrev = await call('GET', `/reports/day-close/preview?branchId=${branches[0].id}`, { token: owner });
+  const prev = dcPrev.body?.preview;
+  if (dcPrev.status !== 200 || !prev) {
+    fail('4.4', 'day-close preview reconciles with recorded cash', `HTTP ${dcPrev.status}`);
+  } else {
+    const istStart = `date_trunc('day', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata'`;
+    const dbCashSales = Number(await psql(
+      `select coalesce(sum(p.amount),0) from "Payment" p join "Order" o on o.id = p."orderId" where o."companyId" = '${companyId}' and o."branchId" = '${branches[0].id}' and p.method = 'CASH' and coalesce(p.channel,'MANUAL') <> 'GATEWAY' and p."createdAt" >= ${istStart};`,
+    ));
+    const dbCashRefunds = Number(await psql(
+      `select coalesce(sum(r.amount),0) from "Refund" r join "Order" o on o.id = r."orderId" where o."companyId" = '${companyId}' and o."branchId" = '${branches[0].id}' and r.status = 'SUCCEEDED' and coalesce(r.channel,'MANUAL') <> 'GATEWAY' and r."createdAt" >= ${istStart};`,
+    ));
+    (near(prev.cashSales, dbCashSales) && near(prev.cashRefunds, dbCashRefunds) && near(prev.expectedCash, dbCashSales - dbCashRefunds))
+      ? pass('4.4', 'day-close preview reconciles with recorded cash', `expected ₹${prev.expectedCash} = cash ₹${dbCashSales} − refunds ₹${dbCashRefunds}`)
+      : fail('4.4', 'day-close preview reconciles with recorded cash', `preview ₹${prev.cashSales}/₹${prev.cashRefunds}/₹${prev.expectedCash} vs db ₹${dbCashSales}/₹${dbCashRefunds}`);
+  }
+
+  const dcCashPrev = await call('GET', '/reports/day-close/preview', { token: cashA });
+  const dcCashPost = await call('POST', '/reports/day-close', { token: cashA, body: { countedCash: 0 } });
+  (dcCashPrev.status === 200 && dcCashPost.status === 403)
+    ? pass('4.5', 'cashier may preview the drawer but not commit the closing', `preview ${dcCashPrev.status}, close ${dcCashPost.status}`)
+    : fail('4.5', 'cashier may preview the drawer but not commit the closing', `preview ${dcCashPrev.status}, close ${dcCashPost.status}`);
 
   // ===== 5. Cancellation and refund permissions =========================
 
