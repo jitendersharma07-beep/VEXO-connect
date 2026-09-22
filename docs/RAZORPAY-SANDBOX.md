@@ -4,11 +4,36 @@ Everything here is dev-box only. No step writes to a `.env`, touches the
 `pos-prod-*` stack, or changes anything a deployment reads. The production edge
 is nginx and is not involved at any point.
 
-**Nothing in this repository has ever spoken to Razorpay.** The adapter is
-verified against a stub of Razorpay's API and against Razorpay's published
-documentation — which proves the wire format and the failure handling, and
-proves nothing about a real account. Until the run at the bottom of this page
-is done, treat the gateway as unverified.
+## What has actually been proven against a real account
+
+Keep this section honest; it is the only thing standing between "we tested it"
+and a surprise on a live counter. As of 2026-09-22:
+
+| | Status |
+| --- | --- |
+| Credentials authenticate | **Verified** — `razorpay-sandbox-check.sh`, HTTP 200 |
+| Outbound reachability to `api.razorpay.com` | **Verified** |
+| `createSession` payload accepted, returns an `order_…` | **Verified** |
+| `capture_options` shape accepted | **Verified**, and found to be *optional* — see below |
+| Automatic capture actually honoured | **Not verified** — needs a real payment |
+| Webhook delivery, signature, and application | **Not verified** — needs the tunnel |
+| Refund create / settle / replay | **Not verified** |
+
+Everything in the unverified rows is backed only by a stub of Razorpay's API
+and by published documentation. That proves the wire format and the failure
+handling; it proves nothing about a real account.
+
+One documented claim has already turned out to be wrong, which is the reason
+this table exists. The adapter used to carry a comment saying Razorpay rejects
+`{ capture: 'automatic' }` unless `capture_options` accompanies it. Asked
+directly, the sandbox accepts all five forms tried — with the options, without
+them, with either sub-field missing, and with no `payment` block at all. The
+block is still sent, because an order with no payment block inherits the
+dashboard's capture setting and that is a checkbox outside this repository, but
+it is sent as a deliberate pin rather than to satisfy a requirement. Note also
+that the Orders API does not echo these settings back, so its 200 is not
+evidence they are honoured — only a payment arriving as `payment.captured`
+rather than `payment.authorized` proves that.
 
 ---
 
@@ -35,6 +60,27 @@ asserted:
 
 To replace the credentials later, run the same command; it asks before
 overwriting. To remove them, delete the file.
+
+## 1a. Check they actually work — before the demo, not during it
+
+```
+cd /home/atc-noc/atc-pos && bash backend/scripts/razorpay-sandbox-check.sh
+```
+
+"Stored" and "correct" are different claims, and only the second one matters. A
+typo in the key secret stays invisible until the first checkout, where it
+surfaces in front of whoever is running the demo. This asks Razorpay instead,
+read-only: it lists payments with `count=1` and looks at nothing but the status
+code. No order is created and no money moves.
+
+It prints a verdict, never a response body — the body of a 200 is real payment
+data and the body of a 401 quotes the key id back. The credential reaches curl
+through its stdin config parser rather than `-u`, so it is not in
+`/proc/<pid>/cmdline` even for the life of the request.
+
+A `401` means the stored key id and secret do not match, or the key was
+revoked; re-run the setup script. A failure to connect is reported as a
+connectivity answer and explicitly *not* as a verdict on the credentials.
 
 ## 2. Give Razorpay somewhere to deliver webhooks
 

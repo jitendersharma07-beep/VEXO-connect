@@ -201,12 +201,26 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
     // authorized-but-uncaptured payment is money the shop has not received,
     // and this POS only ever records captures.
     //
-    // capture_options is not optional here, whatever the field list says. Per
-    // "Configure Payment Capture Settings using Orders API"
-    // (https://razorpay.com/docs/payment-gateway/rainy-day/capture-settings/api),
-    // automatic_expiry_period is mandatory when capture is "automatic", and
-    // refund_speed is mandatory outright — so `{ capture: 'automatic' }` alone
-    // is an incomplete request, not a shorter spelling of this one.
+    // capture_options is OPTIONAL, and this block is sent anyway. An earlier
+    // comment here claimed the API rejects `{ capture: 'automatic' }` without
+    // it, reading "mandatory" from
+    // https://razorpay.com/docs/payment-gateway/rainy-day/capture-settings/api .
+    // Asked directly, the sandbox accepts every form: with the options, without
+    // them, with either sub-field missing, and with no `payment` block at all —
+    // all five return 200. The documentation describes the shape of the object
+    // when you send it, not a condition for sending one.
+    //
+    // It is still sent, for a reason the docs do not cover: with no payment
+    // block the order inherits whatever capture setting the Razorpay dashboard
+    // currently has, and that is a checkbox someone can change without touching
+    // this repository. Naming the behaviour here pins it to the code.
+    //
+    // What is NOT established by that 200: the Orders API does not echo these
+    // settings back — an order created with them and one created bare read back
+    // byte-identical — so acceptance is not evidence they are honoured. The only
+    // proof of automatic capture is a real payment arriving as payment.captured
+    // rather than payment.authorized. Until that has been seen, treat automatic
+    // capture as intended-but-unconfirmed.
     payment: {
       capture: 'automatic',
       capture_options: {
