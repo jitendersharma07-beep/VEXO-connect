@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, BadgePlus, ShoppingCart, UserPlus, PackagePlus } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
-import { setAtcScope } from '../lib/pos.js';
+import { setAtcScope, fmtDate } from '../lib/pos.js';
 import {
   PageHeader,
   StatusBadge,
@@ -265,7 +265,10 @@ export default function AtcCompanyDetail() {
                       {i === 0 ? <span className="badge bg-pos-royal/10 text-pos-royal">current</span> : null}
                     </div>
                     <span className="text-xs text-slate-500">
-                      limit {l.branchLimit} · until {new Date(l.expiresAt).toLocaleDateString()}
+                      {/* IST, like every other date in the product. This one is
+                          read by ATC support while a customer is on the phone
+                          asking when their licence runs out. */}
+                      limit {l.branchLimit} · until {fmtDate(l.expiresAt)}
                     </span>
                   </div>
                   {l.addons.length > 0 ? (

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { Store, Users, BadgeCheck, CalendarClock, ReceiptText } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
-import { canSeeReports, canSell } from '../lib/pos.js';
+import { canSeeReports, canSell, fmtDate } from '../lib/pos.js';
 import {
   PageHeader,
   StatCard,
@@ -84,11 +84,14 @@ export default function Dashboard() {
           hint={lic ? <StatusBadge status={lic.status} /> : 'No licence issued yet'}
           accent="green"
         />
+        {/* fmtDate, not toLocaleDateString: this is the date an owner quotes
+            back to ATC when asking for a renewal, so it must not depend on the
+            timezone of the laptop it is read from. */}
         <StatCard
           icon={CalendarClock}
           label="Licence expiry"
           value={expiry === null ? '—' : expiry > 0 ? `${expiry}d` : 'Expired'}
-          hint={lic?.expiresAt ? new Date(lic.expiresAt).toLocaleDateString() : ''}
+          hint={lic?.expiresAt ? fmtDate(lic.expiresAt) : ''}
           accent={expiry !== null && expiry <= 7 ? 'orange' : 'slate'}
         />
       </div>

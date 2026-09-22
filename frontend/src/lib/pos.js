@@ -75,6 +75,23 @@ export const fmtDateTime = (iso) =>
       })
     : '—';
 
+// Date with no clock, for things that are a day rather than a moment — a
+// licence expiry, a plan start. Same IST pinning as fmtDateTime, and same
+// reason: a licence that runs out on 31 March runs out on 31 March in
+// Bengaluru, not on whatever date the viewer's laptop thinks it is. Rendered
+// with `new Date(iso).toLocaleDateString()` instead, the identical licence
+// reads 3/31/2027 from here and 3/30/2027 from New York, and "when does my
+// licence expire" stops having one answer.
+export const fmtDate = (iso) =>
+  iso
+    ? new Date(iso).toLocaleDateString('en-IN', {
+        timeZone: IST,
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      })
+    : '—';
+
 export const fmtTime = (iso) =>
   iso
     ? new Date(iso).toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' })
