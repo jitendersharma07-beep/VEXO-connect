@@ -19,6 +19,7 @@ import atcRoutes from './api/routes/atc.js';
 import catalogRoutes from './api/routes/catalog.js';
 import tableRoutes from './api/routes/tables.js';
 import orderRoutes from './api/routes/orders.js';
+import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
 import gatewayRoutes from './api/routes/gateway.js';
 
@@ -112,6 +113,7 @@ export const createApp = () => {
   api.use('/catalog', catalogRoutes);
   api.use('/tables', tableRoutes);
   api.use('/orders', orderRoutes);
+  api.use('/discount-policies', discountPolicyRoutes);
   api.use('/reports', reportRoutes);
 
   app.use('/api', api);
