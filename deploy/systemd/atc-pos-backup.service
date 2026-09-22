@@ -1,0 +1,44 @@
+# Nightly backup of the ATC POS production database.
+#
+# Install (as root), then the schedule runs unattended:
+#   cp deploy/systemd/atc-pos-backup.* /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now atc-pos-backup.timer
+#   systemctl start atc-pos-backup.service     # prove it once, do not wait for 02:30
+#
+# Runs as atc-noc, who is in the docker group. It deliberately does NOT run as
+# root: nothing here needs it, and a root-owned backup directory is one more
+# thing a recovery has to fight at the worst possible moment.
+
+[Unit]
+Description=ATC POS production database backup
+Documentation=file:/home/atc-noc/atc-pos/docs/BACKUP-RESTORE.md
+# The database is in Docker. Starting this before Docker is ready produces a
+# failure that looks exactly like a missing container.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=atc-noc
+Group=atc-noc
+WorkingDirectory=/home/atc-noc/atc-pos
+ExecStart=/usr/bin/node /home/atc-noc/atc-pos/deploy/pos-backup.mjs
+
+# A backup that hangs is worse than one that fails: it holds the slot and the
+# next night's run never starts, so the alert never fires.
+TimeoutStartSec=1800
+
+# The script is careful about free space, but so is this: OOM or a runaway
+# would take the box down with every other database on it.
+MemoryMax=512M
+Nice=10
+IOSchedulingClass=idle
+
+# Nothing here needs to write outside the backup directory.
+ProtectSystem=full
+PrivateTmp=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

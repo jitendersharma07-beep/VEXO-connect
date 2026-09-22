@@ -291,6 +291,20 @@ Each rotated account must show `mustChangePassword = t` and
   point at the last phase-1 images. Re-tag the *current* images before the next
   deploy or this block will roll back further than you intend.
 
+  Newer anchors exist; substitute the one you actually want:
+
+  | Tag | Built | What it is |
+  |---|---|---|
+  | `:20260922-dayclose` (backend + frontend) | 2026-09-22 12:52 | running now — day-close + 6 gateway migrations |
+  | `pos-prod-backend:20260921-m1-scripts` | 2026-09-21 03:37 | phase-2 milestone 1 |
+  | `:pre-phase2` (backend + frontend) | 2026-09-20 | last phase-1 build |
+
+  The `20260922-dayclose` pair was applied *after* that build, not before it.
+  For the few hours in between, `:latest` had moved and the previous images were
+  orphaned — one `docker image prune` away from production running something the
+  daemon no longer had, with no rollback target at all. Pin the tag before
+  `compose build`, not after.
+
 - **Full database rollback — DESTRUCTIVE LAST RESORT. Owner approval required.**
 
   This is not the undo button for a bad deploy; the code-only rollback above is.

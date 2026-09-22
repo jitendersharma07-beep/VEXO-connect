@@ -1,0 +1,22 @@
+# 02:30 IST daily — comfortably after a cafe has closed and filed its day, and
+# before anyone opens. A backup taken mid-service is still consistent (pg_dump
+# takes one snapshot), but it lands in the middle of the window where a
+# restore would cost the most, and the load is free to avoid.
+#
+# Persistent=true so a backup missed while the box was off is taken at the
+# next boot rather than silently skipped. The most likely reason the machine
+# was off is also the most likely reason you will want the backup.
+
+[Unit]
+Description=Nightly ATC POS production database backup
+Documentation=file:/home/atc-noc/atc-pos/docs/BACKUP-RESTORE.md
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Kolkata
+# Spread against whatever else this box decides to do at 02:30 exactly.
+RandomizedDelaySec=900
+Persistent=true
+Unit=atc-pos-backup.service
+
+[Install]
+WantedBy=timers.target
