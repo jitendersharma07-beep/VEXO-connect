@@ -23,7 +23,8 @@ process.env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS = '300';
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
-const { signPayload, SIGNATURE_HEADER, testAdapter } = await import('../src/lib/gateway/testAdapter.js');
+const { signPayload, SIGNATURE_HEADER, testAdapter, setTestSettlement, clearTestSettlements } =
+  await import('../src/lib/gateway/testAdapter.js');
 
 const app = createApp();
 const SECRET = process.env.POS_GATEWAY_WEBHOOK_SECRET;
@@ -108,6 +109,12 @@ const openIntent = async (orderId, token = tokens.cashier) => {
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   return res.body.intent;
 };
+
+// The pull half: asks the provider what happened to one attempt. Manager-and-up
+// by design, since recording money the POS never saw arrive is a judgement.
+const recover = (orderId, intentId, token = tokens.owner) =>
+  request(app).post(`/api/orders/${orderId}/payment-intents/${intentId}/reconcile`)
+    .set(auth(token)).send({});
 
 beforeAll(async () => {
   await wipe();
@@ -423,6 +430,42 @@ describe('what a verified event is still refused for', () => {
       where: { intentId: intent.id }, orderBy: { receivedAt: 'desc' },
     });
     expect(row.skippedReason).toMatch(/unhandled event type "payment.disputed"/);
+  });
+
+  // The push twin of the recovery-path currency test further down. Both paths
+  // settle through the same applyGatewayEvent, and this pair is what pins the
+  // check INSIDE it: move it up into either route and the other test goes red.
+  it('refuses a signed capture settled in a different currency', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+
+    // Genuinely signed, genuinely this intent, genuinely the right number —
+    // and the wrong money. amountPaise is a bare integer, so nothing below
+    // this line can tell 10500 cents from 10500 paise except the currency.
+    const res = await deliver(
+      succeeded(intent.providerRef, order.totalPaise, { currency: 'USD' }),
+    );
+
+    // 200, because the delivery was real and retrying cannot fix it. The
+    // refusal lives on the row for the reconciliation report to surface.
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.applied).toBe(false);
+
+    const row = await prisma.gatewayWebhookEvent.findFirst({
+      where: { intentId: intent.id }, orderBy: { receivedAt: 'desc' },
+    });
+    expect(row.skippedReason).toBe('settled currency does not match the intent');
+
+    expect(
+      await prisma.payment.count({ where: { orderId: order.id } }),
+      'a foreign-currency webhook closed an INR bill',
+    ).toBe(0);
+    // Refused, not closed. A discrepancy a human has to judge must not also
+    // shut the attempt down — the intent stays open and unsettled, exactly as
+    // it does for an amount mismatch.
+    const stored = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
+    expect(stored.status).toBe('PENDING');
+    expect(stored.closedAt).toBeNull();
   });
 });
 
@@ -1279,5 +1322,393 @@ describe('refunds under concurrency', () => {
     expect(reserved).toBeLessThanOrEqual(order.totalPaise);
     expect(accepted.length).toBeLessThanOrEqual(4);
     expect(accepted.length).toBeGreaterThan(0);
+  });
+});
+
+// --- pull-based settlement recovery -----------------------------------------
+//
+// A webhook can simply not arrive: the tunnel is down, the endpoint was
+// misconfigured, the retries ran out, the account had no webhook registered.
+// The customer has paid and the POS shows the bill as still due, and no amount
+// of care inside the webhook route can fix it. These cover the route that asks
+// the provider instead — and, just as much, what it must refuse to conclude.
+
+// The provider's answer about one attempt, agreeing with our own row on every
+// field the route checks. Each test overrides exactly one thing, so a refusal
+// can only be attributed to the check under test.
+const settlementFor = async (order, intent, overrides = {}) => {
+  const row = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
+  return {
+    settled: true,
+    providerRef: row.providerRef,
+    // The CHARGE id, which is not the attempt id. It is the only thing a
+    // refund can post to, and the route uses it as the event id.
+    chargeRef: `pay_${row.id.slice(-14)}`,
+    amountPaise: order.totalPaise,
+    currency: 'INR',
+    method: 'CARD',
+    captured: true,
+    // The two values createSession sent and the provider stored verbatim.
+    // They are what proves the answer is about our own attempt.
+    receipt: row.idempotencyKey,
+    posOrderId: order.id,
+    ...overrides,
+  };
+};
+
+const stage = async (order, intent, overrides = {}) => {
+  const answer = await settlementFor(order, intent, overrides);
+  const row = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
+  setTestSettlement(row.providerRef, answer);
+  return answer;
+};
+
+// Event rows are not scoped to a tenant or an order, and every other test in
+// this file leaves its own behind. So "nothing was written" is a DELTA against
+// a baseline taken in the test, never an absolute count — an absolute count
+// here would pass or fail on which tests happened to run first.
+const countEvents = () => prisma.gatewayWebhookEvent.count();
+const eventsFor = (intentId) =>
+  prisma.gatewayWebhookEvent.findMany({ where: { intentId }, orderBy: { receivedAt: 'asc' } });
+
+describe('recovering a payment whose webhook never arrived', () => {
+  afterEach(() => clearTestSettlements());
+
+  it('records it once, from the provider API, and labels the row RECOVERY', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    const answer = await stage(order, intent);
+
+    // The premise: nothing was ever delivered for this attempt.
+    const events0 = await countEvents();
+    expect(await eventsFor(intent.id)).toHaveLength(0);
+
+    const res = await recover(order.id, intent.id);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.settled).toBe(true);
+    expect(res.body.recorded).toBe(true);
+    expect(res.body.order.status).toBe('PAID');
+
+    const payments = await prisma.payment.findMany({ where: { orderId: order.id } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0].channel).toBe('GATEWAY');
+    expect(payments[0].intentId).toBe(intent.id);
+    // Stored so the money can later be sent back. A manual payment typed in by
+    // a human to paper over a missing webhook would carry no pay_… at all,
+    // and the order would be unrefundable through the gateway forever after.
+    expect(payments[0].providerRef).toBe(answer.chargeRef);
+    // Nobody handed over cash, so no member of staff is credited with it.
+    expect(payments[0].receivedById).toBeNull();
+    expect(payments[0].tendered).toBeNull();
+
+    // THE POINT. A row is written, but it does not claim to be a delivery:
+    // source says which code path wrote it, and this one went and asked.
+    expect(await countEvents(), 'recovery wrote more than one row').toBe(events0 + 1);
+    const events = await eventsFor(intent.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].source).toBe('RECOVERY');
+    expect(events[0].eventId).toBe(answer.chargeRef);
+    expect(events[0].intentId).toBe(intent.id);
+    expect(events[0].skippedReason).toBeNull();
+    expect(events[0].processedAt).not.toBeNull();
+
+    const log = await prisma.posAuditLog.findFirst({
+      where: { action: 'ORDER_PAYMENT', entityId: order.id },
+    });
+    expect(log, 'no ORDER_PAYMENT audit row').not.toBeNull();
+    // Same action as the webhook writes, because it is the same money — but
+    // `via` keeps the two distinguishable afterwards.
+    expect(log.meta.via).toBe('RECOVERY');
+    expect(log.meta.chargeRef).toBe(answer.chargeRef);
+    expect(log.actorId, 'recovery is performed by a named user').not.toBeNull();
+  });
+
+  it('reports "not paid" and writes nothing at all when the provider has no capture', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    // Nothing staged: the adapter answers as a real account does for an
+    // attempt the customer walked away from.
+    const events0 = await countEvents();
+
+    const res = await recover(order.id, intent.id);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.settled).toBe(false);
+    expect(res.body.reason).toMatch(/no payment on this attempt/);
+
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(0);
+    // Not even an event row: nothing happened, so there is nothing to record.
+    expect(await countEvents()).toBe(events0);
+    // Left open on purpose — "not captured yet" is not "never will be".
+    const stored = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
+    expect(stored.status).toBe('PENDING');
+  });
+
+  // Each is its own `it`, so a regression names the check it broke instead of
+  // reporting one opaque "mismatch".
+  const refusals = [
+    ['it reports as authorized rather than captured', { captured: false }, /not captured/],
+    ['it answers about a different attempt', { providerRef: 'test_someoneelse' }, /different payment attempt/],
+    ['it holds the payment against another order', { posOrderId: 'ord_not_ours' }, /different order/],
+    ['it has the payment under another reference', { receipt: 'someone-elses-receipt' }, /different reference/],
+    ['nothing ties the payment to this order', { posOrderId: null, receipt: null }, /nothing that ties/],
+    ['it does not name the charge', { chargeRef: null }, /did not name the charge/],
+  ];
+  for (const [label, override, expected] of refusals) {
+    it(`refuses and records nothing when ${label}`, async () => {
+      const order = await billedOrder();
+      const intent = await openIntent(order.id);
+      await stage(order, intent, override);
+      const events0 = await countEvents();
+
+      const res = await recover(order.id, intent.id);
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error.message).toMatch(expected);
+
+      expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(0);
+      expect(await countEvents()).toBe(events0);
+      const stored = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
+      expect(stored.status).toBe('PENDING');
+    });
+  }
+
+  it('refuses a capture the provider settled in a different currency', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    // Same integer, different money. 10500 of anything is not 10500 paise, and
+    // the amount check alone cannot tell them apart — it compares counts.
+    await stage(order, intent, { currency: 'USD' });
+
+    const res = await recover(order.id, intent.id);
+    expect(res.status, JSON.stringify(res.body)).not.toBe(200);
+    expect(
+      await prisma.payment.count({ where: { orderId: order.id } }),
+      'a foreign-currency capture closed an INR bill',
+    ).toBe(0);
+  });
+
+  it('records nothing and says so when the provider cannot be reached', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    const row = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
+    setTestSettlement(row.providerRef, () => {
+      throw new Error('connect ECONNREFUSED');
+    });
+    const events0 = await countEvents();
+
+    const res = await recover(order.id, intent.id);
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await countEvents()).toBe(events0);
+
+    const log = await prisma.posAuditLog.findFirst({
+      where: { action: 'GATEWAY_SETTLEMENT_RECONCILE_FAILED', entityId: intent.id },
+    });
+    expect(log, 'a failed provider lookup must still be on the record').not.toBeNull();
+  });
+
+  it('refuses to settle an order that is no longer billed', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await stage(order, intent);
+    // Paid in cash at the counter while the gateway page sat open.
+    const cash = await request(app).post(`/api/orders/${order.id}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'CASH', amount: order.totalPaise / 100 });
+    expect(cash.status, JSON.stringify(cash.body)).toBe(201);
+
+    const res = await recover(order.id, intent.id);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.settled).toBe(true);
+    // Verified, and deliberately not applied. The shared guards refused it.
+    expect(res.body.recorded).toBe(false);
+    expect(res.body.reason).toMatch(/not BILLED|no amount due/);
+
+    // One payment, the cash one. The customer is owed a refund from the
+    // provider, which is a human's decision, not this route's.
+    const payments = await prisma.payment.findMany({ where: { orderId: order.id } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0].channel).toBe('MANUAL');
+    // The refusal is on the record, with its reason.
+    const events = await eventsFor(intent.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].source).toBe('RECOVERY');
+    expect(events[0].skippedReason).not.toBeNull();
+  });
+
+  it('is refused for a cashier, for another tenant, and for another order', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await stage(order, intent);
+    const events0 = await countEvents();
+
+    const asCashier = await recover(order.id, intent.id, tokens.cashier);
+    expect(asCashier.status).toBe(403);
+
+    // Tenant scope: not their order, so it does not exist for them.
+    const asStranger = await recover(order.id, intent.id, other.ownerToken);
+    expect(asStranger.status).toBe(404);
+
+    // And the intent cannot be reached through someone else's bill.
+    const elsewhere = await billedOrder();
+    const crossed = await recover(elsewhere.id, intent.id);
+    expect(crossed.status).toBe(404);
+
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await countEvents()).toBe(events0);
+  });
+});
+
+// The race is the ordinary case, not the exotic one: an operator recovers
+// precisely when a webhook is late, so "late" and "arriving right now" are the
+// same situation seen a second apart.
+describe('recovery racing a delayed webhook', () => {
+  afterEach(() => clearTestSettlements());
+
+  it('creates exactly one payment when the webhook commits mid-fetch', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    const answer = await settlementFor(order, intent);
+
+    // Deterministic interleaving rather than a hopeful sleep. The provider
+    // lookup delivers the webhook before it answers, so the webhook is
+    // GUARANTEED to have committed while the recovery is in flight — the
+    // window a wall-clock race test almost never actually lands in.
+    let delivered;
+    setTestSettlement(intent.providerRef, async () => {
+      delivered = await deliver(succeeded(intent.providerRef, order.totalPaise));
+      return answer;
+    });
+
+    const res = await recover(order.id, intent.id);
+
+    // The webhook is the one that actually settled the money.
+    expect(delivered.status, JSON.stringify(delivered.body)).toBe(200);
+    expect(delivered.body.applied, 'the webhook did not settle the payment').toBe(true);
+    // The operator is told what is true now, not shown an error for a thing
+    // that worked.
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.recorded).toBe(false);
+    expect(res.body.alreadyRecorded).toBe(true);
+
+    const payments = await prisma.payment.findMany({ where: { orderId: order.id } });
+    expect(payments, 'the race produced more than one payment').toHaveLength(1);
+
+    // The webhook won, so the delivery is on record. Whatever the recovery
+    // wrote must not be a second settlement of the same money.
+    const events = await eventsFor(intent.id);
+    expect(events.filter((e) => e.source === 'WEBHOOK')).toHaveLength(1);
+    for (const e of events.filter((e) => e.source === 'RECOVERY')) {
+      expect(e.skippedReason, 'a RECOVERY row claims to have settled money the webhook settled').not.toBeNull();
+    }
+
+    const finalOrder = await prisma.order.findUnique({ where: { id: order.id } });
+    expect(finalOrder.status).toBe('PAID');
+  });
+
+  it('creates exactly one payment when both are fired at once', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await stage(order, intent);
+
+    // No orchestration. Whichever wins, the invariant is the same — and
+    // asserting the invariant rather than the interleaving is the point: a
+    // test that pinned the order would pass while proving nothing about the
+    // other one.
+    const [hook, api] = await Promise.all([
+      deliver(succeeded(intent.providerRef, order.totalPaise)),
+      recover(order.id, intent.id),
+    ]);
+
+    expect(hook.status).toBe(200);
+    expect([200, 409]).toContain(api.status);
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(1);
+
+    // Exactly one of the two claims to have done the recording.
+    const claims = [hook.body.applied === true, api.body.recorded === true].filter(Boolean);
+    expect(claims, 'both paths claimed to have recorded the payment').toHaveLength(1);
+  });
+
+  it('settles once when recovery is run twice', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await stage(order, intent);
+
+    const first = await recover(order.id, intent.id);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(first.body.recorded).toBe(true);
+
+    // The intent is settled now, so the second run is refused before the
+    // provider is even asked.
+    const second = await recover(order.id, intent.id);
+    expect(second.status, JSON.stringify(second.body)).toBe(409);
+    expect(second.body.error.message).toMatch(/already been recorded/);
+
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(1);
+    expect(await eventsFor(intent.id)).toHaveLength(1);
+  });
+
+  it('settles once when two recoveries are fired at once', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await stage(order, intent);
+
+    // Both may find the intent unsettled and both go on to insert; the status
+    // check is not the guarantee. (provider, eventId) is — and the event id
+    // here is the charge id, which is the same value for both.
+    const results = await Promise.all([
+      recover(order.id, intent.id),
+      recover(order.id, intent.id),
+    ]);
+    expect(results.every((r) => r.status === 200 || r.status === 409)).toBe(true);
+    expect(results.filter((r) => r.body.recorded === true)).toHaveLength(1);
+
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(1);
+    expect(await eventsFor(intent.id)).toHaveLength(1);
+  });
+
+  it('keeps a fresh duplicate delivery apart from a stale replay, after recovery', async () => {
+    const order = await billedOrder();
+    const intent = await openIntent(order.id);
+    await stage(order, intent);
+
+    const done = await recover(order.id, intent.id);
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect(done.body.recorded).toBe(true);
+    const paymentId = (await prisma.payment.findFirst({ where: { orderId: order.id } })).id;
+
+    // (1) A FRESH DUPLICATE. The provider's late delivery finally lands, with
+    // its own event id and a current timestamp. It is a genuine delivery, so
+    // it is accepted and logged — and applied to nothing, because the money is
+    // already recorded. It does NOT collide on eventId: the recovery's row is
+    // keyed by the charge id, this one by the provider's event id. It collides
+    // one layer down, on the intent.
+    const late = succeeded(intent.providerRef, order.totalPaise);
+    const fresh = await deliver(late);
+    expect(fresh.status, JSON.stringify(fresh.body)).toBe(200);
+    expect(fresh.body.applied).toBe(false);
+
+    // Two rows on this intent now, and they are not the same kind of thing.
+    const rows = await eventsFor(intent.id);
+    expect(rows).toHaveLength(2);
+    const delivery = rows.find((e) => e.source === 'WEBHOOK');
+    expect(delivery, 'a genuine late delivery must still be recorded').toBeDefined();
+    expect(delivery.skippedReason).toBe('intent already settled');
+    expect(rows.filter((e) => e.source === 'RECOVERY')).toHaveLength(1);
+
+    // (2) A STALE REPLAY. The same bytes re-sent with an out-of-window
+    // signature. Refused before anything is parsed, so — unlike (1) — it
+    // leaves NO row at all. The two must not be conflated: one is the provider
+    // being late, the other is an attacker being slow.
+    const before = await countEvents();
+    const stale = await deliver(late, { timestamp: Math.floor(Date.now() / 1000) - 301 });
+    expect(stale.status).toBe(400);
+    expect(stale.body.error.code).toBe('POS_GATEWAY_SIGNATURE_INVALID');
+    expect(await countEvents()).toBe(before);
+
+    // (3) And neither of them moved any money.
+    const payments = await prisma.payment.findMany({ where: { orderId: order.id } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0].id).toBe(paymentId);
+    const finalOrder = await prisma.order.findUnique({ where: { id: order.id } });
+    expect(finalOrder.status).toBe('PAID');
   });
 });
