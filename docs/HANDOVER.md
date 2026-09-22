@@ -19,27 +19,35 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Backend commit | `269b0f5`, image `pos-prod-backend:20260922-vexo-rebrand`, deployed 14:03 UTC |
-| Frontend commit | `269b0f5`, image `pos-prod-frontend:20260922-vexo-rebrand`, deployed 14:02 UTC |
-| Frontend bundle | `assets/index-BD77gSvc.js` (sha256 `b7785001…`) |
-| Rollback tags | `pos-prod-backend:rollback-20260922-1402`, `pos-prod-frontend:rollback-20260922-1402` |
+| Backend commit | `269b0f5`…`37d5ad8` — `backend/` is byte-identical across that whole range, so content cannot narrow it further and does not need to. Image `pos-prod-backend:20260922-vexo-rebrand` (`fd5e33f8a045`), container created 14:04 UTC |
+| Frontend commit | **`37d5ad8`**, image `pos-prod-frontend:20260922-dates-errboundary` (`173962d8e5f1`), container created 14:49 UTC |
+| Frontend bundle | `assets/index-BX2Iv59k.js`, sha256 `d5d7abeb…`. Reproduced byte-identical from `37d5ad8` at 15:00 UTC |
+| Rollback tags | `pos-prod-frontend:rollback-20260922-1428` (`8f80e8f996b4` — the frontend that was live before 14:49), `pos-prod-backend:rollback-20260922-1402` (`9b7c4aa90e94`) |
 | Database migrations applied | 8 |
 
-**This table went stale twice in one afternoon.** It is the most perishable
-thing in this document: production is redeployed by whoever is working on it,
-and the table does not update itself. Treat every row as a claim to re-check.
+**This table went stale three times in one afternoon** — the third time while
+this very section was being edited. At 14:49 UTC another session deployed
+`1ca40bc` + `1e64b24`, and four paragraphs below this one had just been written
+saying both were missing from production. They were true when written and false
+twenty minutes later.
 
-**Four fixes are in git but not in this build.** `1ca40bc` (six licence dates
-render in the viewer's timezone — item 9), `1e64b24` (a render error blanks the
-screen — item 13), and `817b438` + `0084936` (a closing that has stopped being
-true says so — item 2). All are frontend-only except `817b438`, which adds
-`postCloseFor()` to `reports.js`; the backend must ship with it or the banner
-has no data and silently never appears, which is exactly the failure this
-feature exists to prevent. Still no migration anywhere in the four.
+So: it is the most perishable thing in this document. Production is redeployed
+by whoever is working on it and the table does not update itself. Treat every
+row as a claim to re-check, and re-check it by **content** — image tags and
+directory names have both lied here already. The reproduce recipe below is the
+check, and it takes about a minute.
 
-Until that deploy the live site has all three faults. Check the list against
-`git log --oneline 269b0f5..HEAD -- frontend/ backend/` rather than trusting it
-as written; a fourth may have landed since.
+**Two commits are in git but not in this build:** `817b438` + `0084936`, the
+day-close staleness work (item 2). Nothing else is outstanding — `1ca40bc` and
+`1e64b24` went live at 14:49 UTC.
+
+Do not trust that sentence either. Re-derive it:
+
+```sh
+git log --oneline <deployed-commit>..HEAD -- frontend/ backend/
+```
+
+using the commit you just *proved* by rebuild, not the one this table claims.
 
 The two halves of `817b438` are not symmetric. Backend first is inert and
 harmless — the API returns a field nothing reads. Frontend first is the one to
@@ -50,14 +58,22 @@ from "this day is clean". Ship the backend first, or ship both.
 The frontend commit is not read off an image tag or a directory name. Both lie
 — the worktree this was first traced through was named `atc-pos-deploy-269b0f5`
 and had already been deleted by the time it was looked at. It is proven by
-rebuilding `269b0f5` and getting a **byte-identical** bundle:
+rebuilding the candidate commit and getting a **byte-identical** bundle. Run at
+15:00 UTC against `37d5ad8`, which is how the row above was established:
 
 ```sh
-git worktree add --detach /tmp/v 269b0f5
+git worktree add --detach /tmp/v 37d5ad8
 ln -s "$PWD/frontend/node_modules" /tmp/v/frontend/node_modules
-cd /tmp/v/frontend && VITE_BASE_PATH=/pos/ npm run build   # trailing slash — see below
-docker cp pos-prod-frontend-1:/usr/share/nginx/html/assets/. /tmp/prod-assets/
-cmp /tmp/prod-assets/index-BD77gSvc.js dist/assets/index-BD77gSvc.js && echo REPRODUCED
+cd /tmp/v/frontend && VITE_BASE_PATH=/pos/ npx vite build   # trailing slash — see below
+docker exec pos-prod-frontend-1 ls /usr/share/nginx/html/assets/   # get the live name
+docker cp pos-prod-frontend-1:/usr/share/nginx/html/assets/index-BX2Iv59k.js /tmp/live.js
+cmp /tmp/live.js dist/assets/index-BX2Iv59k.js && echo REPRODUCED
+
+# Clean up — DELETE THE SYMLINK FIRST. `git worktree remove --force` deletes
+# the directory tree, and the link it is about to walk over points at the real
+# frontend/node_modules.
+rm /tmp/v/frontend/node_modules
+git worktree remove --force /tmp/v
 ```
 
 **`VITE_BASE_PATH` must end in a slash.** `vite.config.js` passes it straight to
@@ -370,8 +386,9 @@ Written down so they are disclosed rather than discovered.
    restored byte-identical by sha256. The screens were rendered, not reasoned
    about — 34/34 in `/tmp/pos-render/render-postclose.mjs` across mixed,
    refund-only, card-only, clean-day and absent-field fixtures; the same set
-   against the deployed `269b0f5` bundle scores 15/34, with every assertion
-   naming the feature red and only the controls green.
+   against a **pre-feature** bundle (`269b0f5`, which was what production was
+   serving when the control was run) scores 15/34, with every assertion naming
+   the feature red and only the controls green.
 
    Two things that control run caught, worth repeating because neither would
    have shown up any other way. First, two of my own assertions passed with no
@@ -397,10 +414,9 @@ Written down so they are disclosed rather than discovered.
    that catches its inverse: 45/45.
 9. ~~Six licence dates render in the browser's timezone.~~ All six fixed —
    `20dc41d` (Dashboard, ATC company detail) and `1ca40bc` (`Layout.jsx` top
-   bar, the three on `Licensing.jsx`). **Fixed in git, NOT yet in production:**
-   the deployed bundle is `269b0f5`, which predates `1ca40bc`, so a client
-   looking at the Licence screen today still sees browser-local dates. Ships
-   with the next frontend deploy; nothing else is needed.
+   bar, the three on `Licensing.jsx`). **Fixed and DEPLOYED** — another session
+   shipped it at 14:49 UTC, and it is verified against the bundle production is
+   serving, not inferred from the commit graph. See the last paragraph.
 
    Worth keeping the method rather than the result. The harness that proved
    this originally used the unfixed top bar as its control — so fixing the bug
@@ -418,14 +434,30 @@ Written down so they are disclosed rather than discovered.
    14; the extra 8 were the top bar on screens whose own dates were fine.
 
    Final: 27/27 green on the fixed build, 14 red on the pre-fix build, and
-   **14 red on the bundle production is serving right now** — which is how the
-   "not yet deployed" line above is known rather than assumed. Harness:
-   `/tmp/pos-render/render-dates.mjs`.
+   **27/27 green on the bundle production is serving right now** — pulled out
+   of the running container at 15:00 UTC and rendered, which is how "deployed"
+   is known rather than assumed:
+
+   ```sh
+   docker cp pos-prod-frontend-1:/usr/share/nginx/html /tmp/pos-render/dist-live
+   POS_DIST=/tmp/pos-render/dist-live POS_BASE=/pos node /tmp/pos-render/render-dates.mjs
+   ```
+
+   `POS_BASE=/pos` is not optional and its absence does not look like a
+   configuration mistake. Without it the harness serves the live `index.html`,
+   which asks for `/pos/assets/…`, and the SPA fallback answers with
+   `index.html` **labelled `text/javascript`**. The app never boots, all 24
+   date assertions go red on "is rendered" — and the three CONTROL assertions
+   stay green, because they are raw `toLocaleDateString()` evaluated in the
+   page and do not need the app at all. That reads exactly like a real
+   regression. It is the base-path trap in §1 wearing a different hat.
 10. ~~The product name is unsettled.~~ Settled, and it is **VEXO Connect**.
     Production was redeployed at 14:02 UTC on 2026-09-22 with the rebrand
     (`f94b9ce`, `269b0f5`), so the live site now says "VEXO Connect" and
-    "ATC POS" appears nowhere in it. The three client documents were rewritten
-    to match — 24 references across `guide-owner.md` and `guide-cashier.md`.
+    "ATC POS" appears nowhere in it. The 14:49 UTC frontend redeploy (§1) was
+    built on top of the rebrand and carries it forward, so this is still true of
+    `37d5ad8`. The three client documents were rewritten to match — 24
+    references across `guide-owner.md` and `guide-cashier.md`.
 
     Two things this did **not** change, deliberately: the URL is still
     `atcworkspace.com/pos`, and the footer still credits ATC Infocom Solutions
@@ -447,8 +479,10 @@ Written down so they are disclosed rather than discovered.
     cannot reach Orders to reprint a bill. **The POS needs a tablet or larger**
     — said plainly in `guide-owner.md` §9. A mobile menu is a small change if
     the client wants phones, and `Layout.jsx` is the only file it touches.
-13. ~~**No error boundary.**~~ Fixed 2026-09-22 in `1e64b24`, **not yet
-    deployed** — see item 9 for why that sentence keeps appearing. The measured
+13. ~~**No error boundary.**~~ Fixed 2026-09-22 in `1e64b24` and **deployed**
+    at 14:49 UTC in the same push as item 9 — 18/18 green against the bundle
+    pulled out of the running container at 15:00 UTC, same method and same
+    `POS_BASE=/pos` caveat as item 9. The measured
     before-and-after: a 200 whose body the Dashboard could not render left the
     page with **zero characters of text**, and now leaves a readable screen of
     951 with the sidebar still usable. React 18 unmounts the whole tree on an
