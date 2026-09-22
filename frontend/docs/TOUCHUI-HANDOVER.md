@@ -179,13 +179,41 @@ a REQUESTED refund prints **without** a minus sign.
 content 272px, printable 272px, cut off: 0px (0.0 mm)
 ```
 
-### 3.3 Build
+### 3.3 Regression sweep of the other 9 pages — 45/45
+
+The 44 px floor lives on `.btn` and `.input`, so it changes **every page**, not
+just the cashier screen. A taller control can push a toolbar into two rows or
+overflow a table cell, so the rest of the app was swept at 1366×768 (the
+tightest realistic desktop): dashboard, orders, catalog, tables, team,
+branches, licence, reports, day-close.
+
+All nine: no horizontal overflow, no element escaping the right edge, no
+console errors, nothing rendering the error boundary. **No layout regression
+was found from the global change.**
+
+Two corrections were needed before that result could be trusted, both worth
+recording:
+
+- The sweep first ran with the **CASHIER** fixture, but catalog, tables,
+  reports and day-close are gated to `BRANCH_MANAGER` and up. A role gate
+  *redirects* rather than erroring, so those four silently landed on the
+  dashboard and the sweep scored the dashboard four extra times as a pass for
+  pages it never rendered. It now sweeps as `CUSTOMER_OWNER` **and** asserts
+  the URL it landed on is the URL it asked for, so that false green cannot
+  recur.
+- The dashboard fixture was missing `company`, `branches.active`,
+  `users.active` and `sales.note`, which `Dashboard.jsx` reads unguarded. That
+  was a gap in the harness, not a defect in the page — but note the page does
+  read `summary.company.isDemo` and `summary.sales.note` with no optional
+  chaining, so a thin `/dashboard` response crashes it.
+
+### 3.4 Build
 
 `VITE_BASE_PATH=/pos/ npx vite build` → clean, 1662 modules, no warnings.
 There is no frontend test script in `package.json` (`dev`/`build`/`preview`
 only), so no unit suite was run — the verification above is the evidence.
 
-### 3.4 Screenshots
+### 3.5 Screenshots
 
 In `frontend/docs/screens/`, committed with the branch:
 
@@ -197,7 +225,7 @@ receipt-demo-print.png          receipt-long-print.png
 kot-print.png
 ```
 
-Probes that produced them: `/tmp/pos-touchui/{shoot,print-probe,clip-view}.mjs`
+Probes that produced them: `/tmp/pos-touchui/{shoot,print-probe,clip-view,page-sweep}.mjs`
 (scratch, not committed — they hard-code a local Chromium path).
 
 ---
