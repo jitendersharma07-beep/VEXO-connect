@@ -108,6 +108,36 @@ ORDER BY count(*) FILTER (WHERE a.action = 'ORDER_DISCOUNT_SET')
 
 \echo ''
 \echo '=== 3. Refunds and voids, last 30 days =========================='
+-- Refunds are matched on the ORDER_REFUND* PREFIX, not on a list of names, and
+-- the distinction is not stylistic. A refund emits a different action for each
+-- channel and each stage — ORDER_REFUND for a manual one, ORDER_REFUND_REQUESTED
+-- when it goes to the gateway, then _SETTLED, _FAILED or _RECONCILED as the
+-- provider answers. The first version of this query listed only ORDER_REFUND
+-- and so reported no gateway refund at all, and nothing about the result looked
+-- wrong: production has no gateway refunds yet, so query 5 offered no missing
+-- name to notice. It was caught by grepping the source for emitted actions.
+--
+-- The prefix also survives the next one somebody adds. Enumerating is what went
+-- stale; `ORDER_CANCEL` sat in that list for a while and is emitted nowhere.
+--
+-- ORDER_ITEM_REMOVE is deliberately absent: it can only touch a line that has
+-- not gone to the kitchen, so nothing was made and nothing walked out. Voids
+-- are the shrinkage question.
+--
+-- Old filter against new, over every refund/void name the source can emit.
+-- Run as SELECT ... FROM unnest(ARRAY[...]), so it needs no data and can be
+-- repeated on any of these databases:
+--
+--   ORDER_REFUND              old t  new t
+--   ORDER_REFUND_REQUESTED    old f  new t   <- every gateway refund
+--   ORDER_REFUND_SETTLED      old f  new t
+--   ORDER_REFUND_FAILED       old f  new t
+--   ORDER_REFUND_RECONCILED   old f  new t
+--   ORDER_VOID                old t  new t
+--   ORDER_ITEM_VOID           old t  new t
+--   ORDER_ITEM_REMOVE         old f  new f   <- correctly out of both
+--   ORDER_BILL                old f  new f
+--   ORDER_CANCEL              old t  new f   <- emitted nowhere
 SELECT
   (a.at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS ist,
   a."actorEmail",
@@ -115,7 +145,7 @@ SELECT
   a."entityId" AS order_id,
   a.meta
 FROM "PosAuditLog" a
-WHERE a.action IN ('ORDER_REFUND', 'ORDER_VOID', 'ORDER_ITEM_VOID', 'ORDER_CANCEL')
+WHERE (a.action LIKE 'ORDER_REFUND%' OR a.action IN ('ORDER_VOID', 'ORDER_ITEM_VOID'))
   AND a.at > now() - interval '30 days'
   AND (:'company' = '' OR a."companyId" = :'company')
 ORDER BY a.at DESC
@@ -163,6 +193,23 @@ LIMIT 50;
 -- looks like a discount, a void or a refund and is missing from queries 1-3,
 -- those queries are under-reporting and need widening. It is also where ATC's
 -- own actions appear (COMPANY_*, LICENSE_*, USER_CREATE).
+--
+-- But this query can only show you names that have HAPPENED, which makes it a
+-- weak check on its own — query 3 missed every gateway refund action for
+-- exactly that reason, since none has occurred here yet. The authoritative
+-- list is in the source:
+--
+--   grep -rhoE "'[A-Z][A-Z0-9_]{4,}'" backend/src | sort -u
+--
+-- Deliberately over-inclusive: it returns roughly 100 lines, most of them enum
+-- values like 'PAID' rather than action names. Narrowing it to `action: '...'`
+-- reads much better and is wrong — it reproduces the original bug exactly,
+-- because two of the five refund actions are chosen by a ternary and never
+-- appear next to the word `action`. Over-reporting is the safe direction for a
+-- check whose failure mode is a silent omission.
+--
+-- Anything in that list and not in this one is simply an action nobody has
+-- taken yet. Read the two together.
 --
 -- Run it unscoped at least once when auditing the queries themselves. Rows with
 -- a null companyId drop out under `-v company=...`, so a scoped run can hide
