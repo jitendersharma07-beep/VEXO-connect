@@ -22,7 +22,11 @@ PORT=5010
 LOG=/tmp/pos-demo/dev-gateway.log
 fail() { echo "FAIL: $1"; exit 2; }
 
-[ -t 0 ] || fail "no terminal on stdin; the secrets must be typed, not piped"
+# NOTE: the terminal requirement lives in the prompting branch further down,
+# not here. It applies only when there is something to type. With credentials
+# already stored there is nothing to ask, and demanding a terminal anyway would
+# tie the backend's life to an SSH session — which is how a mid-prompt
+# disconnect takes the gateway down with it.
 cd "$REPO" || fail "repo not found at $REPO"
 mkdir -p /tmp/pos-demo
 
@@ -93,6 +97,8 @@ if [ -f "$SECRETS" ]; then
     || fail "$SECRETS is incomplete — re-run backend/scripts/razorpay-sandbox-setup.sh"
   echo "PASS: using the stored sandbox credentials (0600, git-ignored)"
 else
+  # Only now is a terminal genuinely required: there is something to type.
+  [ -t 0 ] || fail "no stored credentials and no terminal to type them at. Run backend/scripts/razorpay-sandbox-setup.sh first, then this script can start without a terminal"
   echo "No stored credentials. To avoid re-typing these on every restart, run"
   echo "  bash backend/scripts/razorpay-sandbox-setup.sh"
   echo
