@@ -11,12 +11,33 @@ reserved demo till.
 
 ## Before you start
 
-**Account.** `demo.owner@atcpos.example` — an owner can reach every screen in
-this list and can choose the branch, so no new account is needed and no
-existing password gets touched. If you do not have the password, ask; do not
-reset it.
+**Sign in at** `https://atcworkspace.com/pos/login`
 
-**Target.** `https://atcworkspace.com/pos`
+**As** `demo.owner@atcpos.example` — role `CUSTOMER_OWNER`, not bound to a
+branch, so it is the only one of the three demo accounts that can select Cyber
+Hub at all. `demo.manager@` and `demo.cashier@` are both pinned to Connaught
+Place and cannot reach the reserved till. Using the owner also means this run
+creates no account and changes no password.
+
+**Where the password lives.** Not in this repo, and not in any file on this
+host — it was handed over out of band and belongs in your password manager.
+**Ask whoever holds it.** If nobody does, do not guess and do not read it out
+of the database (it is an argon2 hash; there is nothing to read). Set a fresh
+one without it ever reaching a screen, a log or a shell history:
+
+```sh
+docker exec -it pos-prod-backend-1 node scripts/rotate-pos-passwords.mjs \
+  --emails demo.owner@atcpos.example --demo --prompt --confirm
+```
+
+`--prompt` reads it from the terminal with echo off, so nothing is generated
+and nothing is written down. `--demo` is correct *here and only here*: it
+clears the forced-change flag, which is what you want for a shared demo login
+and what you must never do to a real client account. It cannot be applied to
+`pos.admin`. Run without `--confirm` first — that previews and writes nothing.
+
+> A 400 from `/api/auth/login` is a malformed request body, **not** a wrong
+> password. Wrong credentials return 401. Do not rotate anything on a 400.
 
 **The till.** `Brew Street Café — Cyber Hub` (`BSC-CH`). Reserved in
 `UAT-TILL-RESERVATION.md`. Recheck it is still untouched today, and get the
