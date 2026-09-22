@@ -351,9 +351,12 @@ Separated by kind of evidence, because they are not equally strong.
 
 ### Automated tests — mocked, not a real provider
 
-Backend suite: **227 passed / 227**, 7 files (foundation 22, money 13,
-logRedaction 7, phase2 45, razorpay 53, razorpayFlow 32, gateway 55), run
-against the dev test database and re-measured at 15:52 UTC. Money arithmetic,
+Backend suite: **235 passed / 235**, 7 files (foundation 22, money 13,
+logRedaction 7, phase2 53, razorpay 53, razorpayFlow 32, gateway 55), run
+against the dev test database and re-measured at 16:45 UTC **from the merged
+tree at `f014ab5`** — not from the lane branch, because the runbook's
+precondition is that the tree being built is the tree that went green. Money
+arithmetic,
 order lifecycle, RBAC, tenant scoping, licence gating, refund states, log
 redaction, and the gateway adapter **against a mock**. Re-measure rather than
 quoting this number — it has been stale in this document three times, and was
@@ -455,6 +458,30 @@ as `index.html` because the deployed build is served under `/pos` and the
 harness was rooted at `/`. Worth recording: the page still returned 200 and
 still painted a shell, so a check that looked only at status codes would have
 called a completely dead app healthy.
+
+**Reports → Discounts & voids**, the same way, after the 16:37 UTC deploy of
+`f014ab5`. The bundle was fetched from `https://atcworkspace.com/pos/` and
+render-checked at `sha256 c1d15e81…45ef63` — 25 of 25, including the
+discount-versus-removal distinction, both viewport sizes, the truncation
+warning, the empty range, and no console errors. Then the bundle file was
+moved aside and the run repeated: **2 of 19**, aborting at the first filter
+click. The checks depend on that file rather than passing off the SPA
+fallback.
+
+Two traps found doing it, both of which produce a confident false green:
+
+- **A local `frontend/dist` is not the deployed bundle, even at the same
+  commit.** The two differ: the Docker build injects `baseURL:"/pos/api"` and
+  a local `npm run build` leaves `"/api"`. Identical source, different bytes,
+  different content hash. A render check against `frontend/dist` therefore
+  proves nothing about production. Fetch the bundle from the live URL and
+  render *that*.
+- **An anonymous request cannot tell you whether a route is mounted.** Auth
+  middleware runs before routing, so `GET /pos/api/reports/activity` returns
+  401 — and so does `GET /pos/api/reports/nosuchthing`. The 401 that looks
+  like "mounted and correctly gated" is identical to the 404 case. Prove a
+  mount by reading the route table in the running image, or with a
+  credentialed call; never by the status code of an unauthenticated one.
 
 ### Rate limiting, measured against production rather than read off the config
 
