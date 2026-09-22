@@ -5,8 +5,15 @@ mutable state. It is in the repo so every session sees it without being told
 to look.
 
 **Reserved: `Brew Street Café — Cyber Hub` (`BSC-CH`), demo company, for the
-browser acceptance run. Held by the release-verify lane, branch
-`phase2-release-docs`, from 2026-09-22 23:10 IST.**
+browser acceptance run. Held by the integration lane, branch
+`phase2-integration`, from 2026-09-23 00:28 IST, business date `2026-09-23`.**
+
+> Taken over from the release-verify lane (branch `phase2-release-docs`),
+> which reserved it at 2026-09-22 23:10 IST for business date `2026-09-22`
+> and did not run. That lane is idle — clean worktree at `9b5020e`, no node
+> process — and its date has expired with the midnight roll, so this is a
+> re-reservation for a new date rather than a contested hand-off. Rechecked
+> at 00:28 IST: BSC-CH reads 0 orders ever, 0 today, 0 closings today.
 
 ## What is reserved
 
