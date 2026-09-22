@@ -987,3 +987,181 @@ describe('daily closing', () => {
     expect(afterPending.expectedCashDelta).toBeCloseTo(afterGateway.expectedCashDelta, 2);
   });
 });
+
+// The activity report. "PosAuditLog" has been written since the first release
+// and, until this route, read by nothing in the product — so the handover pack
+// could say discounts are recorded against the person who applied them, which
+// sounds like a control an owner can check, while no owner could check it.
+//
+// These tests are the difference between recorded and visible, and the two
+// that matter most are the ones that produce a WRONG NUMBER rather than an
+// error when they break: counting a quantity edit as a discount, and matching
+// refunds against a list of names instead of a prefix.
+describe('activity report — who discounted, who voided, who refunded', () => {
+  const today = istDateOf(new Date());
+  const activity = (token, qs = '') =>
+    request(app)
+      .get(`/api/reports/activity?from=${today}&to=${today}${qs}`)
+      .set(auth(token));
+
+  // An order on Alpha's OTHER branch, so the same fixture proves both the
+  // discount/quantity split and the branch filter.
+  let a2Order, a2Item;
+
+  it('cashier is refused, exactly as on the sales report', async () => {
+    const res = await activity(tokens.cashierA1);
+    expect(res.status).toBe(403);
+  });
+
+  it('a quantity change is not a discount, though both write the same action', async () => {
+    const created = await request(app).post('/api/orders').set(auth(tokens.ownerA))
+      .send({ type: 'TAKEAWAY', branchId: branchA2.id, items: [{ productId: cat.cappuccino, qty: 2 }] });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    a2Order = created.body.order.id;
+    a2Item = created.body.order.items[0].id;
+
+    // Two edits through the same endpoint, emitting the same ORDER_ITEM_UPDATE.
+    // Only the second one gave money away.
+    const qtyEdit = await request(app).patch(`/api/orders/${a2Order}/items/${a2Item}`)
+      .set(auth(tokens.ownerA)).send({ qty: 3 });
+    expect(qtyEdit.status, JSON.stringify(qtyEdit.body)).toBe(200);
+    const discountEdit = await request(app).patch(`/api/orders/${a2Order}/items/${a2Item}`)
+      .set(auth(tokens.ownerA)).send({ lineDiscount: 15 });
+    expect(discountEdit.status, JSON.stringify(discountEdit.body)).toBe(200);
+
+    // The control. Without it this test still passes when NEITHER edit is
+    // recorded, which is the failure that would matter most.
+    expect(
+      await prisma.posAuditLog.count({ where: { action: 'ORDER_ITEM_UPDATE', entityId: a2Order } }),
+    ).toBe(2);
+
+    const res = await activity(tokens.ownerA);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const mine = res.body.events.filter((e) => e.orderId === a2Order);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].kind).toBe('discount');
+    expect(mine[0].detail.lineDiscount).toBe(15);
+    expect(mine[0].actorEmail).toBe('owner.a@test.local');
+    expect(mine[0].actorName).toBe('Owner A');
+  });
+
+  it('a manager sees their own branch; the owner sees both', async () => {
+    const manager = await activity(tokens.managerA1);
+    expect(manager.status, JSON.stringify(manager.body)).toBe(200);
+    expect(manager.body.range.branchId).toBe(branchA1.id);
+    // The branch came from the token, not the query string: asking for the
+    // sibling branch must not move a pinned role off their own.
+    const pushed = await activity(tokens.managerA1, `&branchId=${branchA2.id}`);
+    expect(pushed.body.range.branchId).toBe(branchA1.id);
+    expect(pushed.body.events.some((e) => e.orderId === a2Order)).toBe(false);
+
+    // Positive control: the manager is not simply seeing nothing.
+    expect(manager.body.events.length).toBeGreaterThan(0);
+    expect(manager.body.events.some((e) => e.orderId === a2Order)).toBe(false);
+
+    const scoped = await activity(tokens.ownerA, `&branchId=${branchA2.id}`);
+    expect(scoped.body.events.some((e) => e.orderId === a2Order)).toBe(true);
+    expect(scoped.body.events.every((e) => e.orderId === a2Order)).toBe(true);
+
+    const foreign = await activity(tokens.ownerA, `&branchId=${branchB1.id}`);
+    expect(foreign.status).toBe(404);
+  });
+
+  it('one company never appears in another, in either direction', async () => {
+    // Bravo has no orders of its own, so without a row of its own this would
+    // compare an empty list against a full one and pass for the wrong reason.
+    const strayB = await prisma.posAuditLog.create({
+      data: {
+        companyId: companyB.id, action: 'ORDER_VOID', entity: 'Order',
+        entityId: 'bravo-order-not-in-alpha', actorEmail: 'owner.b@test.local',
+        meta: { reason: 'wrong table', invoiceNumber: 'B1-000001' },
+      },
+    });
+
+    const a = await activity(tokens.ownerA);
+    const b = await activity(tokens.ownerB);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(a.body.events.length).toBeGreaterThan(0);
+
+    const bIds = b.body.events.map((e) => e.id);
+    expect(bIds).toContain(strayB.id);
+    expect(a.body.events.map((e) => e.id)).not.toContain(strayB.id);
+    expect(a.body.events.some((e) => bIds.includes(e.id))).toBe(false);
+    // Alpha's cashier and manager are not named anywhere in Bravo's answer.
+    expect(b.body.byActor.map((x) => x.actorEmail)).toEqual(['owner.b@test.local']);
+  });
+
+  it('counts every stage of a gateway refund, not only the name production has emitted', async () => {
+    // The same defect this fixed in deploy/audit-queries.sql, pinned here so it
+    // cannot come back. A refund emits a different action per channel and per
+    // stage — ORDER_REFUND manually, then _REQUESTED / _SETTLED / _FAILED /
+    // _RECONCILED through a gateway. Production has never produced the gateway
+    // ones, so no amount of looking at real data would reveal a filter that
+    // drops them; the rows are written directly for that reason.
+    const stages = [
+      'ORDER_REFUND_REQUESTED',
+      'ORDER_REFUND_SETTLED',
+      'ORDER_REFUND_FAILED',
+      'ORDER_REFUND_RECONCILED',
+    ];
+    for (const action of stages) {
+      await prisma.posAuditLog.create({
+        data: {
+          companyId: companyA.id, action, entity: 'Order', entityId: a2Order,
+          actorEmail: 'manager.a1@test.local',
+          meta: { amount: '10.00', channel: 'GATEWAY', status: 'PENDING', providerConfirmed: false },
+        },
+      });
+    }
+
+    const res = await activity(tokens.ownerA, `&branchId=${branchA2.id}`);
+    expect(res.status).toBe(200);
+    const seen = res.body.events.filter((e) => e.kind === 'refund').map((e) => e.action);
+    expect(seen.sort()).toEqual([...stages].sort());
+    // providerConfirmed survives to the screen: a refund a person asserted is
+    // not the same fact as one a provider confirmed.
+    const settled = res.body.events.find((e) => e.action === 'ORDER_REFUND_SETTLED');
+    expect(settled.detail.providerConfirmed).toBe(false);
+    expect(settled.detail.channel).toBe('GATEWAY');
+
+    // Every count on this screen is a floor, never a total: audit() swallows
+    // its own write failures so a customer's bill can never fail because of
+    // logging. The flag saying so is part of the response contract.
+    expect(res.body.bestEffort).toBe(true);
+    expect(res.body.truncated).toBe(false);
+  });
+
+  it('attributes each kind to the person, and keeps ATC out of a tenant it did not scope', async () => {
+    const res = await activity(tokens.ownerA);
+    expect(res.status).toBe(200);
+    const byActor = res.body.byActor;
+    expect(byActor.length).toBeGreaterThan(0);
+    // Sorted busiest first — the whole point of the screen is that one name
+    // stands out, not that a total is large.
+    expect(byActor.map((x) => x.total)).toEqual([...byActor.map((x) => x.total)].sort((x, y) => y - x));
+    for (const row of byActor) {
+      expect(row.discounts + row.voids + row.refunds).toBe(row.total);
+    }
+    // The §6 worked example ran on the cashier's login, so the cashier must be
+    // named here even though the cashier may not open this screen.
+    const cashier = byActor.find((x) => x.actorEmail === 'cashier.a1@test.local');
+    expect(cashier.discounts).toBeGreaterThan(0);
+    expect(cashier.role).toBe('CASHIER');
+    expect(cashier.stillActive).toBe(true);
+
+    // ATC reads with an explicit company scope, like every other report.
+    const atc = await request(app)
+      .get(`/api/reports/activity?from=${today}&to=${today}&companyId=${companyA.id}`)
+      .set(auth(tokens.atc));
+    expect(atc.status, JSON.stringify(atc.body)).toBe(200);
+    expect(atc.body.events.length).toBe(res.body.events.length);
+  });
+
+  it('refuses a backwards range rather than answering with nothing', async () => {
+    const res = await request(app)
+      .get(`/api/reports/activity?from=${today}&to=2020-01-01`)
+      .set(auth(tokens.ownerA));
+    expect(res.status).toBe(400);
+  });
+});
