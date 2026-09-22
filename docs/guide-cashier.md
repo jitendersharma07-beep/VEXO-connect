@@ -1,10 +1,10 @@
-# ATC POS — cashier guide
+# VEXO Connect — cashier guide
 
 Print this and keep it by the till. One page, in order of what you actually do.
 
 **Open the till:** `https://atcworkspace.com/pos` → sign in with the email and
 password your manager gave you. The first time, the system will make you choose
-a new password. Nobody at ATC can see it.
+a new password. Nobody at VEXO can see it.
 
 **On the till screen, a tablet or a laptop — not a phone.** On a phone the left
 menu is not there, so you can see whichever page you are on and cannot get to
@@ -99,10 +99,10 @@ done by someone who did not take the money.
 
 ## If something goes wrong
 
-- **"Licence expired" or you cannot bill** — call the owner. ATC support can
+- **"Licence expired" or you cannot bill** — call the owner. VEXO support can
   reinstate it in a minute; you cannot.
 - **The page will not load** — check another site works. If only POS is down,
-  call ATC support.
+  call VEXO support.
 - **You wrote down a sale on paper because the system was down** — keep the
   paper. Enter it when the system is back and tell your manager, so the drawer
   count matches.

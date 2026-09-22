@@ -1,4 +1,4 @@
-# ATC POS — Phase 2 production deployment runbook
+# VEXO Connect — Phase 2 production deployment runbook
 
 Status: **EXECUTED 2026-09-21 at `0670e7e`** — see §7 for what actually
 happened and what is still outstanding. Everything below §7 is the checklist
@@ -72,6 +72,20 @@ Standing rules that survive this runbook:
 5. Prod `.env` (repo root, not committed): `VITE_BASE_PATH=/pos/` and
    `HTTP_PORT=8110` present — the frontend bundle inlines the base path at
    build time.
+
+   **The trailing slash is load-bearing.** `lib/api.js` builds the API root as
+   `` `${import.meta.env.BASE_URL}api` ``, so `/pos/` gives `/pos/api` and
+   `/pos` gives `/posapi` — every API call then 404s. The failure is silent in
+   every way that matters: the build succeeds, only the bundle hash changes
+   (three bytes in 415 kB), nginx serves it happily, and the login screen
+   paints exactly as normal. The first symptom is that signing in does nothing.
+   Confirmed 2026-09-22 by building both and diffing them.
+
+   Cheap check after any frontend build, before tagging:
+
+   ```sh
+   grep -o 'baseURL:"[^"]*"' dist/assets/index-*.js   # must be "/pos/api"
+   ```
 
 ## 1. Record rollback anchors (before anything changes)
 

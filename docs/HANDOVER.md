@@ -1,7 +1,12 @@
-# ATC POS — client handover pack
+# VEXO Connect — client handover pack
 
 Internal ATC document. What was delivered, what was proven, what is still owed,
 and the exact steps to put a café on this system.
+
+Names: the product is **VEXO Connect**, the operator the screens name is
+**VEXO**, and the company is **ATC Infocom Solutions Pvt. Ltd.** This document
+says "ATC" where it means the team doing the work, and "VEXO" where it is
+quoting something the client will actually see on screen.
 
 The two documents the client actually receives are `guide-owner.md` and
 `guide-cashier.md`. This one stays with ATC.
@@ -14,16 +19,36 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Backend commit | `2c3acb1`, image `pos-prod-backend:20260922-dayclose`, deployed 12:54 UTC |
-| Frontend commit | `652732f`, image `pos-prod-frontend:20260922-honest-screens`, deployed 13:41 UTC |
-| Frontend bundle | `assets/index-CuAz2wOg.js` |
-| Rollback tags | `pos-prod-backend:20260922-dayclose`, `pos-prod-frontend:rollback-20260922-1340` |
+| Backend commit | `269b0f5`, image `pos-prod-backend:20260922-vexo-rebrand`, deployed 14:03 UTC |
+| Frontend commit | `269b0f5`, image `pos-prod-frontend:20260922-vexo-rebrand`, deployed 14:02 UTC |
+| Frontend bundle | `assets/index-BD77gSvc.js` (sha256 `b7785001…`) |
+| Rollback tags | `pos-prod-backend:rollback-20260922-1402`, `pos-prod-frontend:rollback-20260922-1402` |
 | Database migrations applied | 8 |
 
-**The two halves are on different commits and that is deliberate.** `652732f`
-changes three frontend screens and nothing else, so the backend was left alone
-rather than restarted for no reason. Commits after `652732f` (`9bd3133`,
-`ce841bb`) touch only `deploy/` and `docs/`.
+**This table went stale twice in one afternoon.** It is the most perishable
+thing in this document: production is redeployed by whoever is working on it,
+and the table does not update itself. Treat every row as a claim to re-check.
+
+The frontend commit is not read off an image tag or a directory name. Both lie
+— the worktree this was first traced through was named `atc-pos-deploy-269b0f5`
+and had already been deleted by the time it was looked at. It is proven by
+rebuilding `269b0f5` and getting a **byte-identical** bundle:
+
+```sh
+git worktree add --detach /tmp/v 269b0f5
+ln -s "$PWD/frontend/node_modules" /tmp/v/frontend/node_modules
+cd /tmp/v/frontend && VITE_BASE_PATH=/pos/ npm run build   # trailing slash — see below
+docker cp pos-prod-frontend-1:/usr/share/nginx/html/assets/. /tmp/prod-assets/
+cmp /tmp/prod-assets/index-BD77gSvc.js dist/assets/index-BD77gSvc.js && echo REPRODUCED
+```
+
+**`VITE_BASE_PATH` must end in a slash.** `vite.config.js` passes it straight to
+`base`, and `lib/api.js` builds the API root as `` `${import.meta.env.BASE_URL}api` ``.
+Given `/pos` the bundle calls `/posapi` and every request 404s; given `/pos/` it
+calls `/pos/api` and works. The two builds differ by **three bytes** in 415 kB.
+Nothing warns you — the build succeeds, the hash merely changes, nginx serves
+it, the login screen paints normally, and the only symptom is that signing in
+does nothing at all. Worth knowing before it happens during a real deploy.
 
 Confirm before quoting any of this. Re-read it from the live site rather than
 trusting the table — a docs table is a claim, the served bundle is the fact:
@@ -76,7 +101,7 @@ than a button that fails.
 rotation script exists precisely so that it does not have to.
 
 **1. Create the company, branches and staff** as the owner, through the UI
-(`guide-owner.md` §2), or via ATC → Companies for the company shell. Create each
+(`guide-owner.md` §2), or via VEXO Console → Companies for the company shell. Create each
 person with their real email address.
 
 **2. Set their first passwords.** Preview first — it writes nothing:
@@ -308,27 +333,46 @@ Written down so they are disclosed rather than discovered.
    back out of the running container — not the working tree, which builds
    something else entirely — in six scenarios, every assertion paired with one
    that catches its inverse: 45/45.
-9. **Four licence dates still render in the browser's timezone.** Six did.
-   `20dc41d` added `fmtDate` and fixed the two whose files were free; the rest
-   sit in files a parallel session has checked out, so they are named rather
-   than edited:
+9. ~~Six licence dates render in the browser's timezone.~~ All six fixed —
+   `20dc41d` (Dashboard, ATC company detail) and `1ca40bc` (`Layout.jsx` top
+   bar, the three on `Licensing.jsx`). **Fixed in git, NOT yet in production:**
+   the deployed bundle is `269b0f5`, which predates `1ca40bc`, so a client
+   looking at the Licence screen today still sees browser-local dates. Ships
+   with the next frontend deploy; nothing else is needed.
 
-   | File | Line | What the client sees |
-   |---|---|---|
-   | `components/Layout.jsx` | 231 | top bar "until …" — on every page |
-   | `pages/Licensing.jsx` | 63 | licence start date |
-   | `pages/Licensing.jsx` | 67 | licence expiry |
-   | `pages/Licensing.jsx` | 95 | add-on expiry |
+   Worth keeping the method rather than the result. The harness that proved
+   this originally used the unfixed top bar as its control — so fixing the bug
+   destroyed the only thing that could make the harness go red. It was rebuilt
+   around a control app code cannot reach: a raw `toLocaleDateString()`
+   evaluated *inside the page*, which must **disagree** across the two
+   timezones, or `timezoneId` is not being applied and every green is worthless.
 
-   All four are `new Date(x).toLocaleDateString()` → `fmtDate(x)` plus the
-   import. Measured, not theorised: rendering the Dashboard from a New York
-   browser puts "until 3/30/2027" in the top bar three inches from a StatCard
-   reading "31 Mar 2027", for the same licence.
-10. **The product name is unsettled.** Production says "ATC POS" and matches the
-    guides. The working tree does not: it builds "VEXO Connect" throughout,
-    including the page title. Whichever name ships, the guides and the screen
-    must agree before a client sees either, and that is the owner's call, not a
-    rename to be made quietly on the way past.
+   Running it against pre-fix code before trusting it was what earned its keep.
+   It went red on "is rendered" but **green** on "does not slip a day" — the
+   assertion named after the bug was the one assertion blind to it, because
+   unfixed code emits `3/31/2027` and no `/30 Mar/` regex will ever match that.
+   A third check per date now asserts the raw numeric rendering, taken from the
+   page itself, does not appear on it. That took the pre-fix run from 6 red to
+   14; the extra 8 were the top bar on screens whose own dates were fine.
+
+   Final: 27/27 green on the fixed build, 14 red on the pre-fix build, and
+   **14 red on the bundle production is serving right now** — which is how the
+   "not yet deployed" line above is known rather than assumed. Harness:
+   `/tmp/pos-render/render-dates.mjs`.
+10. ~~The product name is unsettled.~~ Settled, and it is **VEXO Connect**.
+    Production was redeployed at 14:02 UTC on 2026-09-22 with the rebrand
+    (`f94b9ce`, `269b0f5`), so the live site now says "VEXO Connect" and
+    "ATC POS" appears nowhere in it. The three client documents were rewritten
+    to match — 24 references across `guide-owner.md` and `guide-cashier.md`.
+
+    Two things this did **not** change, deliberately: the URL is still
+    `atcworkspace.com/pos`, and the footer still credits ATC Infocom Solutions
+    Pvt. Ltd. A café owner therefore meets three names, so `guide-owner.md`
+    now opens by saying plainly that they are the same people.
+
+    If the rebrand was not intended, the documents and the deploy have to be
+    reverted **together** — they are consistent with each other now, which
+    means neither can be rolled back on its own.
 11. **No pull-based payment recovery.** If a gateway `payment.captured` webhook
     is missed, nothing polls the provider to find out. Only relevant once the
     gateway is switched on, and it should be built before it is.
@@ -396,7 +440,8 @@ Only if online payment is wanted:
 
 ## 9. ATC operational controls
 
-- **ATC → Companies** — every tenant, its licence, branch count and staff.
+- **VEXO Console → Companies** — every tenant, its licence, branch count and
+  staff. That is the label on the screen; the role badge reads "VEXO Admin".
 - **Licence** — plan, expiry, branch entitlement, additional-branch add-ons.
   Expiry is computed from `expiresAt` at read time, so it cannot be missed by a
   failed job and cannot be postponed except by changing the date.

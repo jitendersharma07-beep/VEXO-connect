@@ -1,9 +1,16 @@
-# ATC POS — owner and manager guide
+# VEXO Connect — owner and manager guide
 
 For the café owner and branch managers. The cashier's one-pager is
 `guide-cashier.md`; give them that, not this.
 
 `https://atcworkspace.com/pos`
+
+You will meet three names and they are all the same people. **VEXO Connect**
+is the product — it is what the sign-in screen and the footer of every page
+say. **VEXO** is who supports it, and is the word this guide uses wherever
+something is not yours to do. **ATC Infocom Solutions Pvt. Ltd.** is the
+company behind it, which is why the address still reads `atcworkspace.com`.
+Nothing changes for you depending on which name you see.
 
 ---
 
@@ -13,7 +20,7 @@ Four roles. The screen hides what a role cannot do, and the server refuses it
 again even if someone reaches the address directly — so a bookmark or a typed
 URL is not a way around this.
 
-| | Cashier | Branch manager | Owner | ATC support |
+| | Cashier | Branch manager | Owner | VEXO support |
 |---|---|---|---|---|
 | Take orders, bill, record payment | ✓ | ✓ | ✓ | — |
 | Send KOT, apply discounts | ✓ | ✓ | ✓ | — |
@@ -28,9 +35,9 @@ URL is not a way around this.
 | Branches | — | — | ✓ | ✓ |
 | Licence | — | — | view | ✓ |
 
-**ATC can read, not act.** ATC support can see your figures to help you, and is
-refused the daily closing outright — a count of your drawer is not ATC's to
-file. Everything ATC does is written to an audit log you can be shown.
+**VEXO can read, not act.** VEXO support can see your figures to help you, and is
+refused the daily closing outright — a count of your drawer is not VEXO's to
+file. Everything VEXO does is written to an audit log you can be shown.
 
 A manager sees their own branch. An owner sees every branch.
 
@@ -140,14 +147,14 @@ opened. A sale at 00:30 belongs to the new day.
 
 - **Free trial** — full features, fixed end date.
 - **Single store** — one branch.
-- **Multi store** — several; additional branches are added by ATC.
+- **Multi store** — several; additional branches are added by VEXO.
 
 **When a licence expires, billing stops.** Staff can still sign in and read, but
 no new orders, bills or payments. Expiry is worked out fresh every time, so it
 cannot be missed by a background job that failed to run — and equally, it cannot
-be postponed by anything except ATC extending it.
+be postponed by anything except VEXO extending it.
 
-Your current licence expires on the date shown on that screen. **Ask ATC to
+Your current licence expires on the date shown on that screen. **Ask VEXO to
 renew it before that date, not on it.**
 
 ---
@@ -168,7 +175,7 @@ Set up once per till:
 Kitchen tickets print the same way. If the kitchen printer is a different
 machine, set it as the default on the device that sends KOTs.
 
-**ATC has not tested this against your printer.** The layout is correct at 80 mm
+**VEXO has not tested this against your printer.** The layout is correct at 80 mm
 and prints correctly to PDF at that width; the first real print is something to
 do together before the café opens, not on the first busy morning.
 
@@ -181,7 +188,7 @@ do together before the café opens, not on the first busy morning.
 | Every day | File the daily closing. Investigate any variance the same day. |
 | Every week | Read the sales report. Check voids and refunds — a rising count is worth a question. |
 | Every month | Review who has a login. Remove people who have left. |
-| Before expiry | Renew the licence with ATC. |
+| Before expiry | Renew the licence with VEXO. |
 
 ---
 
@@ -199,14 +206,14 @@ Stated plainly so nobody discovers it mid-service:
   machine or QR code. See §10.
 - **No customer accounts, loyalty, or table reservations.**
 - **No cap on how large a discount a cashier may give.** Any cashier can discount
-  up to 100 %. If you want a ceiling above which a manager must approve, ask ATC
-  — it is a small change, but ATC needs *you* to choose the number.
+  up to 100 %. If you want a ceiling above which a manager must approve, ask VEXO
+  — it is a small change, but VEXO needs *you* to choose the number.
 - **No phone-sized screen.** Use a tablet, laptop or till monitor. Below about
   768 pixels wide — which is every phone held upright — the menu down the left
   disappears and there is nothing to replace it, so staff can see the page they
   are on and cannot get to any other. It is not a rendering fault and it will
   not look broken; they simply will not be able to navigate. If you want the POS
-  on phones, ask ATC.
+  on phones, ask VEXO.
 
 ---
 
@@ -223,27 +230,27 @@ settlement report, not at this system.
 
 Gateway-verified online payment is built but **switched off**, and your staff
 will not see a "Pay online" button at all. Turning it on needs your own merchant
-account and ATC's configuration. Until then there is no ambiguity about which
+account and VEXO's configuration. Until then there is no ambiguity about which
 payments were verified, because none of them were.
 
 ---
 
 ## 11. Support
 
-Contact ATC with: what you were doing, which branch, the invoice number if there
-is one, and the time. ATC support can read your data to diagnose, and every
+Contact VEXO with: what you were doing, which branch, the invoice number if there
+is one, and the time. VEXO support can read your data to diagnose, and every
 access is logged.
 
-For backup and recovery, ATC holds the runbook (`docs/BACKUP-RESTORE.md`). What
+For backup and recovery, VEXO holds the runbook (`docs/BACKUP-RESTORE.md`). What
 you need to know: a backup of this database **has been taken and has been
 proven to restore** — not assumed, actually restored into a separate database
 and compared row by row, including that every staff login still worked. The
 nightly schedule is **switched on**, and runs at about 02:30 each night.
 
-Two things to ask ATC about, because they are real and they are not fixed:
+Two things to ask VEXO about, because they are real and they are not fixed:
 
 - The backups sit on the **same machine** as the café's data. That survives a
-  bad upgrade. It does not survive losing the machine. Ask ATC when a copy will
+  bad upgrade. It does not survive losing the machine. Ask VEXO when a copy will
   be kept somewhere else.
 - **Nothing tells anyone if a backup fails.** It would simply stop happening,
   quietly. "When was the last successful backup?" is a fair question with a

@@ -1,4 +1,4 @@
-# ATC POS — Phase 2 Contract (Backend ↔ Frontend)
+# VEXO Connect — Phase 2 Contract (Backend ↔ Frontend)
 
 Version 1.0.3 — 2026-09-20. Maintainer: **Window 1** (backend + integration).
 Status: **FROZEN for Milestone 1.** W2 requests changes by reporting to the

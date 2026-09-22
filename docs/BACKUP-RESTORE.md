@@ -1,4 +1,4 @@
-# ATC POS — backup and restore runbook
+# VEXO Connect — backup and restore runbook
 
 Until 2026-09-22 there was no backup of this database anywhere. A café billing
 on this system keeps its entire sales history, its staff accounts, its licence
