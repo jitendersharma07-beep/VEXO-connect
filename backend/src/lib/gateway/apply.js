@@ -117,7 +117,7 @@ const applyRefundEvent = async (tx, { providerRef, kind, amountPaise }) => {
            companyId: order.companyId, branchId: order.branchId };
 };
 
-export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, method, chargeRef }) => {
+export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, currency, method, chargeRef }) => {
   if (isRefundEvent(kind)) {
     return applyRefundEvent(tx, { providerRef, kind, amountPaise });
   }
@@ -144,6 +144,22 @@ export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amoun
 
   if (intent.status === 'SUCCEEDED') {
     return { intentId: intent.id, skippedReason: 'intent already settled' };
+  }
+
+  // The amount check below compares two integers, and integers carry no
+  // units: 10500 US cents and 10500 paise are the same number. Without this,
+  // a $105 capture closes a ₹105 bill and every downstream total is wrong by
+  // the exchange rate. The currency has to agree before the count means
+  // anything, which is why this stands in front of it rather than beside it.
+  //
+  // Missing is refused, not assumed to be the intent's. An adapter that stops
+  // reporting currency would otherwise have its silence read as agreement.
+  const settled = typeof currency === 'string' ? currency.toUpperCase() : null;
+  if (!settled) {
+    return { intentId: intent.id, skippedReason: 'the provider did not say which currency it settled in' };
+  }
+  if (settled !== String(intent.currency ?? '').toUpperCase()) {
+    return { intentId: intent.id, skippedReason: 'settled currency does not match the intent' };
   }
 
   // Never settle for an amount we did not ask for. Recording the intent's

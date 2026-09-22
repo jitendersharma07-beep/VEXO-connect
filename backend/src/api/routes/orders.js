@@ -935,7 +935,16 @@ router.post(
                 // received. Recording it would close an order nobody has been
                 // paid for.
                 ? 'the provider reports this payment as not captured'
-                : null;
+                : !answer.currency
+                  // Silence is not agreement. An adapter that stops reporting
+                  // currency would otherwise have every capture read as INR.
+                  ? 'the provider did not say which currency it settled in'
+                  : String(answer.currency).toUpperCase() !== String(intent.currency ?? '').toUpperCase()
+                    // The amount is an integer count of minor units, and
+                    // integers carry no units: 10500 cents and 10500 paise
+                    // compare equal. Only this check can tell them apart.
+                    ? 'the provider settled this payment in a different currency'
+                    : null;
     if (mismatch) {
       await audit(req, {
         action: 'GATEWAY_SETTLEMENT_REFUSED',
@@ -979,6 +988,7 @@ router.post(
           providerRef: intent.providerRef,
           kind: EVENT_SUCCEEDED,
           amountPaise: answer.amountPaise,
+          currency: answer.currency,
           method: answer.method,
           chargeRef: answer.chargeRef,
         });

@@ -77,6 +77,7 @@ router.post(
           providerRef: verified.providerRef,
           kind: verified.kind,
           amountPaise: verified.amountPaise,
+          currency: verified.currency,
           method: verified.method,
           chargeRef: verified.chargeRef,
         });
