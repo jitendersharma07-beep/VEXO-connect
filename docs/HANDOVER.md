@@ -700,10 +700,25 @@ Written down so they are disclosed rather than discovered.
     than assumed to carry forward: `index-BKEWKpgq.js` contains "VEXO Connect"
     once and "ATC POS" zero times. The two client documents were rewritten to
     match: re-counted 2026-09-22, `guide-owner.md` and `guide-cashier.md`
-    carry 26 occurrences of "VEXO" between them and "ATC POS" zero times. The
-    metric is named here on purpose — the previous figure was a bare "24"
-    against no stated basis, and a number nobody can reproduce cannot be
-    checked when it drifts.
+    carry **31** occurrences of "VEXO" between them (27 + 4) and "ATC POS"
+    zero times. The metric is named here on purpose — the previous figure was
+    a bare "24" against no stated basis, and a number nobody can reproduce
+    cannot be checked when it drifts. It has now drifted, which is the
+    argument for naming it: it read 26 until the audit-reader lane merged,
+    which added six mentions to `guide-owner.md` (§1 and §8) and deleted one —
+    the sentence "Everything VEXO does is written to an audit log you can be
+    shown", which was not true — §9 below is the corrected version, and
+    `guide-owner.md` §1 now says plainly that a VEXO *read* leaves no trace.
+    Net +5. Re-take the count from the repo root with:
+
+    ```sh
+    cat docs/guide-owner.md docs/guide-cashier.md | grep -o 'VEXO'    | wc -l
+    cat docs/guide-owner.md docs/guide-cashier.md | grep -o 'ATC POS' | wc -l
+    ```
+
+    The second number is the one that matters, and it must stay zero. The
+    first will move every time the guides are edited, and that is fine — it
+    is a checksum on the rebrand, not a target.
 
     Two things this did **not** change, deliberately: the URL is still
     `atcworkspace.com/pos`, and the footer still credits ATC Infocom Solutions
