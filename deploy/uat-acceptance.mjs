@@ -258,7 +258,23 @@ try {
 
   // ===== 4. Reports =====================================================
 
-  const today = new Date().toISOString().slice(0, 10);
+  // IST, not UTC. `/reports/sales` resolves from/to as IST calendar days
+  // (istDayStartUtc in backend/src/api/routes/reports.js), and the dbTotal
+  // query below anchors on date_trunc('day', now() at IST). Taking this date
+  // from toISOString() asks the API for the UTC day while asking the database
+  // for the IST day — identical for 18.5 hours out of 24, and different
+  // between 00:00 and 05:30 IST.
+  //
+  // That window is exactly when this was caught, at 00:12 IST: 4.1 reported
+  // "report ₹420 vs database ₹210" and 5.4 "report ₹20 vs database ₹10". Both
+  // look like the report double-counting. Neither was: ₹420/₹20 are the real
+  // IST-22 totals from two earlier runs and ₹210/₹10 the real IST-23 totals
+  // from this one. The product was right and the comparison was wrong — and
+  // had this run started an hour earlier it would have passed, which is how a
+  // dormant harness bug gets to impeach a correct money path later.
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
   const repAll = await call('GET', `/reports/sales?from=${today}&to=${today}`, { token: owner });
   const repA = await call('GET', `/reports/sales?from=${today}&to=${today}&branchId=${branches[0].id}`, { token: owner });
   const repB = await call('GET', `/reports/sales?from=${today}&to=${today}&branchId=${branches[1].id}`, { token: owner });
