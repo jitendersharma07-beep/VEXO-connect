@@ -49,6 +49,9 @@ function DiscountModal({ open, order, onClose, onOrder }) {
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // The operator's own ceiling, so the number they type is an informed one.
+  // The server still decides; this only saves a refusal at the counter.
+  const { discountPolicy } = useAuth();
 
   useEffect(() => {
     if (open) {
@@ -123,6 +126,13 @@ function DiscountModal({ open, order, onClose, onOrder }) {
             autoFocus
           />
         </div>
+        {discountPolicy ? (
+          <p className="text-xs text-slate-500">
+            {discountPolicy.allowOrderDiscount
+              ? `Your limit is ${discountPolicy.ceiling}, counting item and order discounts together. Above that, a manager can approve it.`
+              : 'You are not permitted to apply order discounts. A manager can approve this one.'}
+          </p>
+        ) : null}
         <ErrorNote message={error} />
         <div className="flex gap-2">
           {order.discount ? (

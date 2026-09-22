@@ -574,4 +574,28 @@ describe('the screen and the till read the same configuration', () => {
     expect(tooFar.status).toBe(403);
     expect(tooFar.body.error.code).toBe('POS_DISCOUNT_APPROVAL_REFUSED');
   });
+
+  it('tells the till what this operator may do, so it stops offering what it cannot', async () => {
+    // Not enforcement — every discount is still re-decided on the request
+    // that moves it. This is so the screen can avoid offering a control whose
+    // only outcome was ever a refusal at the counter.
+    const res = await request(app).get('/api/auth/me').set(auth(tokens.cashierF1));
+    expect(res.status).toBe(200);
+    expect(res.body.discountPolicy.allowOrderDiscount).toBe(true);
+    expect(res.body.discountPolicy.maxPctMilli).toBe(5000);
+    expect(res.body.discountPolicy.canApprove).toBe(false);
+    expect(res.body.discountPolicy.ceiling).toContain('5');
+
+    const mgr = await request(app).get('/api/auth/me').set(auth(tokens.mgrF1));
+    expect(mgr.body.discountPolicy.canApprove).toBe(true);
+    expect(mgr.body.discountPolicy.maxApprovalPctMilli).toBe(50000);
+
+    // A company that configured nothing tells its staff exactly that.
+    const golfOwnerView = await request(app).get('/api/auth/me').set(auth(tokens.ownerG));
+    expect(golfOwnerView.body.discountPolicy.allowOrderDiscount).toBe(true);
+
+    // And ATC own operator has no company to have a policy in.
+    const atc = await request(app).get('/api/auth/me').set(auth(tokens.atc));
+    expect(atc.body.discountPolicy).toBeNull();
+  });
 });

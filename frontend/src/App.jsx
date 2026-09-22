@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, RequireAuth, RequireAtc, RequireRoles, useAuth } from './lib/auth.jsx';
 import { ToastProvider } from './components/toast.jsx';
+import { ApprovalProvider } from './lib/discountApproval.jsx';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
@@ -17,6 +18,7 @@ import SalesReport from './pages/SalesReport.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
+import Discounts from './pages/Discounts.jsx';
 import NotFound from './pages/NotFound.jsx';
 
 function Home() {
@@ -31,6 +33,10 @@ export default function App() {
     <BrowserRouter basename={import.meta.env.BASE_URL}>
       <AuthProvider>
         <ToastProvider>
+          {/* Inside ToastProvider so a refusal at the till can still speak,
+              and around every route because six different requests can be the
+              one that needs a manager's signature. */}
+          <ApprovalProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route
@@ -109,6 +115,16 @@ export default function App() {
                   </RequireRoles>
                 }
               />
+              {/* Owner only, and the server says so too. A branch manager who
+                  could widen their own ceiling would not have a ceiling. */}
+              <Route
+                path="discounts"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER']}>
+                    <Discounts />
+                  </RequireRoles>
+                }
+              />
               <Route
                 path="atc/companies"
                 element={
@@ -128,6 +144,7 @@ export default function App() {
               <Route path="*" element={<NotFound />} />
             </Route>
           </Routes>
+          </ApprovalProvider>
         </ToastProvider>
       </AuthProvider>
     </BrowserRouter>
