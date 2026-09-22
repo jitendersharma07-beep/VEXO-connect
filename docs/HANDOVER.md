@@ -567,8 +567,12 @@ Written down so they are disclosed rather than discovered.
     "ATC POS" appears nowhere in it. Two further deploys have landed on top
     since, so this was re-checked against the bundle currently served rather
     than assumed to carry forward: `index-BKEWKpgq.js` contains "VEXO Connect"
-    once and "ATC POS" zero times. The three client documents were rewritten to
-    match — 24 references across `guide-owner.md` and `guide-cashier.md`.
+    once and "ATC POS" zero times. The two client documents were rewritten to
+    match: re-counted 2026-09-22, `guide-owner.md` and `guide-cashier.md`
+    carry 26 occurrences of "VEXO" between them and "ATC POS" zero times. The
+    metric is named here on purpose — the previous figure was a bare "24"
+    against no stated basis, and a number nobody can reproduce cannot be
+    checked when it drifts.
 
     Two things this did **not** change, deliberately: the URL is still
     `atcworkspace.com/pos`, and the footer still credits ATC Infocom Solutions
