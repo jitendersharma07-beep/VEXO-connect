@@ -394,9 +394,175 @@ take a backup while a probe is running.
 1. **No off-host copy.** Highest-value next step by a wide margin. One `scp` to
    another machine, or an object store with a write-only credential, changes
    this from "survives a bad migration" to "survives losing the server".
+   **The procedure is now written out in §8** — it is waiting on one decision
+   (where to) and one key, both of which only the owner can supply.
 2. **No alerting.** §3.
 3. **No restore-time objective.** Nobody has timed a full §5-C recovery. Until
    someone has, "how long would we be down" has no answer.
 4. **The `.env` has no second copy.** §1.
 5. **The drill has never seen real money.** §6. Re-run `--drill` after the first
    full day of billing.
+
+---
+
+## 8. Getting a copy off this host
+
+**Status: written, not yet run.** Nothing in this section has been executed,
+because it cannot be until someone names a destination. Treat every command
+below as a draft to be tested the day the destination exists, not as something
+already working. The rest of this document distinguishes carefully between
+proven and assumed, and this section is entirely on the assumed side.
+
+### Why this is the gap worth closing first
+
+The nightly dump and the database it was taken from are on the same disk, in
+the same machine, in the same room. That arrangement survives a bad migration,
+a dropped table and a broken deploy — which is most of what goes wrong, and is
+why it was worth building. It does not survive the one failure that ends a
+business: the machine is gone, stolen, encrypted by someone else, or simply
+does not come back.
+
+The good news is that this is cheap. A POS dump of this café is **about 70 KiB**
+and the whole retained set is **under 300 KiB**. There is no bandwidth problem,
+no storage cost worth discussing, and no reason to sample or thin the data. A
+decade of daily backups would fit in a few hundred megabytes.
+
+### What must be true of the destination
+
+1. **It is somewhere else.** A second machine in the same rack protects against
+   a disk failure and nothing else. If the destination shares a room, a mains
+   supply or a landlord with the POS host, it is a second copy, not an off-host
+   copy. Say so plainly rather than quietly counting it.
+2. **The POS host cannot erase its own history.** If the credential stored here
+   can delete what it uploaded, then whoever takes this host also takes the
+   backups. Use an append-only bucket policy, or on an SSH destination a
+   `restrict` + forced-command key that only permits writes.
+3. **It receives ciphertext.** The dump contains staff password hashes, customer
+   order history and company registration details. It leaves this host encrypted
+   or it does not leave.
+
+### The encryption choice, and why it is this way round
+
+Encrypt to a **public key whose private half never touches this machine**.
+
+That is the whole point. Symmetric encryption — `gpg --symmetric`, or
+`openssl enc` with a passphrase — requires the passphrase to sit on the POS host
+so the nightly job can run unattended. Anyone who takes the host takes both the
+archives and the means to read them, and the encryption has bought nothing
+against the threat it was added for.
+
+With a keypair, this host holds only the public key. It can write backups it
+cannot itself read. Recovery needs the private key, which lives with the owner.
+
+**The owner generates the keypair, on the owner's own machine, and sends only
+the public half.** Not because ATC cannot generate one, but because a private
+key generated here would have to be transmitted to the owner to be useful — and
+secrets that get transmitted get pasted into chat windows and ticket systems.
+The only key material that should ever cross is the half that is safe to
+publish.
+
+On the owner's machine, once:
+
+```sh
+gpg --quick-generate-key "VEXO Connect backups <you@example.com>" rsa4096 encr never
+gpg --armor --export "VEXO Connect backups" > vexo-backup-public.asc   # send this
+gpg --armor --export-secret-keys "VEXO Connect backups" > KEEP-OFFLINE.asc
+```
+
+`KEEP-OFFLINE.asc` and its passphrase go wherever you keep things you cannot
+afford to lose, which is not this server and not an inbox. **If that key is
+lost, every off-host backup is unreadable.** That is the correct behaviour and
+it is also the obvious way to lose everything, so write down where it went.
+
+On the POS host, once:
+
+```sh
+gpg --import vexo-backup-public.asc
+gpg --list-keys                      # note the key ID for the step below
+```
+
+### The procedure
+
+Run after the nightly backup, not instead of it. §2's timer still owns taking
+the dump; this only copies what that produced.
+
+```sh
+#!/bin/sh
+# Ship the newest POS backup off this host. Encrypt, send, verify, then stop.
+set -eu
+
+SRC=/home/atc-noc/atc-backups/pos-prod
+STAGE=/home/atc-noc/atc-backups/outbound
+RECIPIENT='VEXO Connect backups'       # the imported public key
+DEST_USER=''                           # <- owner supplies
+DEST_HOST=''                           # <- owner supplies
+DEST_PATH=''                           # <- owner supplies
+SSH_KEY=/home/atc-noc/.ssh/pos_backup_offhost
+
+[ -n "$DEST_HOST" ] || { echo "no destination configured — see BACKUP-RESTORE.md §8"; exit 2; }
+
+mkdir -p "$STAGE"; chmod 700 "$STAGE"
+
+# Newest dump and its manifest. The manifest is what makes a restored copy
+# checkable, so it travels with the dump, never separately.
+DUMP=$(ls -1t "$SRC"/pos-prod-*.dump | head -1)
+MANIFEST="${DUMP%.dump}.manifest"
+STAMP=$(basename "$DUMP" .dump)
+
+tar -C "$SRC" -cf - "$(basename "$DUMP")" "$(basename "$MANIFEST")" \
+  | gpg --batch --yes --trust-model always --encrypt --recipient "$RECIPIENT" \
+        --output "$STAGE/$STAMP.tar.gpg"
+
+sha256sum "$STAGE/$STAMP.tar.gpg" | awk '{print $1}' > "$STAGE/$STAMP.tar.gpg.sha256"
+
+rsync -a --chmod=F600 -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=yes" \
+  "$STAGE/$STAMP.tar.gpg" "$STAGE/$STAMP.tar.gpg.sha256" \
+  "$DEST_USER@$DEST_HOST:$DEST_PATH/"
+
+# Verify the bytes that arrived, not the bytes that were sent. An rsync that
+# exits 0 has told you the transfer did not error, which is a different claim.
+REMOTE=$(ssh -i "$SSH_KEY" "$DEST_USER@$DEST_HOST" "sha256sum $DEST_PATH/$STAMP.tar.gpg" | awk '{print $1}')
+LOCAL=$(cat "$STAGE/$STAMP.tar.gpg.sha256")
+[ "$REMOTE" = "$LOCAL" ] || { echo "FAIL: off-host copy does not match ($STAMP)"; exit 1; }
+
+rm -f "$STAGE/$STAMP.tar.gpg" "$STAGE/$STAMP.tar.gpg.sha256"
+echo "PASS: $STAMP copied off-host and verified by hash"
+```
+
+Once it has been run by hand successfully, add it to the tail of
+`atc-pos-backup.service` as a second `ExecStart=`, so the copy cannot silently
+drift out of step with the dump it belongs to.
+
+### Proving it, which is the part everyone skips
+
+An off-host copy nobody has ever decrypted is a tar file of unknown value. The
+drill in §4 exists because the same was true of the local dumps. Repeat it for
+the remote ones, **on the owner's machine, with the owner's private key**, and
+make it a calendar item rather than an intention:
+
+```sh
+scp DEST_USER@DEST_HOST:DEST_PATH/pos-prod-YYYYMMDDTHHMMSSZ.tar.gpg .
+gpg --decrypt pos-prod-YYYYMMDDTHHMMSSZ.tar.gpg | tar -xf -
+# then §4's drill against the extracted .dump
+```
+
+The first time this is done, record how long the whole path took — download,
+decrypt, restore, verify. That number is the restore-time objective this project
+does not yet have (§7.3), and it is impossible to guess and easy to measure.
+
+### What is still needed to finish this
+
+Everything below is a decision or a credential that ATC cannot make or create
+on the owner's behalf:
+
+| # | Needed | Why it cannot be decided here |
+|---|---|---|
+| 1 | **Where the backups go** — a host + SSH user + path, or an object-store endpoint + bucket | It is a cost and trust decision about the owner's data |
+| 2 | **Confirmation it is physically elsewhere** | Only the owner knows where their other machines are |
+| 3 | **The GPG public key** (`vexo-backup-public.asc`) | The private half must be generated by, and stay with, the owner |
+| 4 | **An SSH key authorised at the destination**, ideally write-only | Requires access to the destination's `authorized_keys` |
+| 5 | **How many days to retain off-host** | Local policy is 14 days / minimum 3; off-host can afford far longer at this size |
+| 6 | **Whether `.env` should travel too** (encrypted) | §7.4: the dump alone cannot rebuild a running system without those secrets, but it is the owner's call whether a copy of them leaves the host at all |
+
+Item 3 is the one to start with: it is free, takes a minute, and nothing else
+can be tested without it.
