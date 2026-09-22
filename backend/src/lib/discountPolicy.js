@@ -102,24 +102,48 @@ const mergeField = (rows, field) => {
   return null;
 };
 
+// The two ceilings on a discount are one decision, so they resolve together.
+// If the admin wrote either of them, the one they left blank means "no limit
+// from this side" — NOT the deny floor's zero. Falling back per field would
+// turn "cashiers may give 10%" into a 10%-and-also-zero-rupees ceiling: an
+// explicit grant that refuses everything, and reports a ₹0.00 limit nobody
+// typed. The floor still applies in full when the admin has written neither,
+// which is the un-configured state deny-by-default exists for.
+const pickCeilingPair = (rows, pctField, flatField, floorPct, floorFlat) => {
+  const pct = mergeField(rows, pctField);
+  const flat = mergeField(rows, flatField);
+  if (pct === null && flat === null) return [floorPct, floorFlat];
+  return [pct === null ? null : milliOf(pct), flat];
+};
+
 export const mergeDiscountPolicyRows = (rows, role) => {
   const floor = ROLE_FLOOR[role] ?? DENY;
   const pick = (field, floorValue) => {
     const v = mergeField(rows, field);
     return v === null ? floorValue : v;
   };
-  const pickPct = (field, floorValue) => {
-    const v = mergeField(rows, field);
-    return v === null ? floorValue : milliOf(v);
-  };
+  const [maxPctMilli, maxFlatPaise] = pickCeilingPair(
+    rows,
+    'maxPercent',
+    'maxFlatPaise',
+    floor.maxPctMilli,
+    floor.maxFlatPaise,
+  );
+  const [maxApprovalPctMilli, maxApprovalFlatPaise] = pickCeilingPair(
+    rows,
+    'maxApprovalPercent',
+    'maxApprovalFlatPaise',
+    floor.maxApprovalPctMilli,
+    floor.maxApprovalFlatPaise,
+  );
   return {
     allowLineDiscount: pick('allowLineDiscount', floor.allowLineDiscount),
     allowOrderDiscount: pick('allowOrderDiscount', floor.allowOrderDiscount),
-    maxPctMilli: pickPct('maxPercent', floor.maxPctMilli),
-    maxFlatPaise: pick('maxFlatPaise', floor.maxFlatPaise),
+    maxPctMilli,
+    maxFlatPaise,
     canApprove: pick('canApprove', floor.canApprove),
-    maxApprovalPctMilli: pickPct('maxApprovalPercent', floor.maxApprovalPctMilli),
-    maxApprovalFlatPaise: pick('maxApprovalFlatPaise', floor.maxApprovalFlatPaise),
+    maxApprovalPctMilli,
+    maxApprovalFlatPaise,
   };
 };
 
