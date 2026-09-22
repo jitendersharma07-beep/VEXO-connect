@@ -117,7 +117,14 @@ export default function Branches() {
         subtitle={
           user.role === 'BRANCH_MANAGER' || user.role === 'CASHIER'
             ? 'Your account is scoped to a single branch.'
-            : `${activeCount} active of ${data.branchLimit} allowed by your licence`
+            : // No licence on file reaches the client as a 0, and "0 allowed by
+              // your licence" asserts a limit that no licence ever set. The
+              // write path already refuses honestly — "this company has no
+              // licence; ATC must issue one first" — so say the same thing here
+              // rather than inventing a number to blame it on.
+              data.branchLimit > 0
+              ? `${activeCount} active of ${data.branchLimit} allowed by your licence`
+              : `${activeCount} active — no licence on file, so ATC must issue one before a branch can be added`
         }
         actions={
           canManage ? (

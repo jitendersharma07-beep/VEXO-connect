@@ -95,6 +95,23 @@ export default function GatewayReconciliation() {
   const ex = report?.exceptions;
   const sum = report?.summary;
 
+  // With no provider configured AND no gateway rows in range, every figure on
+  // this page would be a zero measuring something that does not exist — and a
+  // grid of zeros beside a green "nothing to chase" tick reads as "the gateway
+  // is reconciled", which is a different claim from "there is no gateway".
+  // Same reasoning the server already applies to signatureFailures, which it
+  // sends as null rather than 0 because unknowable is not none.
+  //
+  // Deliberately not keyed on `configured` alone: a deployment that switches a
+  // provider off still owes the customer every refund raised while it was on,
+  // so any history in range keeps the full report on screen.
+  const nothingToReconcile =
+    report &&
+    !report.gateway.configured &&
+    sum.settledIntents === 0 &&
+    sum.openIntents === 0 &&
+    sum.exceptions === 0;
+
   return (
     <div>
       <PageHeader
@@ -153,8 +170,10 @@ export default function GatewayReconciliation() {
           {!report.gateway.configured ? (
             <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
               No payment provider is configured on this deployment, so every payment is a manual
-              record and there is no gateway traffic to reconcile. This report populates once a
-              provider goes live.
+              record.{' '}
+              {nothingToReconcile
+                ? 'Nothing in this range went through a gateway, so there is nothing to reconcile.'
+                : 'The rows below are gateway history from when a provider was configured. Switching one off does not settle what it still owes.'}
             </div>
           ) : (
             <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
@@ -163,72 +182,82 @@ export default function GatewayReconciliation() {
             </div>
           )}
 
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard
-              icon={BadgeCheck}
-              label="Settled intents"
-              value={sum.settledIntents}
-              hint="provider confirmed these by webhook"
-              accent="green"
+          {nothingToReconcile ? (
+            <EmptyState
+              icon={ListChecks}
+              title="Nothing to reconcile"
+              note="This report fills in once a provider is live and takes its first payment. Until then there are no intents, deliveries or gateway refunds to count, and showing zeros would suggest a gateway had been checked and found clean."
             />
-            <StatCard
-              icon={Timer}
-              label="Open intents"
-              value={sum.openIntents}
-              hint="asked for, not yet answered"
-              accent={sum.openIntents > 0 ? 'orange' : 'slate'}
-            />
-            <StatCard
-              icon={AlertTriangle}
-              label="Exceptions"
-              value={sum.exceptions}
-              hint="rows a human should look at"
-              accent={sum.exceptions > 0 ? 'orange' : 'green'}
-            />
-            <StatCard
-              icon={RotateCcw}
-              label="Refunds awaiting provider"
-              value={sum.refundsAwaitingProvider}
-              hint={`rejected by provider: ${sum.refundsRejectedByProvider}`}
-              accent={sum.refundsAwaitingProvider > 0 ? 'orange' : 'slate'}
-            />
-            {/* Its own card, never folded into the one above: an unconfirmed
-                refund is the state that costs money if it is retried blind. */}
-            <StatCard
-              icon={HelpCircle}
-              label="Refunds unconfirmed"
-              value={sum.refundsUnconfirmedByProvider}
-              hint="sent, no answer — reconcile, never re-refund"
-              accent={sum.refundsUnconfirmedByProvider > 0 ? 'red' : 'slate'}
-            />
-          </div>
+          ) : (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  icon={BadgeCheck}
+                  label="Settled intents"
+                  value={sum.settledIntents}
+                  hint="provider confirmed these by webhook"
+                  accent="green"
+                />
+                <StatCard
+                  icon={Timer}
+                  label="Open intents"
+                  value={sum.openIntents}
+                  hint="asked for, not yet answered"
+                  accent={sum.openIntents > 0 ? 'orange' : 'slate'}
+                />
+                <StatCard
+                  icon={AlertTriangle}
+                  label="Exceptions"
+                  value={sum.exceptions}
+                  hint="rows a human should look at"
+                  accent={sum.exceptions > 0 ? 'orange' : 'green'}
+                />
+                <StatCard
+                  icon={RotateCcw}
+                  label="Refunds awaiting provider"
+                  value={sum.refundsAwaitingProvider}
+                  hint={`rejected by provider: ${sum.refundsRejectedByProvider}`}
+                  accent={sum.refundsAwaitingProvider > 0 ? 'orange' : 'slate'}
+                />
+                {/* Its own card, never folded into the one above: an unconfirmed
+                    refund is the state that costs money if it is retried blind. */}
+                <StatCard
+                  icon={HelpCircle}
+                  label="Refunds unconfirmed"
+                  value={sum.refundsUnconfirmedByProvider}
+                  hint="sent, no answer — reconcile, never re-refund"
+                  accent={sum.refundsUnconfirmedByProvider > 0 ? 'red' : 'slate'}
+                />
+              </div>
 
-          <div className="card mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3 text-sm">
-            <span className="font-semibold text-pos-ink">Signature failures:</span>
-            {sum.signatureFailures === null ? (
-              <span className="text-slate-500">
-                — not attributable to one company; ask ATC for the deployment-wide figure
-              </span>
-            ) : (
-              <span className={sum.signatureFailures > 0 ? 'font-bold text-red-600' : 'text-slate-600'}>
-                {sum.signatureFailures}
-              </span>
-            )}
-            {ex.unprocessedEvents > 0 ? (
-              <span className="font-bold text-red-600">
-                {ex.unprocessedEvents} recorded event{ex.unprocessedEvents === 1 ? '' : 's'} never
-                applied — this should be impossible; contact ATC
-              </span>
-            ) : null}
-          </div>
+              <div className="card mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3 text-sm">
+                <span className="font-semibold text-pos-ink">Signature failures:</span>
+                {sum.signatureFailures === null ? (
+                  <span className="text-slate-500">
+                    — not attributable to one company; ask ATC for the deployment-wide figure
+                  </span>
+                ) : (
+                  <span className={sum.signatureFailures > 0 ? 'font-bold text-red-600' : 'text-slate-600'}>
+                    {sum.signatureFailures}
+                  </span>
+                )}
+                {ex.unprocessedEvents > 0 ? (
+                  <span className="font-bold text-red-600">
+                    {ex.unprocessedEvents} recorded event{ex.unprocessedEvents === 1 ? '' : 's'} never
+                    applied — this should be impossible; contact ATC
+                  </span>
+                ) : null}
+              </div>
 
-          {sum.exceptions === 0 ? (
-            <div className="card mt-4 flex items-center gap-3 border border-emerald-200 bg-emerald-50/50 px-5 py-4 text-sm text-emerald-800">
-              <CheckCircle2 className="h-5 w-5 shrink-0" />
-              Nothing to chase in this range: every settled intent has its payment, no verified
-              delivery was refused, and no refund is waiting on the provider.
-            </div>
-          ) : null}
+              {sum.exceptions === 0 ? (
+                <div className="card mt-4 flex items-center gap-3 border border-emerald-200 bg-emerald-50/50 px-5 py-4 text-sm text-emerald-800">
+                  <CheckCircle2 className="h-5 w-5 shrink-0" />
+                  Nothing to chase in this range: every settled intent has its payment, no verified
+                  delivery was refused, and no refund is waiting on the provider.
+                </div>
+              ) : null}
+            </>
+          )}
 
           {ex.openIntents.length > 0 ? (
             <Section title="Open intents — asked for, never answered" tone="amber">
@@ -455,8 +484,11 @@ export default function GatewayReconciliation() {
             </Section>
           ) : null}
 
-          {/* §13: render the note verbatim */}
-          <p className="mt-4 text-xs leading-relaxed text-slate-500">{report.note}</p>
+          {/* §13: render the note verbatim — it explains signature failures,
+              which only exist on a deployment that has a provider to fail. */}
+          {nothingToReconcile ? null : (
+            <p className="mt-4 text-xs leading-relaxed text-slate-500">{report.note}</p>
+          )}
         </div>
       ) : null}
     </div>

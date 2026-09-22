@@ -12,6 +12,7 @@ import {
   FullScreenSpinner,
   TempPasswordReveal,
 } from '../components/ui.jsx';
+import { fmtDateTime } from '../lib/pos.js';
 
 const ROLES = [
   { value: 'CUSTOMER_OWNER', label: 'Owner — full company access' },
@@ -157,8 +158,12 @@ export default function Team() {
                   <td className="px-4 py-3"><RoleBadge role={u.role} /></td>
                   <td className="px-4 py-3 text-slate-600">{u.branch ? `${u.branch.name} (${u.branch.code})` : '—'}</td>
                   <td className="px-4 py-3"><StatusBadge status={u.status} /></td>
+                  {/* fmtDateTime, not toLocaleString: every other date in the
+                      POS is IST, and a login stamp that silently follows the
+                      till's own timezone is the one you would quote back at
+                      somebody during a dispute. */}
                   <td className="px-4 py-3 text-xs text-slate-500">
-                    {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'Never'}
+                    {u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : 'Never'}
                   </td>
                   <td className="px-4 py-3 text-right">
                     {u.id !== user.id ? (
