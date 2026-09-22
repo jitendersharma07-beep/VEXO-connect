@@ -19,8 +19,8 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Backend commit | `817b438`…`0084936` — `0084936` is frontend-only, so `backend/` is byte-identical across that range and content cannot narrow it further. Proven by tree digest, not by tag: `/app/src` in the running container and `backend/src` in the clean working tree both hash `6b9cbcd3…`. Image `pos-prod-backend:20260922-dayclose-stale` (`b4de17df52df`), container created 15:03 UTC |
-| Frontend commit | **`0084936`**, image `pos-prod-frontend:20260922-dayclose-stale` (`b4e84ea39f19`), container created 15:03 UTC |
+| Backend commit | `817b438`…`0084936` — `0084936` is frontend-only, so `backend/` is byte-identical across that range and content cannot narrow it further. Proven by tree digest, not by tag: `/app/src` in the running container and `backend/src` in the clean working tree both hash `6b9cbcd3…`. Image `pos-prod-backend:20260922-dayclose-stale` (`b4de17df52df`), container created 15:21 UTC |
+| Frontend commit | **`0084936`**, image `pos-prod-frontend:20260922-dayclose-stale` (`b4e84ea39f19`), container created 15:22 UTC |
 | Frontend bundle | `assets/index-BKEWKpgq.js`, sha256 `6989289f…`. Reproduced byte-identical from `0084936` at 15:07 UTC |
 | Rollback tags | `pos-prod-frontend:rollback-20260922-1501` (`173962d8e5f1` — the frontend that was live before 15:03), `pos-prod-backend:rollback-20260922-1501` (`fd5e33f8a045`) |
 | Database migrations applied | 8, unchanged. This deploy carried no migration and the boot log says so: `8 migrations found` then `No pending migrations to apply.` |
@@ -33,16 +33,23 @@ point it was already wrong again: `817b438` + `0084936` had gone out at 15:03,
 and the sentence announcing them as undeployed outlived the deploy by three
 minutes.
 
+A fifth time, differently: at 15:21 the healthchecks were applied, which
+recreated the backend and frontend **containers from the same images**. Both
+image IDs above are unchanged; only the creation timestamps moved. Worth
+noticing, because it is the case a commit-based check cannot see — the running
+service changed and no code did.
+
 So: it is the most perishable thing in this document. Production is redeployed
 by whoever is working on it and the table does not update itself. Treat every
 row as a claim to re-check, and re-check it by **content** — image tags and
 directory names have both lied here already. The reproduce recipe below is the
 check, and it takes about a minute.
 
-**Nothing is outstanding.** Every commit that touches `frontend/` or `backend/`
-is in this build; `git log --oneline 0084936..HEAD` returns only documentation.
+**Nothing is outstanding** — but that is two questions, not one, and git can
+only answer the first.
 
-Do not trust that sentence either. Re-derive it:
+**Is every code change in the image?** Git answers this, because the image was
+built from a commit:
 
 ```sh
 git log --oneline <deployed-commit>..HEAD -- \
@@ -50,14 +57,37 @@ git log --oneline <deployed-commit>..HEAD -- \
 ```
 
 using the commit you just *proved* by rebuild, not the one this table claims.
-Empty output is the only acceptable answer.
+Empty output is the only acceptable answer. It was empty at 15:29 UTC.
 
 **Scope that pathspec deliberately.** `backend/Dockerfile` copies exactly four
 things — `package*.json`, `prisma`, `src`, `scripts` — so `backend/tests/`
-never enters the image. The broader `-- frontend/ backend/` reports a
-test-only commit as an undeployed change, which sends someone into a
-build-and-deploy cycle that cannot alter a single byte of the running
-service. Widen the pathspec only if the Dockerfile widens first.
+never enters the image, and a bare `-- frontend/ backend/` reports a test-only
+commit as an undeployed change. That sends someone into a build-and-deploy
+cycle that cannot alter a single byte of the running service. Widen it only if
+the Dockerfile widens first.
+
+**Is the compose file applied?** Git cannot answer this one, and adding
+`docker-compose.prod.yml` to the pathspec above does not fix it — it makes
+things worse. Applying a compose file records no commit, so `b75b062`, which
+added the healthchecks *after* the deployed image commit, appears in that log
+forever whether or not anyone ran `up -d`. "Empty output is the only
+acceptable answer" stops being reachable, and a check that can never come back
+clean is a check people learn to skip. Ask docker instead:
+
+```sh
+docker compose --dry-run -f docker-compose.prod.yml up -d
+```
+
+Every service `Running` means the file on disk is what is running. Any service
+`Recreate` is drift, and names the service that needs `up -d`. Dry-run mutates
+nothing — checked at 15:28 UTC that all three containers kept their creation
+timestamps and no stray container was left behind.
+
+**That check has been shown capable of failing.** One character in a scratch
+copy of the file — backend healthcheck `interval: 30s` → `31s`, run with
+`--project-directory` pointed back at the repo so `.env` still resolves — made
+it print `Recreate` for the backend alone, with postgres and frontend still
+`Running`. Three green `Running` lines mean nothing without that.
 
 One ordering rule survives, because it will apply again the next time
 `817b438`-shaped work ships: **its two halves are not symmetric.** Backend
@@ -636,6 +666,10 @@ Only if online payment is wanted:
 - Logs: `docker compose -f docker-compose.prod.yml logs backend`.
 - Restart: `docker compose -f docker-compose.prod.yml up -d --no-deps backend`
   — `restart` alone re-runs the old container with the old environment.
+- Config drift: `docker compose --dry-run -f docker-compose.prod.yml up -d`.
+  All `Running` means the running stack matches the file; any `Recreate` names
+  a service whose config was edited but never applied. Read-only. See §1 for
+  why git cannot answer this and for the control that proves the check works.
 - The POS stack is `pos-prod` and publishes only `127.0.0.1:8110`. Nothing here
   touches the other ATCWorkspace services.
 
@@ -647,11 +681,13 @@ Only if online payment is wanted:
 | Docker at boot | `enabled` |
 | Survives reboot | **observed** — Postgres has been up since the host's last boot, not restarted by hand |
 | Health endpoint | `GET /pos/api/health` → 200 |
-| Container healthcheck | **All three**, added `b75b062` and applied 15:26 UTC — `docker ps` reports `(healthy)` for postgres, backend and frontend |
+| Container healthcheck | **All three**, added `b75b062` and applied 15:21 UTC — `docker ps` reports `(healthy)` for postgres, backend and frontend |
 
-That last row was a gap until 15:26 UTC: a node process that has stopped
+That last row was a gap until 15:21 UTC: a node process that has stopped
 accepting requests still reports `Up`, so `docker ps` could not tell a working
-till from a wedged one.
+till from a wedged one. (Timestamp from the container's own creation time, not
+from when the green was noticed a few minutes later — the backend's
+`start_period` is 60s, so `healthy` necessarily lags the deploy.)
 
 **Read the row for exactly what it claims.** Compose does *not* restart a
 container for failing its healthcheck — that needs a watchdog nobody has
