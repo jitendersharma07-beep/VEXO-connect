@@ -913,4 +913,77 @@ describe('daily closing', () => {
     expect(p.expectedCashDelta).toBeCloseTo(start.expectedCashDelta, 2);
     expect(p.cashTaken).toBeCloseTo(start.cashTaken, 2);
   });
+
+  // The refund half of postCloseFor had no test until this one, and it is the
+  // half where being wrong costs money in a specific direction:
+  // expectedCashDelta is `cashTaken - cashRefunded`, so flipping that one
+  // operator reports the drawer as UP after cash was handed back, and sends a
+  // manager hunting for money that was paid out. The screens render whatever
+  // this returns, and the render harness feeds itself a fixture — so nothing
+  // else in the project would catch it.
+  //
+  // Every assertion is a DELTA against the step before it. Two earlier tests
+  // in this block have already left activity on this day, so an absolute
+  // figure here would be asserting the fixture rather than the behaviour.
+  it('a refund after the count moves the drawer DOWN, and only a settled one counts', async () => {
+    const pc = async () => (await preview(tokens.managerA1)).body.existingClose.postClose;
+    const manager = await prisma.posUser.findUnique({ where: { email: 'manager.a1@test.local' } });
+
+    const o = await request(app).post('/api/orders').set(auth(tokens.cashierA1))
+      .send({ type: 'TAKEAWAY', items: [{ productId: cat.cappuccino, qty: 1 }] });
+    const orderId = o.body.order.id;
+    await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
+    const paid = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashierA1)).send({ method: 'CASH', tendered: 1000 });
+    expect(paid.status, JSON.stringify(paid.body)).toBe(201);
+    const took = Number(paid.body.payment.amount);
+    const afterPay = await pc();
+
+    // 1. Cash handed back across the counter.
+    const back = 40;
+    expect(took).toBeGreaterThan(back);
+    const refunded = await request(app).post(`/api/orders/${orderId}/refunds`)
+      .set(auth(tokens.managerA1)).send({ amount: back, reason: 'spilled the cup' });
+    expect(refunded.status, JSON.stringify(refunded.body)).toBe(201);
+    const afterRefund = await pc();
+
+    expect(afterRefund.refunds).toBe(afterPay.refunds + 1);
+    expect(afterRefund.cashRefunded).toBeCloseTo(afterPay.cashRefunded + back, 2);
+    // The sign, stated twice on purpose: once as an exact figure, once as a
+    // direction. The exact form alone would still pass if both sides were
+    // negated together.
+    expect(afterRefund.expectedCashDelta).toBeCloseTo(afterPay.expectedCashDelta - back, 2);
+    expect(afterRefund.expectedCashDelta).toBeLessThan(afterPay.expectedCashDelta);
+    // Money taken and money returned are separate figures. A refund must not
+    // quietly reduce takings — the day still sold what it sold.
+    expect(afterRefund.cashTaken).toBeCloseTo(afterPay.cashTaken, 2);
+
+    // 2. A gateway refund returns money that was never in this drawer. It is
+    //    real activity, so it counts, but it must not move a cash figure.
+    await prisma.refund.create({
+      data: {
+        orderId, amount: '30.00', reason: 'reversed at the provider', channel: 'GATEWAY',
+        status: 'SUCCEEDED', byId: manager.id, providerRef: `rfnd_post_${Date.now()}`,
+      },
+    });
+    const afterGateway = await pc();
+    expect(afterGateway.refunds).toBe(afterRefund.refunds + 1);
+    expect(afterGateway.cashRefunded).toBeCloseTo(afterRefund.cashRefunded, 2);
+    expect(afterGateway.expectedCashDelta).toBeCloseTo(afterRefund.expectedCashDelta, 2);
+
+    // 3. A PENDING refund is a request the provider has not honoured yet.
+    //    schema.prisma says in prose that such a row "must never be shown,
+    //    totalled or reported as money returned". This is the line that makes
+    //    that prose enforceable: nothing may move, not even the count.
+    await prisma.refund.create({
+      data: {
+        orderId, amount: '25.00', reason: 'awaiting the provider', channel: 'GATEWAY',
+        status: 'PENDING', byId: manager.id,
+      },
+    });
+    const afterPending = await pc();
+    expect(afterPending.refunds).toBe(afterGateway.refunds);
+    expect(afterPending.cashRefunded).toBeCloseTo(afterGateway.cashRefunded, 2);
+    expect(afterPending.expectedCashDelta).toBeCloseTo(afterGateway.expectedCashDelta, 2);
+  });
 });

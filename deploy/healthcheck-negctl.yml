@@ -1,0 +1,47 @@
+# Negative control for the pos-prod backend healthcheck.
+#
+# Why this file exists: a healthcheck that has never gone red is decoration.
+# `docker ps` showing (healthy) proves the probe ran and exited 0 — it does
+# NOT prove the probe is capable of exiting 1. A probe calling a binary the
+# image lacks, or one that swallows its own error, reports healthy forever.
+#
+# So this runs the SAME image with the SAME probe script and exactly one
+# difference: it points at port 5999, where nothing listens. The container
+# must go `unhealthy`. If it reports healthy, the probe in
+# docker-compose.prod.yml means nothing and must be fixed.
+#
+#   docker compose -f deploy/healthcheck-negctl.yml up -d
+#   docker inspect -f '{{.State.Health.Status}}' pos-healthcheck-negctl-deadport-1
+#   docker compose -f deploy/healthcheck-negctl.yml down
+#
+# Expect `starting` for a second or two, then `unhealthy`. Measured
+# 2026-09-22: unhealthy, exit code 1 on both retries, while the production
+# backend on the same image reported healthy.
+#
+# Safety: its own project name, no ports, no volumes, no env_file. It cannot
+# reach the pos-prod stack or its database. `entrypoint: sleep` replaces the
+# real command, so it never runs a migration or opens a database connection.
+#
+# Keep the `test:` block byte-identical to the backend healthcheck in
+# docker-compose.prod.yml. If they drift, this stops being a control and
+# becomes a test of a probe nothing uses. Update the image tag below to
+# whatever is current — `docker image ls | grep pos-prod-backend`.
+name: pos-healthcheck-negctl
+
+services:
+  deadport:
+    image: pos-prod-backend:20260922-dayclose-stale
+    entrypoint: ["sleep", "180"]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const r = require('http').get('http://127.0.0.1:5999/api/health', { timeout: 4000 }, (s) => process.exit(s.statusCode === 200 ? 0 : 1));
+          r.on('error', () => process.exit(1));
+          r.on('timeout', () => { r.destroy(); process.exit(1); });
+      interval: 5s
+      timeout: 4s
+      retries: 2
+      start_period: 1s

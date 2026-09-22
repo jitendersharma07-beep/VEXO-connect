@@ -36,6 +36,35 @@ services:
       postgres:
         condition: service_healthy
     command: sh -c "npx prisma migrate deploy && node src/index.js"
+    # Answers "is it actually serving?", which `docker ps` alone cannot: a
+    # node process that has stopped accepting requests still reports Up.
+    #
+    # It probes through the app's own route, so it exercises the same stack a
+    # cashier does. It deliberately does NOT touch the database — postgres has
+    # its own healthcheck, and a check that fails for two different reasons
+    # cannot tell you which one happened.
+    #
+    # `node -e` rather than curl or wget: node:20-bookworm-slim ships neither
+    # (verified in the running container, not assumed), and a healthcheck
+    # calling a binary the image lacks reports unhealthy forever — a fault
+    # that looks exactly like the fault it was added to detect.
+    #
+    # start_period covers `prisma migrate deploy`, which runs before the
+    # listener exists; without it the container reports unhealthy on every
+    # boot until the migration finishes.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const r = require('http').get('http://127.0.0.1:5000/api/health', { timeout: 4000 }, (s) => process.exit(s.statusCode === 200 ? 0 : 1));
+          r.on('error', () => process.exit(1));
+          r.on('timeout', () => { r.destroy(); process.exit(1); });
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   frontend:
     build:
@@ -51,7 +80,19 @@ services:
       # Loopback only: the host nginx is the sole way in.
       - "127.0.0.1:${HTTP_PORT:-8110}:80"
     depends_on:
+      # Start order only, deliberately NOT service_healthy. If the backend is
+      # broken, a served UI saying it cannot reach the server is far easier to
+      # diagnose than a refused connection on 8110 — which looks identical to
+      # the whole host being down.
       - backend
+    # nginx:1.27-alpine has wget (busybox) and no node, so this one is the
+    # mirror image of the backend's. Checked in the running container.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   pos_pgdata:
