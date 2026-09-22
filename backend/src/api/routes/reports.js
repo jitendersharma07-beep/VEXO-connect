@@ -522,6 +522,117 @@ const dayFigures = async (companyId, branchId, businessDate) => {
   };
 };
 
+// What happened on a day AFTER someone declared it closed.
+//
+// A closing is a snapshot taken at a moment; the business day runs to midnight
+// IST regardless. So money taken between the count and midnight lands on a day
+// that has already been reconciled, and the stored figures — which are frozen
+// on purpose, and should be — quietly stop describing the day they name.
+//
+// The tempting fix is to refuse the write. That is the wrong instinct for a
+// till: a cashier who cannot record the payment standing in front of them will
+// take the cash anyway and not record it, and unrecorded cash is far worse than
+// a stale report. So nothing here blocks anything. The closing is simply made
+// to say when it stopped being true, which is the part that was missing.
+//
+// Derived by comparing timestamps against `closedAt`, so it needs no column, no
+// migration, and no change to any write path — and it is correct for closings
+// that were filed before this code existed.
+//
+// Takes all the closings at once and issues three queries for the lot. The
+// history endpoint returns up to 500 rows, and per-row queries would be 1500.
+const postCloseFor = async (companyId, closings) => {
+  const byId = new Map();
+  if (!closings.length) return byId;
+
+  const dates = closings.map((c) => c.businessDate).sort();
+  const fromUtc = istDayStartUtc(dates[0]);
+  const toExcl = new Date(istDayStartUtc(dates[dates.length - 1]).getTime() + 86400e3);
+  const window = { gte: fromUtc, lt: toExcl };
+  const branchIds = [...new Set(closings.map((c) => c.branchId))];
+  const orderScope = { companyId, branchId: { in: branchIds } };
+
+  const [payments, refunds, billed] = await Promise.all([
+    prisma.payment.findMany({
+      where: { createdAt: window, order: orderScope },
+      select: { createdAt: true, amount: true, method: true, channel: true, order: { select: { branchId: true } } },
+    }),
+    prisma.refund.findMany({
+      where: { createdAt: window, status: 'SUCCEEDED', order: orderScope },
+      select: { createdAt: true, amount: true, channel: true, order: { select: { branchId: true } } },
+    }),
+    prisma.order.findMany({
+      where: { ...orderScope, billedAt: window },
+      select: { billedAt: true, branchId: true },
+    }),
+  ]);
+
+  // Bucket by the same (branch, IST day) key the closing is filed under, so a
+  // payment at 23:55 counts against the evening it was taken.
+  const bucket = new Map();
+  const put = (branchId, at, kind, row) => {
+    const key = `${branchId}|${istDateOf(at)}`;
+    if (!bucket.has(key)) bucket.set(key, { payments: [], refunds: [], billed: [] });
+    bucket.get(key)[kind].push(row);
+  };
+  for (const p of payments) put(p.order.branchId, p.createdAt, 'payments', p);
+  for (const r of refunds) put(r.order.branchId, r.createdAt, 'refunds', r);
+  for (const o of billed) put(o.branchId, o.billedAt, 'billed', o);
+
+  for (const c of closings) {
+    const b = bucket.get(`${c.branchId}|${c.businessDate}`);
+    if (!b) continue;
+    const after = (at) => at > c.closedAt;
+
+    let cashPaise = 0;
+    let nonCashPaise = 0;
+    let latest = null;
+    let paymentCount = 0;
+    for (const p of b.payments) {
+      if (!after(p.createdAt)) continue;
+      paymentCount += 1;
+      const amount = paiseOf(p.amount);
+      // Same channel-before-method rule as dayFigures: a GATEWAY payment never
+      // touched this drawer, whatever method it claims.
+      if (p.channel === 'GATEWAY' || p.method !== 'CASH') nonCashPaise += amount;
+      else cashPaise += amount;
+      if (!latest || p.createdAt > latest) latest = p.createdAt;
+    }
+
+    let cashRefundsPaise = 0;
+    let refundCount = 0;
+    for (const r of b.refunds) {
+      if (!after(r.createdAt)) continue;
+      refundCount += 1;
+      if (r.channel !== 'GATEWAY') cashRefundsPaise += paiseOf(r.amount);
+      if (!latest || r.createdAt > latest) latest = r.createdAt;
+    }
+
+    let ordersBilled = 0;
+    for (const o of b.billed) {
+      if (!after(o.billedAt)) continue;
+      ordersBilled += 1;
+      if (!latest || o.billedAt > latest) latest = o.billedAt;
+    }
+
+    if (!paymentCount && !refundCount && !ordersBilled) continue;
+    byId.set(c.id, {
+      payments: paymentCount,
+      refunds: refundCount,
+      ordersBilled,
+      // The one number a person acts on: how far the drawer is now from what
+      // this closing said it should hold. Everything else is context for it.
+      expectedCashDelta: toRupees(cashPaise - cashRefundsPaise),
+      cashTaken: toRupees(cashPaise),
+      cashRefunded: toRupees(cashRefundsPaise),
+      nonCashTaken: toRupees(nonCashPaise),
+      lastAt: latest,
+    });
+  }
+
+  return byId;
+};
+
 const publicClose = (c) => ({
   id: c.id,
   businessDate: c.businessDate,
@@ -590,7 +701,9 @@ router.get(
       // Present if the day already has one. The UI uses this to make a second
       // closing an explicit correction rather than something that happens by
       // accident to someone who pressed the button twice.
-      existingClose: existing ? publicClose(existing) : null,
+      existingClose: existing
+        ? { ...publicClose(existing), postClose: (await postCloseFor(req.companyScope.id, [existing])).get(existing.id) ?? null }
+        : null,
     });
   }),
 );
@@ -740,13 +853,30 @@ router.get(
     // relation rather than a flag, so it cannot fall out of step with it.
     const visible = query.includeSuperseded === 'true' ? rows : rows.filter((r) => !r.correctedBy);
 
+    // Only for rows nothing has corrected. A superseded closing is already
+    // flagged as replaced, and telling an owner that a record they can see has
+    // been overtaken is noise twice over.
+    const live = visible.filter((r) => !r.correctedBy);
+    const post = await postCloseFor(req.companyScope.id, live);
+
+    const closes = visible.map((c) => ({
+      ...publicClose(c),
+      superseded: Boolean(c.correctedBy),
+      postClose: post.get(c.id) ?? null,
+    }));
+
     res.json({
-      closes: visible.map((c) => ({ ...publicClose(c), superseded: Boolean(c.correctedBy) })),
+      closes,
       totals: {
         days: new Set(visible.map((c) => `${c.branchId}|${c.businessDate}`)).size,
         variance: toRupees(visible.reduce((a, c) => a + c.variancePaise, 0)),
         shortDays: visible.filter((c) => c.variancePaise < 0).length,
         overDays: visible.filter((c) => c.variancePaise > 0).length,
+        // Counted separately from variance on purpose. A day with post-close
+        // activity has a variance figure that no longer describes the drawer,
+        // so rolling the two together would average a known number with a
+        // stale one and report the result as if it were measured.
+        staleDays: closes.filter((c) => c.postClose).length,
       },
     });
   }),

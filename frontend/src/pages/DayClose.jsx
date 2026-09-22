@@ -12,7 +12,7 @@ import api, { apiError } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { EmptyState, ErrorNote, PageHeader, StatCard } from '../components/ui.jsx';
 import { useToast } from '../components/toast.jsx';
-import { fmtDateTime, fmtINR, getAtcScope, isAtc, istDaysAgo, istToday } from '../lib/pos.js';
+import { fmtDateTime, fmtINR, fmtTime, getAtcScope, isAtc, istDaysAgo, istToday } from '../lib/pos.js';
 
 // /reports/day-close — the end-of-day cash count.
 //
@@ -40,6 +40,70 @@ const variancePhrase = (v) => {
   if (v === 0) return 'balances exactly';
   return v > 0 ? `${fmtINR(Math.abs(v))} MORE than expected` : `${fmtINR(Math.abs(v))} SHORT`;
 };
+
+const countPhrase = (n, one, many) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
+
+// "3 payments, 1 refund and 2 bills" — a comma before the last item reads like
+// a truncated list in a warning box, which is the one place a reader must not
+// wonder whether they have seen everything.
+const listPhrase = (parts) =>
+  parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+
+// Shown when money landed on a day that had already been counted.
+//
+// A closing is a snapshot; the day runs to midnight IST whatever anyone
+// declared. Nothing stops a late payment being recorded — refusing it would
+// only teach a cashier to take the cash and keep it out of the system — so the
+// job of this banner is to make sure the stale closing cannot be mistaken for
+// a current one, and to say exactly how far out it now is.
+function PostCloseNotice({ existing }) {
+  const pc = existing?.postClose;
+  if (!pc) return null;
+
+  const parts = [];
+  if (pc.payments) parts.push(countPhrase(pc.payments, 'payment', 'payments'));
+  if (pc.refunds) parts.push(countPhrase(pc.refunds, 'refund', 'refunds'));
+  if (pc.ordersBilled) parts.push(countPhrase(pc.ordersBilled, 'bill', 'bills'));
+  const delta = pc.expectedCashDelta;
+
+  return (
+    <div className="card mt-4 flex items-start gap-3 border-l-4 border-pos-orange px-5 py-3">
+      <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-pos-ember" />
+      <div className="text-sm text-slate-700">
+        <p>
+          <strong>This day was counted, and then more was recorded on it.</strong>{' '}
+          {existing.closedBy?.fullName || 'Someone'} closed it at {fmtDateTime(existing.closedAt)}.
+          Since then {listPhrase(parts)} {parts.length === 1 && parts[0].startsWith('1 ') ? 'has' : 'have'} been
+          recorded against {existing.businessDate}, the last at {fmtTime(pc.lastAt)}.
+          {/* Time only, not a second full date: everything counted here is on
+              that business day by construction, and printing "2026-09-22 …
+              22 Sept 2026" in one sentence makes a reader stop and compare
+              two dates that cannot differ. */}
+        </p>
+        <p className="mt-1">
+          {delta === 0 ? (
+            <>
+              None of it was cash, so the drawer itself is unchanged — but the closing’s sales figures
+              no longer match the day.
+            </>
+          ) : (
+            <>
+              The drawer should now hold <strong>{fmtINR(Math.abs(delta))} {delta > 0 ? 'more' : 'less'}</strong>{' '}
+              than that closing says.
+            </>
+          )}
+          {pc.nonCashTaken ? (
+            <> {fmtINR(pc.nonCashTaken)} of it was card, UPI or online and never entered the drawer.</>
+          ) : null}
+        </p>
+        <p className="mt-1 text-slate-500">
+          The figures at the top of this page already include it — they are recomputed, while a filed
+          closing is frozen on purpose. Recount and file a correction to bring the record up to date.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 export default function DayClose() {
   const { user } = useAuth();
@@ -236,6 +300,11 @@ export default function DayClose() {
               accent={preview.openOrders ? 'orange' : 'slate'}
             />
           </div>
+
+          {/* Above the open-orders note deliberately: an open table is normal
+              and expected, whereas a closing that has silently stopped being
+              true is the thing a person needs to see first. */}
+          <PostCloseNotice existing={existing} />
 
           {preview.openOrders ? (
             <div className="card mt-4 flex items-start gap-3 border-l-4 border-pos-orange px-5 py-3">

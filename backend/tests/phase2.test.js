@@ -833,4 +833,84 @@ describe('daily closing', () => {
     expect(res.status).toBe(400);
     expect(res.body.error.field).toBe('date');
   });
+
+  // A closing is a snapshot taken at a moment; the IST day runs to midnight
+  // regardless. So money taken after the count lands on a day already
+  // declared, and because the stored figures are frozen on purpose, the
+  // closing quietly stops describing its own day.
+  //
+  // Nothing below is blocked. Refusing a payment at 22:05 teaches a cashier to
+  // take the cash and not record it, and unrecorded cash is the worse failure
+  // by a distance. The closing is only made to say what happened after it.
+  it('a closing says when money landed on the day after it was counted', async () => {
+    // Negative control FIRST, and it is the whole reason this test is worth
+    // anything: the correction filed above is the current closing and nothing
+    // has happened since, so a clean day must report nothing. Without it,
+    // "postClose is present" would pass for code that always reports activity.
+    const before = (await preview(tokens.managerA1)).body.existingClose;
+    expect(before).toBeTruthy();
+    expect(before.postClose).toBe(null);
+    const quiet = await request(app).get(`/api/reports/day-close?from=${today}&to=${today}`)
+      .set(auth(tokens.managerA1));
+    expect(quiet.body.closes[0].postClose).toBe(null);
+    expect(quiet.body.totals.staleDays).toBe(0);
+
+    // Now take cash after the count, the way a late customer does.
+    const o = await request(app).post('/api/orders').set(auth(tokens.cashierA1))
+      .send({ type: 'TAKEAWAY', items: [{ productId: cat.cappuccino, qty: 1 }] });
+    const orderId = o.body.order.id;
+    const billed = await request(app).post(`/api/orders/${orderId}/bill`)
+      .set(auth(tokens.cashierA1)).send({});
+    expect(billed.status, JSON.stringify(billed.body)).toBe(200);
+    const paid = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashierA1)).send({ method: 'CASH', tendered: 1000 });
+    expect(paid.status, JSON.stringify(paid.body)).toBe(201);
+    const took = Number(paid.body.payment.amount);
+    expect(took).toBeGreaterThan(0);
+
+    const after = (await preview(tokens.managerA1)).body.existingClose;
+    expect(after.postClose).toBeTruthy();
+    expect(after.postClose.payments).toBe(1);
+    expect(after.postClose.ordersBilled).toBe(1);
+    // The number a person acts on: the drawer now holds this much more than
+    // the filed closing says it should.
+    expect(after.postClose.expectedCashDelta).toBeCloseTo(took, 2);
+    expect(after.postClose.cashTaken).toBeCloseTo(took, 2);
+    expect(new Date(after.postClose.lastAt).getTime())
+      .toBeGreaterThan(new Date(after.closedAt).getTime());
+
+    // The filed record itself must NOT have moved. Freezing the figures is the
+    // whole point of a closing — if these drifted, the correction trail would
+    // be rewriting history rather than recording it, and this check is what
+    // separates "reported the drift" from "absorbed the drift".
+    expect(after.expectedCash).toBeCloseTo(before.expectedCash, 2);
+    expect(after.variance).toBeCloseTo(before.variance, 2);
+    expect(after.id).toBe(before.id);
+
+    const stale = await request(app).get(`/api/reports/day-close?from=${today}&to=${today}`)
+      .set(auth(tokens.managerA1));
+    expect(stale.body.totals.staleDays).toBe(1);
+  });
+
+  it('a gateway payment after the count does not move the expected drawer', async () => {
+    // The channel-before-method rule, which dayFigures already guards. This
+    // code repeats that rule in a second place, and a rule stated twice is a
+    // rule that can disagree with itself — so it needs its own check. Getting
+    // it wrong here would tell a manager to find card money in the till.
+    const start = (await preview(tokens.managerA1)).body.existingClose.postClose;
+    const o = await request(app).post('/api/orders').set(auth(tokens.cashierA1))
+      .send({ type: 'TAKEAWAY', items: [{ productId: cat.cappuccino, qty: 1 }] });
+    const orderId = o.body.order.id;
+    await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
+    await prisma.payment.create({
+      data: { orderId, method: 'CARD', channel: 'GATEWAY', amount: '250.00', providerRef: `pay_post_${Date.now()}` },
+    });
+
+    const p = (await preview(tokens.managerA1)).body.existingClose.postClose;
+    expect(p.payments).toBe(start.payments + 1);
+    expect(p.nonCashTaken).toBeCloseTo(start.nonCashTaken + 250, 2);
+    // The drawer is untouched: this money never entered it.
+    expect(p.expectedCashDelta).toBeCloseTo(start.expectedCashDelta, 2);
+    expect(p.cashTaken).toBeCloseTo(start.cashTaken, 2);
+  });
 });
