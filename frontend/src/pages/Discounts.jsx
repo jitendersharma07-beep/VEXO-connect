@@ -42,6 +42,24 @@ const ceilingText = (e) => {
   return e.ceiling || '—';
 };
 
+// The headline figure for a scope that has been configured. A percent and an
+// amount are independent: either, both, or neither may be set.
+//
+// "Neither" is the case worth being careful about, because the obvious way to
+// write this — default the percent to 0 and print it — renders a policy of
+// "₹250, no percent limit" as "0%", i.e. as though nothing were allowed at
+// all. That is the same mistake as reading a blank ceiling box as a ceiling of
+// zero, which is what b23b7ea fixed on the server; it should not survive on
+// the screen. An unset pair is not zero, it is unbounded.
+const scopeCeiling = (p) => {
+  if (!p) return 'Not set';
+  const bits = [];
+  if (p.maxPercent !== null && p.maxPercent !== undefined) bits.push(pctText(p.maxPercent * 1000));
+  if (p.maxFlatPaise !== null && p.maxFlatPaise !== undefined) bits.push(fmtINR(p.maxFlatPaise / 100));
+  if (bits.length) return bits.join(' / ');
+  return p.allowLineDiscount || p.allowOrderDiscount ? 'No limit' : 'No discounts';
+};
+
 const TriState = ({ id, label, value, onChange, hint }) => (
   <div>
     <label className="label" htmlFor={id}>
@@ -385,7 +403,7 @@ export default function Discounts() {
         <StatCard
           icon={BadgePercent}
           label="Company default"
-          value={byScope.company ? pctText((byScope.company.maxPercent ?? 0) * 1000) || '—' : 'Not set'}
+          value={scopeCeiling(byScope.company)}
           hint={byScope.company ? summarise(byScope.company) : 'Nothing is allowed until this is set'}
           accent={byScope.company ? 'orange' : 'slate'}
         />
