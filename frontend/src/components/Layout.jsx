@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Armchair,
@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   ListChecks,
   LogOut,
+  Menu,
   Package,
   ReceiptText,
   ScrollText,
@@ -26,20 +27,117 @@ import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
 
+// min-h-[44px]: these were the last controls in the app still under the WCAG
+// 2.5.5 floor (208x40). The sidebar is the one surface a manager uses on a
+// tablet while standing, so it gets the same floor as the till screen.
 function NavItem({ to, icon: Icon, label, end = false }) {
   return (
     <NavLink
       to={to}
       end={end}
       className={({ isActive }) =>
-        `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition-colors ${
+        `flex min-h-[44px] items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition-colors ${
           isActive ? 'bg-white/10 text-white' : 'text-blue-200 hover:bg-white/5 hover:text-white'
         }`
       }
     >
-      <Icon className="h-5 w-5" />
+      <Icon className="h-5 w-5 shrink-0" />
       {label}
     </NavLink>
+  );
+}
+
+// The ONE definition of the navigation tree.
+//
+// It is rendered twice — in the md+ sidebar and in the below-md drawer — and
+// that is exactly why it is a component rather than copied markup. Every
+// branch below is a permission decision (canSell, canSeeReports, isOwner,
+// atcScope). A second hand-maintained copy would drift, and the way it drifts
+// is that the drawer shows a cashier the owner's links. Render this; never
+// retype it.
+function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
+  return (
+    <nav className="mt-8 flex-1 space-y-1 overflow-y-auto">
+      {isAtc ? (
+        <>
+          <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+            VEXO Console
+          </div>
+          <NavItem to="/atc/companies" icon={Building2} label="Companies" />
+          {atcScope ? (
+            <>
+              <div className="mt-4 flex items-center justify-between gap-1 px-3 pb-1">
+                <span className="truncate text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                  POS · {atcScope.name || 'company'}
+                </span>
+                <button
+                  type="button"
+                  className="-mr-2 flex h-11 w-11 shrink-0 items-center justify-center rounded text-blue-300/60 hover:bg-white/10 hover:text-white"
+                  title="Exit company view"
+                  aria-label="Exit company view"
+                  onClick={onExitAtcScope}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+              <NavItem to="/catalog" icon={Package} label="Catalog" />
+              <NavItem to="/tables" icon={Armchair} label="Tables" />
+              <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+              <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
+              <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
+              <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
+            </>
+          ) : null}
+        </>
+      ) : (
+        <>
+          {canSell(user) ? (
+            <>
+              <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                Point of Sale
+              </div>
+              <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
+              <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+              {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
+              {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
+              {canSeeReports(user) ? (
+                <>
+                  <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                  <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
+                  <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
+                  <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
+                </>
+              ) : null}
+              <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                Manage
+              </div>
+            </>
+          ) : null}
+          <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" end />
+          <NavItem to="/branches" icon={Store} label="Branches" />
+          {isOwner ? <NavItem to="/team" icon={Users} label="Team" /> : null}
+          {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
+        </>
+      )}
+    </nav>
+  );
+}
+
+// The payment-channel note. Rendered beside the nav in both mounts so the
+// drawer carries the same standing statement the sidebar does.
+function SidebarNote() {
+  return (
+    <div className="mt-4 shrink-0 rounded-lg bg-white/5 p-3 text-[11px] leading-relaxed text-blue-200">
+      <div className="flex items-center gap-1.5 font-bold text-white">
+        <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> VEXO Connect
+      </div>
+      {/* States the rule, never a count. Both channels coexist, so any
+          sentence beginning "all payments..." is wrong the moment one
+          order is settled the other way. */}
+      Every payment shows how it was taken — recorded by staff, or confirmed by the payment
+      provider.
+    </div>
   );
 }
 
@@ -115,6 +213,33 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [pwOpen, setPwOpen] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Close the drawer whenever the route changes. Without this, tapping a link
+  // navigates the page underneath and leaves the drawer covering it, which
+  // reads as "the tap did nothing" and invites a second tap.
+  useEffect(() => {
+    setNavOpen(false);
+  }, [location.pathname]);
+
+  // Escape closes it too — and if the viewport grows past md the drawer must
+  // go, or it sits on top of the sidebar that just reappeared.
+  useEffect(() => {
+    if (!navOpen) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setNavOpen(false);
+    };
+    const mq = window.matchMedia('(min-width: 768px)');
+    const onWide = (e) => {
+      if (e.matches) setNavOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    mq.addEventListener('change', onWide);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      mq.removeEventListener('change', onWide);
+    };
+  }, [navOpen]);
 
   const isAtc = user.role === 'POS_SUPER_ADMIN';
   const isOwner = user.role === 'CUSTOMER_OWNER';
@@ -132,89 +257,65 @@ export default function Layout() {
     navigate('/atc/companies');
   };
 
+  const navProps = { user, isAtc, isOwner, atcScope, onExitAtcScope: exitAtcScope };
+
   return (
     <div className="flex min-h-screen">
       <aside className="hidden w-60 flex-col bg-pos-deep px-4 py-5 md:flex">
         <Logo dark className="px-2" />
-        <nav className="mt-8 flex-1 space-y-1">
-          {isAtc ? (
-            <>
-              <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
-                VEXO Console
-              </div>
-              <NavItem to="/atc/companies" icon={Building2} label="Companies" />
-              {atcScope ? (
-                <>
-                  <div className="mt-4 flex items-center justify-between px-3 pb-1">
-                    <span className="truncate text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
-                      POS · {atcScope.name || 'company'}
-                    </span>
-                    <button
-                      type="button"
-                      className="rounded p-0.5 text-blue-300/60 hover:bg-white/10 hover:text-white"
-                      title="Exit company view"
-                      onClick={exitAtcScope}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                  <NavItem to="/orders" icon={ReceiptText} label="Orders" />
-                  <NavItem to="/catalog" icon={Package} label="Catalog" />
-                  <NavItem to="/tables" icon={Armchair} label="Tables" />
-                  <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
-                  <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
-                  <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
-                  <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
-                </>
-              ) : null}
-            </>
-          ) : (
-            <>
-              {canSell(user) ? (
-                <>
-                  <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
-                    Point of Sale
-                  </div>
-                  <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
-                  <NavItem to="/orders" icon={ReceiptText} label="Orders" />
-                  {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
-                  {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
-                  {canSeeReports(user) ? (
-                    <>
-                      <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
-                      <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
-                      <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
-                      <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
-                    </>
-                  ) : null}
-                  <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
-                    Manage
-                  </div>
-                </>
-              ) : null}
-              <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" end />
-              <NavItem to="/branches" icon={Store} label="Branches" />
-              {isOwner ? <NavItem to="/team" icon={Users} label="Team" /> : null}
-              {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
-            </>
-          )}
-        </nav>
-        <div className="rounded-lg bg-white/5 p-3 text-[11px] leading-relaxed text-blue-200">
-          <div className="flex items-center gap-1.5 font-bold text-white">
-            <ShieldCheck className="h-3.5 w-3.5 text-pos-orange" /> VEXO Connect
-          </div>
-          {/* States the rule, never a count. Both channels coexist, so any
-              sentence beginning "all payments..." is wrong the moment one
-              order is settled the other way. */}
-          Every payment shows how it was taken — recorded by staff, or confirmed by the payment
-          provider.
-        </div>
+        <SidebarBody {...navProps} />
+        <SidebarNote />
       </aside>
+
+      {/* Below md the sidebar is hidden, and until now nothing replaced it:
+          on a phone-width screen the operator had no way to leave the page
+          they landed on. This drawer is that replacement. It renders the same
+          SidebarBody the sidebar does, so it cannot show a link the user's
+          role would not have been given. */}
+      {navOpen ? (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 h-full w-full cursor-default bg-pos-deep/60 backdrop-blur-sm"
+            aria-label="Close navigation"
+            onClick={() => setNavOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Navigation"
+            className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col bg-pos-deep px-4 py-5 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <Logo dark className="px-2" />
+              <button
+                type="button"
+                className="-mr-2 -mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-blue-200 hover:bg-white/10 hover:text-white"
+                aria-label="Close navigation"
+                onClick={() => setNavOpen(false)}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <SidebarBody {...navProps} />
+            <SidebarNote />
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
           <div className="flex items-center justify-between gap-4 px-4 py-3 md:px-6">
             <div className="flex min-w-0 items-center gap-3">
+              <button
+                type="button"
+                className="-ml-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 md:hidden"
+                aria-label="Open navigation"
+                aria-expanded={navOpen}
+                onClick={() => setNavOpen(true)}
+              >
+                <Menu className="h-6 w-6" />
+              </button>
               <div className="md:hidden">
                 <Logo />
               </div>
@@ -239,17 +340,36 @@ export default function Layout() {
                 ) : null}
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="hidden text-right sm:block">
+            {/* lg, not sm. At exactly 768px the sidebar has just appeared and
+                the company block with it, so the old sm: breakpoints put the
+                user's name and the word "Sign out" into a bar that no longer
+                had room: the company name truncated to "Brew Stree…" and the
+                button wrapped onto two lines. Both are decoration — the name
+                is on every screen the user opens and the button keeps its
+                icon, its title and its aria-label. */}
+            <div className="flex shrink-0 items-center gap-2">
+              <div className="hidden text-right lg:block">
                 <div className="text-sm font-semibold text-pos-ink">{user.fullName}</div>
                 <RoleBadge role={user.role} />
               </div>
-              <button type="button" onClick={() => setPwOpen(true)} className="btn-ghost" title="Change password">
+              <button
+                type="button"
+                onClick={() => setPwOpen(true)}
+                className="btn-ghost"
+                title="Change password"
+                aria-label="Change password"
+              >
                 <KeyRound className="h-4 w-4" />
               </button>
-              <button type="button" onClick={doLogout} className="btn-ghost" title="Sign out">
+              <button
+                type="button"
+                onClick={doLogout}
+                className="btn-ghost whitespace-nowrap"
+                title="Sign out"
+                aria-label="Sign out"
+              >
                 <LogOut className="h-4 w-4" />
-                <span className="hidden sm:inline">Sign out</span>
+                <span className="hidden lg:inline">Sign out</span>
               </button>
             </div>
           </div>

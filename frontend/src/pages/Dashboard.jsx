@@ -100,7 +100,7 @@ export default function Dashboard() {
         <div className="card p-5 lg:col-span-2">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">Your branches</h2>
-            <Link to="/branches" className="text-sm font-semibold text-pos-royal hover:underline">
+            <Link to="/branches" className="link-touch text-sm text-pos-royal">
               Manage branches →
             </Link>
           </div>
@@ -138,11 +138,11 @@ export default function Dashboard() {
             never shows placeholder numbers.
           </p>
           {canSeeReports(user) ? (
-            <Link to="/reports" className="mt-3 text-sm font-semibold text-pos-royal hover:underline">
+            <Link to="/reports" className="link-touch mt-2 text-sm text-pos-royal">
               View sales report →
             </Link>
           ) : canSell(user) ? (
-            <Link to="/sell" className="mt-3 text-sm font-semibold text-pos-royal hover:underline">
+            <Link to="/sell" className="link-touch mt-2 text-sm text-pos-royal">
               Open the Sell screen →
             </Link>
           ) : null}
