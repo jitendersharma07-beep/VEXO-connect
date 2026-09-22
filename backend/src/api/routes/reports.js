@@ -424,7 +424,7 @@ router.get(
         },
         note: isAtc
           ? 'Signature failures are counted, never stored as events: the event id comes from the payload, so recording unverified deliveries would let a forged id block the genuine one. The count and any unattributable events are deployment-wide, not this company only.'
-          : 'Signature failures are not reported here: a rejected delivery was never verified, so it cannot be attributed to any company. Ask ATC for the deployment-wide figure.',
+          : 'Signature failures are not reported here: a rejected delivery was never verified, so it cannot be attributed to any company. Ask VEXO for the deployment-wide figure.',
       },
     });
   }),

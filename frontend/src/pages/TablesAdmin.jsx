@@ -132,11 +132,11 @@ export default function TablesAdmin() {
   if (atc && !atcScope) {
     return (
       <div>
-        <PageHeader title="Tables" subtitle="ATC operators browse per company." />
+        <PageHeader title="Tables" subtitle="VEXO operators browse per company." />
         <EmptyState
           icon={Armchair}
           title="No company selected"
-          note="Open a company from the ATC console and choose “Browse POS data” to scope these screens."
+          note="Open a company from the VEXO console and choose “Browse POS data” to scope these screens."
         />
       </div>
     );

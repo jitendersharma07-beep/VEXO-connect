@@ -657,11 +657,11 @@ export default function Orders() {
   if (atc && !atcScope) {
     return (
       <div>
-        <PageHeader title="Orders" subtitle="ATC operators browse per company." />
+        <PageHeader title="Orders" subtitle="VEXO operators browse per company." />
         <EmptyState
           icon={ReceiptText}
           title="No company selected"
-          note="Open a company from the ATC console and choose “Browse POS data” to scope these screens."
+          note="Open a company from the VEXO console and choose “Browse POS data” to scope these screens."
         />
       </div>
     );

@@ -149,11 +149,11 @@ export default function DayClose() {
   if (atc && !atcScope) {
     return (
       <div>
-        <PageHeader title="Daily closing" subtitle="ATC operators browse per company." />
+        <PageHeader title="Daily closing" subtitle="VEXO operators browse per company." />
         <EmptyState
           icon={CalendarCheck}
           title="No company selected"
-          note="Open a company from the ATC console and choose “Browse POS data” to scope these screens."
+          note="Open a company from the VEXO console and choose “Browse POS data” to scope these screens."
         />
       </div>
     );
@@ -270,7 +270,7 @@ export default function DayClose() {
                 )}
                 <p className="mt-4 flex items-start gap-2 text-xs text-slate-400">
                   <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  ATC support can read closings but cannot file one. The count is the branch’s own record of
+                  VEXO support can read closings but cannot file one. The count is the branch’s own record of
                   its cash, so it is filed by the manager or the owner.
                 </p>
               </div>

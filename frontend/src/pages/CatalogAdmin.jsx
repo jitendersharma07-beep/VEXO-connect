@@ -703,11 +703,11 @@ export default function CatalogAdmin() {
   if (atc && !atcScope) {
     return (
       <div>
-        <PageHeader title="Catalog" subtitle="ATC operators browse per company." />
+        <PageHeader title="Catalog" subtitle="VEXO operators browse per company." />
         <EmptyState
           icon={Package}
           title="No company selected"
-          note="Open a company from the ATC console and choose “Browse POS data” to scope these screens."
+          note="Open a company from the VEXO console and choose “Browse POS data” to scope these screens."
         />
       </div>
     );
