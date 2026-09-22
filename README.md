@@ -1,10 +1,17 @@
-# ATC POS
+# VEXO Connect
 
 Multi-tenant point-of-sale platform by ATC Infocom, mounted at
 `https://atcworkspace.com/pos`. Fully isolated from ATC NOC/CRM, Megatel,
 Google Review Manager and WhatsApp: own repo, own Postgres, own JWT secret,
 own compose stacks. The only shared piece is one `location ^~ /pos/` block in
 the host nginx.
+
+**VEXO Connect** is the product name — what the screens, the sign-in page and
+the client guides say. The repo directory, the containers, the database and the
+`/api/atc/*` routes keep their original `atc-pos` / `atc_pos` identifiers on
+purpose: renaming those is a migration, not a rebrand. ATC Infocom Solutions
+Pvt. Ltd. remains the company behind it, which is why the address is still
+`atcworkspace.com`.
 
 ## Architecture
 
@@ -25,12 +32,12 @@ the host nginx.
   their own company server-side (a client-supplied companyId is ignored).
   Cross-company reads answer 404, indistinguishable from a row that does not
   exist.
-- Roles: `POS_SUPER_ADMIN` (ATC platform), `CUSTOMER_OWNER`,
+- Roles: `POS_SUPER_ADMIN` (VEXO platform), `CUSTOMER_OWNER`,
   `BRANCH_MANAGER`, `CASHIER` (the last two are pinned to one branch).
 - Licences: `FREE_TRIAL`, `SINGLE_STORE` (1 branch), `MULTI_STORE`
   (base limit + `ADDITIONAL_BRANCH` add-ons). `EXPIRED` is derived at read
   time, never stored. Expired/suspended licences block writes but leave
-  sign-in and reads open. Only the ATC console (`/api/atc/*`) can change any
+  sign-in and reads open. Only the VEXO console (`/api/atc/*`) can change any
   of it.
 
 ## Development
@@ -41,7 +48,7 @@ cd backend && npm install
 export DATABASE_URL='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos?schema=public'
 export POS_JWT_SECRET='dev-only-secret-at-least-32-chars-long'
 npx prisma migrate dev                # apply migrations
-node prisma/seed.js                   # ATC admin + demo café (passwords print once)
+node prisma/seed.js                   # VEXO admin + demo café (passwords print once)
 npm run dev                           # API on :5010
 
 cd ../frontend && npm install
