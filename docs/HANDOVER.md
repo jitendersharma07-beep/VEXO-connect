@@ -1,0 +1,332 @@
+# ATC POS — client handover pack
+
+Internal ATC document. What was delivered, what was proven, what is still owed,
+and the exact steps to put a café on this system.
+
+The two documents the client actually receives are `guide-owner.md` and
+`guide-cashier.md`. This one stays with ATC.
+
+---
+
+## 1. The build being handed over
+
+| | |
+|---|---|
+| URL | `https://atcworkspace.com/pos` |
+| Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
+| Application commit | `2c3acb1` |
+| Deployed | 2026-09-22 12:54 UTC |
+| Frontend bundle | `assets/index-BYn8TH7l.js` |
+| Rollback tags | `pos-prod-backend:20260922-dayclose`, `pos-prod-frontend:20260922-dayclose` |
+| Database migrations applied | 8 |
+
+Commits after `2c3acb1` on `phase2-gateway` (`5e92e52`, `1bcd200`) touch only
+`deploy/` and `docs/`; the running application is `2c3acb1`. Confirm before
+quoting this — re-read the bundle name from the live page rather than trusting
+this table:
+
+```sh
+curl -fsS https://atcworkspace.com/pos/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.js'
+```
+
+Deploy procedure, rollback and the migration gate: `docs/DEPLOY-PHASE2.md`.
+Backups and recovery: `docs/BACKUP-RESTORE.md`.
+
+---
+
+## 2. Honest status, in three columns
+
+The brief asked for "ready for demo" and "ready for actual café billing" to be
+answered separately. They have different answers.
+
+### Ready to demonstrate to a client, today
+
+The whole billing workflow, on the seeded demo tenant: sign in, build an order,
+send a KOT, discount it, bill it, take cash/card/UPI, print the receipt, reprint
+from history, void, refund, close the day, read the owner's reports. Company and
+branch isolation, role restrictions, licence expiry behaviour.
+
+### Ready for a real café to bill on
+
+The same workflow, subject to four things being done first, all listed in §7:
+the backup schedule switched on, the client's own company and menu created, a
+printer proven against the real hardware, and the demo tenant separated from
+the client's.
+
+None of them is development work. All of them need either root on this host or
+information only the client has.
+
+### Not ready, and out of scope for this handover
+
+Gateway-verified online payment (§8), offline mode, inventory, aggregator
+integration. These are later phases and the UI does not pretend otherwise —
+there is no "Pay online" button on a tenant with no provider configured, rather
+than a button that fails.
+
+---
+
+## 3. Provisioning a client — the procedure
+
+**No password ever passes through chat, a ticket, or a shell history.** The
+rotation script exists precisely so that it does not have to.
+
+**1. Create the company, branches and staff** as the owner, through the UI
+(`guide-owner.md` §2), or via ATC → Companies for the company shell. Create each
+person with their real email address.
+
+**2. Set their first passwords.** Preview first — it writes nothing:
+
+```sh
+docker exec pos-prod-backend-1 node scripts/rotate-pos-passwords.mjs \
+  --emails owner@cafe.example,cashier@cafe.example
+```
+
+Then write, with the generated passwords going to a file rather than the
+screen:
+
+```sh
+docker exec pos-prod-backend-1 node scripts/rotate-pos-passwords.mjs \
+  --emails owner@cafe.example,cashier@cafe.example --confirm --out /tmp/pw.txt
+docker cp pos-prod-backend-1:/tmp/pw.txt ./pw.txt
+docker exec pos-prod-backend-1 rm -f /tmp/pw.txt
+```
+
+> **Copy the file out immediately.** `--out` writes *inside* the container. The
+> next `docker compose up -d` replaces that container and the print-once
+> passwords are gone with it, with the accounts already changed. This has
+> happened.
+
+Alternatively `--prompt` reads each password from the terminal with echo off
+(needs `docker exec -it`), so nothing is generated and nothing is written down.
+
+**3. Hand them over out of band** — password manager, or in person. Delete
+`pw.txt` afterwards.
+
+**4. Every real account keeps `mustChangePassword = true`**, which the script
+sets by default. The user is forced to choose their own password on first
+sign-in and ATC never knows it. **Never pass `--demo` for a real account** — it
+disables that control, and it exists only for a shared demo login.
+
+**5. Verify** one sign-in per role before handing over, and confirm the forced
+password-change prompt appears.
+
+---
+
+## 4. Acceptance checklist
+
+Walk this with the client. Every line is a thing to *do*, not to be told.
+
+**Access**
+- [ ] `https://atcworkspace.com/pos` loads, typed directly into a fresh browser
+- [ ] Owner signs in; forced password change appears; new password works
+- [ ] Cashier signs in; sees Sell and Orders, and **not** Catalog, Team, Licence
+- [ ] Cashier typing `/pos/catalog` into the address bar is refused, not shown
+- [ ] Refreshing on a nested page (e.g. `/pos/reports/day-close`) reloads it,
+      not a 404
+
+**A complete sale**
+- [ ] Dine-in order on a table; tapping the same table resumes it
+- [ ] Add items, change quantities, add a variant item
+- [ ] Send KOT; kitchen ticket shows items and quantities, no prices
+- [ ] Sent lines are quantity-locked
+- [ ] Apply a bill discount, then a line discount; totals follow
+- [ ] Bill; invoice number appears in branch format; order locks
+- [ ] Record cash with tendered > total; change due is correct
+- [ ] Receipt prints on the café's own printer at 80 mm
+- [ ] Reprint the same receipt from Orders
+
+**Money must not double**
+- [ ] Double-click Bill — one invoice number, not two
+- [ ] Double-click Record payment — one payment
+- [ ] Reload mid-order; the order is still there with its items
+- [ ] Restart the service; the order, bill and payment all survive
+
+**Corrections**
+- [ ] Manager voids a kitchen-sent line; it shows as voided, not deleted
+- [ ] Manager refunds part of a payment; balance updates
+- [ ] Voiding an order with collected money is **refused** until refunded
+- [ ] Cashier cannot see or reach any of the three
+
+**Separation**
+- [ ] A second company's user cannot see the first's orders, menu or staff
+- [ ] A branch manager sees only their branch; the owner sees both
+- [ ] Money from a sale at one branch appears under that branch **only**
+
+**Day end**
+- [ ] Daily closing shows expected cash matching the day's cash sales
+- [ ] Open orders are warned about
+- [ ] A variance of ₹1 is refused without a note; accepted with one
+- [ ] Filing again the same day creates a correction, not a duplicate
+- [ ] Sales report for the day matches the closing
+
+**Licence**
+- [ ] Licence page shows plan and expiry
+- [ ] With an expired licence: sign-in and reading still work, billing is
+      refused with a clear message (test on a scratch tenant, not the client's)
+
+**Devices**
+- [ ] Cashier screen usable at the till's actual resolution
+- [ ] Owner dashboard readable on the owner's laptop and phone
+
+---
+
+## 5. What has been verified, and how
+
+Separated by kind of evidence, because they are not equally strong.
+
+### Automated tests — mocked, not a real provider
+
+Backend suite: **222 passed / 222**, 7 files (foundation 20, money 13,
+logRedaction 7, phase2 42, razorpay 53, razorpayFlow 32, gateway 55), run
+against the dev test database and re-measured at `1bcd200`. Money arithmetic, order lifecycle, RBAC, tenant scoping,
+licence gating, refund states, log redaction, and the gateway adapter **against
+a mock**. Re-measure rather than quoting this number:
+
+```sh
+cd backend
+env -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
+  DATABASE_URL='postgresql://atc_pos:<dev-db-password>@127.0.0.1:5439/atc_pos_test?schema=public' \
+  POS_JWT_SECRET="$(openssl rand -hex 32)" \
+  NODE_ENV=test LOG_LEVEL=silent npx vitest run
+```
+
+A mock has no MVCC and no second connection, so it cannot answer the two
+questions a handover turns on: a lost update between racing connections, and one
+branch's token against another branch's row. Those are answered in §5.3.
+
+### Real Razorpay sandbox — incomplete
+
+State it plainly rather than implying more:
+
+- The adapter is written and unit-tested against a mock.
+- A **real sandbox order was created** against Razorpay's live test endpoint.
+- The **webhook was never delivered**, because no webhook is registered on the
+  account. Every tunnel hostname supplied for that purpose has since expired.
+- Therefore: `payment.captured` → order PAID with a real `pay_…` reference,
+  duplicate-event suppression against real replays, and `refund.processed`
+  settling a real refund are **not verified against the provider**.
+
+This blocks nothing in this handover, because gateway payment is switched off
+for the client. It blocks turning it on.
+
+### Against the running production server
+
+An acceptance run drives the deployed server over HTTP — real router, real
+middleware, real RBAC, real Postgres at its real isolation level
+(`deploy/uat-acceptance-container.mjs`). It refuses to run unless the target
+company is `isDemo = true`, never touches `pos.admin`, creates its own accounts
+with a password that is never printed, and removes everything it wrote
+including on failure.
+
+That run is owned by a parallel work stream and its results should be read from
+its own output, not inferred from this document.
+
+### Browser-rendered, not merely built
+
+The daily closing page was rendered from the built bundle at 1440×1000,
+1024×768 and 768×1024, reached by **typing the URL** rather than clicking the
+nav — a nav click hides a missing route behind the menu. Checked: the page
+renders, the expected-cash figure is right, the open-orders warning shows, the
+history and correction badges render, nothing overflows horizontally, no console
+errors. The variance arithmetic was driven in the browser: over, short, and the
+note requirement releasing the button.
+
+The harness was then pointed at a route that does not exist and **failed**.
+A check that has never failed is a decoration, not evidence.
+
+### Backup and restore
+
+A dump of production was taken, verified by reading it back, and **restored into
+a throwaway database and compared** against the live one — row counts, the
+payment total, and the count of staff whose password hash survived. It matched.
+Full detail and caveats: `docs/BACKUP-RESTORE.md` §6.
+
+---
+
+## 6. Known limitations
+
+Written down so they are disclosed rather than discovered.
+
+1. **No cap on cashier discounts.** Any cashier can discount up to 100 % of a
+   bill without approval. For a café this is a cash-shrinkage hole. The fix is
+   small but ATC cannot pick the threshold — ask the owner for a number and a
+   rule ("above 10 %, manager approves").
+2. **Daily closing does not lock the day.** Sales can still be recorded against
+   a closed date; the closing then no longer matches and needs a correction.
+3. **Every payment is a manual record.** Nothing is verified with a bank. See
+   `guide-owner.md` §10 — this is stated to the client, not hidden.
+4. **No offline mode.** No connection, no billing.
+5. **Printing is browser-based** and has not been tested against any physical
+   printer. §7.
+6. **Backups are on the same disk as the database.** There is no off-host copy.
+   This survives a bad migration; it does not survive losing the server.
+7. **No alerting on a failed backup.** Someone must look.
+8. **Reconciliation page shows five zero KPIs** when no gateway provider is
+   configured — which is every tenant today. It reads as broken rather than as
+   not-applicable. Cosmetic, but a client will ask.
+9. **Branches page reads "0 active of 0 allowed"** for a company with no
+   licence, instead of saying there is no licence.
+10. **Team page renders `lastLoginAt` in the browser's locale**, unlike every
+    other date in the product, which is IST.
+11. **No pull-based payment recovery.** If a gateway `payment.captured` webhook
+    is missed, nothing polls the provider to find out. Only relevant once the
+    gateway is switched on, and it should be built before it is.
+
+---
+
+## 7. What ATC must do before the client bills for real
+
+1. **Switch on the backup schedule.** Root, one time,
+   `docs/BACKUP-RESTORE.md` §2. Until this is done backups are manual, which
+   means they are not happening.
+2. **Create the client's own company and branches**, separate from
+   `Brew Street Café (Demo)`. The demo tenant is `isDemo = true` and must stay
+   that way: acceptance probes refuse to run anywhere else, and that refusal is
+   what keeps them off client data.
+3. **Prove the printer.** With the real machine and real paper, before opening.
+   ATC has not tested any physical printer and must not claim to have.
+4. **Renew or convert the licence.** Demo is `FREE_TRIAL`, expiring
+   **2026-10-20**. A client billing past that date stops billing.
+
+---
+
+## 8. What ATC needs from the client
+
+Ask for all of it at once. Everything else is finished.
+
+1. **Company details** — legal name, trading name, address per branch, GSTIN,
+   phone, and anything that must appear on the receipt footer.
+2. **The menu** — items, categories, prices, sizes/variants, and **which GST
+   rate applies to which item**. A spreadsheet is fine. ATC will not guess tax
+   rates.
+3. **Branch list** — names and the short code for each (the invoice prefix;
+   permanent once billing starts).
+4. **Staff list** — name, email, and role for each person.
+5. **Printer make and model**, and whether the kitchen printer is a separate
+   machine.
+6. **A discount rule** — the cap above which a manager must approve (§6.1).
+
+Only if online payment is wanted:
+
+7. **The client's own Razorpay merchant account**, with test credentials first.
+   ATC then completes the sandbox sequence in §5.2 — a real captured payment, a
+   duplicate webhook, and a real refund — before any live key is installed.
+   **Live payments stay off until that is done and the client authorises it in
+   writing.**
+
+---
+
+## 9. ATC operational controls
+
+- **ATC → Companies** — every tenant, its licence, branch count and staff.
+- **Licence** — plan, expiry, branch entitlement, additional-branch add-ons.
+  Expiry is computed from `expiresAt` at read time, so it cannot be missed by a
+  failed job and cannot be postponed except by changing the date.
+- **ATC is read-only inside a customer's data**, and is refused the daily
+  closing outright. Every ATC access is written to the audit log and can be
+  shown to the client.
+- Logs: `docker compose -f docker-compose.prod.yml logs backend`.
+- Restart: `docker compose -f docker-compose.prod.yml up -d --no-deps backend`
+  — `restart` alone re-runs the old container with the old environment.
+- The POS stack is `pos-prod` and publishes only `127.0.0.1:8110`. Nothing here
+  touches the other ATCWorkspace services.
