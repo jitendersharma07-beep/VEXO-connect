@@ -282,6 +282,15 @@ try {
   //    band cannot tell those two apart.
   await page.emulateMedia({ media: 'print' });
   for (const name of SHOTS) {
+    // ONE VIEW PER NAVIGATION, and not merely for tidiness. In `@media print`
+    // `.print-area` is `position:absolute; left:0; top:0`, so on ?view=all
+    // every receipt is stacked at the same origin. The measurements below read
+    // the element box and are unaffected, but an element screenshot captures
+    // PAINTED PIXELS — so the saved PNG was a composite of all four receipts
+    // while still being named after one of them. The numbers were right and
+    // the picture was a lie, which is the worse of the two failure modes:
+    // these images are the client's UAT evidence.
+    await page.goto(`${BASE}/uat-render.html?view=${name}`, { waitUntil: 'networkidle' });
     const el = page.locator(`[data-shot="${name}"] .print-area`);
     if (!(await el.isVisible().catch(() => false))) {
       record(`${name} print render`, false, 'element not found');
@@ -325,6 +334,10 @@ try {
   //    amount column. These are the three things the clipping defect ate, so
   //    they are checked by name rather than left to the generic sweep.
   {
+    // Navigate explicitly: the loop above leaves the LAST view loaded, so
+    // depending on what happens to still be on the page is how this section
+    // would silently start measuring the KOT instead.
+    await page.goto(`${BASE}/uat-render.html?view=receipt-long`, { waitUntil: 'networkidle' });
     const el = page.locator('[data-shot="receipt-long"] .print-area');
     const long = await el.evaluate((n) => {
       const box = n.getBoundingClientRect();

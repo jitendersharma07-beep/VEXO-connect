@@ -140,7 +140,10 @@ const Block = ({ title, children }) => (
 
 createRoot(document.getElementById('root')).render(
   <main className="mx-auto max-w-md p-6">
-    {(view === 'all' || view === 'receipt') && (
+    {/* `receipt-demo` matches the data-shot name so a caller can request one
+        view by the same string it uses to name the artefact; `receipt` is kept
+        as an alias because it is the older spelling. */}
+    {(view === 'all' || view === 'receipt' || view === 'receipt-demo') && (
       <Block title="receipt-demo"><ReceiptView receipt={receiptDemo} /></Block>
     )}
     {(view === 'all' || view === 'receipt-due') && (
