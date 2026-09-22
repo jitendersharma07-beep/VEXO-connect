@@ -1126,3 +1126,66 @@ All five read `<unset>` in production today. `gatewayEnabled` is
 "Pay online" button does not render at all. `config/env.js` additionally
 refuses to boot with a provider set but no webhook secret — a half-configured
 gateway is worse than none.
+
+### The demo catalog was edited directly in the database, 2026-09-22
+
+Recorded here because it was done by hand, outside the application, and the
+application's own history does not show it.
+
+**What was wrong.** Two acceptance-harness products were left `ACTIVE` in the
+demo company and were rendering on the cashier's Sell screen, with two dead
+category chips beside them. They were found by looking at a screenshot, not by
+a test — nothing asserts that the demo catalog contains only demo items.
+
+**The four records.**
+
+| Record | Id | Change |
+|---|---|---|
+| Product "UAT Filter Coffee 1279c8" | `cmucxdysh001jv86urn3glsmo` | `ACTIVE` → `ARCHIVED`, category → Hot Coffee |
+| Product "UAT Filter Coffee 3f4301" | `cmucwmqni000fv86u714v1etw` | `ACTIVE` → `ARCHIVED`, category → Hot Coffee |
+| Category "UAT Coffee 1279c8" | `cmucxdyrp001gv86uzaonzbct` | deleted |
+| Category "UAT Coffee 3f4301" | `cmucwmqmh000cv86u5k5pw6wm` | deleted |
+
+**Why archive and not delete.** `OrderItem.productId` is `ON DELETE RESTRICT`
+and each product carries one real order line. Archiving is also what the
+application itself does — `catalog.js` `DELETE /products/:id` sets
+`status: 'ARCHIVED'` rather than removing the row. `GET /products` defaults to
+`status: 'ACTIVE'`, so archived items leave the till, and `orders.js` refuses
+to add a non-`ACTIVE` product to a new order. The categories were only
+deletable *after* the products were moved off them, for the same FK reason.
+
+**Before and after.**
+
+| | Before | After |
+|---|---|---|
+| Active products | 25 | 23 |
+| Archived products | 0 | 2 |
+| Categories | 9 | 7 |
+| Active products matching `uat\|recon\|probe\|test` | 2 | 0 |
+| `BSC-CP/26-27/00004` | PAID, ₹210.00, 1 line | unchanged |
+| `BSC-CP/26-27/00005` | PAID, ₹210.00, 1 line | unchanged |
+
+The order rows are the control: a cleanup that altered a historical total
+would have been the wrong cleanup.
+
+**No application audit entry exists for any of it, and none was fabricated.**
+Measured rather than assumed:
+
+- Audit rows for these four ids: **4** — `CATEGORY_CREATE` and
+  `PRODUCT_CREATE` ×2, written through the API by the harness owner accounts
+  when the records were made.
+- Audit rows at or after the archive, with a minute of grace either side: **0**.
+- `PRODUCT_ARCHIVE` / `CATEGORY_DELETE` / any catalog mutation action anywhere
+  in `PosAuditLog`, ever: **0**.
+
+So the trail for these four records ends at creation. Read on its own it says
+they still exist, and it is wrong. That is the cost of reaching past the
+application, and it is the reason the same fix should go through the API if it
+ever has to be done again — an owner signing in and archiving from
+**Catalog** produces the row that this did not.
+
+**Post-cleanup acceptance: NOT RUN.** `deploy/uat-acceptance.mjs` last returned
+24 PASS / 0 FAIL / 2 NOT TESTED *before* these records changed. The rerun that
+would confirm the catalog edit broke nothing was attempted and refused by the
+environment. Nothing here is regression-checked; the evidence above is direct
+database observation only.
