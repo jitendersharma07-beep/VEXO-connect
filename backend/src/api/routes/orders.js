@@ -537,10 +537,27 @@ router.post(
     const order = await loadOrder(req);
 
     const result = await prisma.$transaction(async (tx) => {
+      // Serialises collection on this order, for the same reason the intent
+      // and refund routes below do it — but this is the one a café actually
+      // hits. READ COMMITTED gives each concurrent request a snapshot without
+      // the other's payment row, so both compute the full amount as still due
+      // and both insert it: a double-clicked "Record payment" collects the
+      // bill twice, at 201 each, and the till only disagrees at day end. The
+      // status and due-amount checks below are the guard; they are worth
+      // nothing unless the row is held while they are made.
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
       const cur = await tx.order.findUnique({
         where: { id: order.id },
         include: { payments: { select: { amount: true } } },
       });
+      // PAID is called out before the general status refusal because it is
+      // the one a cashier reaches by accident — the losing half of a
+      // double-click lands here every time. Telling them "payments are
+      // recorded on billed orders only" about an order they just billed and
+      // just paid reads as a fault in the till, and the honest response to a
+      // till that looks faulty is to bill it again.
+      if (cur.status === 'PAID') throw conflict('Order is already paid in full');
       if (cur.status !== 'BILLED') throw conflict('Payments are recorded on billed orders only');
       const total = paiseOf(cur.total);
       const collected = cur.payments.reduce((a, p) => a + paiseOf(p.amount), 0);

@@ -512,6 +512,78 @@ describe('transitions, refunds and voids', () => {
     expect(new Set(numbers).size).toBe(5);
     for (const n of numbers) expect(n).toMatch(/^A1\/\d{2}-\d{2}\/\d{5}$/);
   });
+
+  // Regression. A double-clicked "Record payment" used to collect the bill
+  // TWICE — both requests answered 201 and the order held two full payment
+  // rows, because at READ COMMITTED each transaction read a snapshot without
+  // the other's row, so both computed the whole total as still due.
+  //
+  // It is worth stating why this needs a real database: the due-amount check
+  // was present and correct the whole time. Nothing about the logic was wrong
+  // in isolation, which is exactly why a mocked Prisma — no MVCC, no second
+  // connection — reports it green. The bug only exists between two live
+  // transactions, so only two live transactions can show it is gone.
+  //
+  // The damage is quiet: the customer is charged once in the real world and
+  // twice in the till, and nobody finds out until the day-end count is over
+  // by one bill with no way to tell which.
+  it('a double-clicked payment collects the bill once', async () => {
+    const o = await takeaway();
+    const { total } = await bill(o.id);
+
+    const [a, b] = await Promise.all([
+      request(app).post(`/api/orders/${o.id}/payments`).set(auth(tokens.cashierA1))
+        .send({ method: 'CASH', amount: total }),
+      request(app).post(`/api/orders/${o.id}/payments`).set(auth(tokens.cashierA1))
+        .send({ method: 'CASH', amount: total }),
+    ]);
+
+    const accepted = [a, b].filter((r) => r.status === 201);
+    expect(accepted.length, `statuses ${a.status}/${b.status}`).toBe(1);
+
+    // The loser must be refused for a reason the cashier can act on. This
+    // asserts the message because the first version of the fix passed the
+    // count check while answering "payments are recorded on billed orders
+    // only" — true of the state machine, useless at a counter, and the kind
+    // of message that makes someone re-bill an order that is already paid.
+    const loser = [a, b].find((r) => r.status !== 201);
+    expect(loser.status).toBe(409);
+    expect(loser.body.error.message).toMatch(/already paid in full/i);
+
+    const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+    expect(rows.length).toBe(1);
+    const after = await prisma.order.findUnique({ where: { id: o.id } });
+    expect(after.status).toBe('PAID');
+    expect(Number(rows[0].amount)).toBeCloseTo(Number(total), 2);
+  });
+
+  // The lock must serialise collection without forbidding it. Split tender —
+  // one guest paying cash and another card against the same bill — is normal
+  // café behaviour, and a guard that turned the second half into a 409 would
+  // be a worse bug than the one above, because the cashier would hit it every
+  // day rather than occasionally.
+  it('two partial payments on one bill are both kept', async () => {
+    const o = await takeaway();
+    const total = Number((await bill(o.id)).total);
+    const half = Math.round(total * 50) / 100; // half, to 2dp
+    const rest = Math.round((total - half) * 100) / 100;
+
+    const [a, b] = await Promise.all([
+      request(app).post(`/api/orders/${o.id}/payments`).set(auth(tokens.cashierA1))
+        .send({ method: 'CASH', amount: half }),
+      request(app).post(`/api/orders/${o.id}/payments`).set(auth(tokens.cashierA1))
+        .send({ method: 'CARD', amount: rest }),
+    ]);
+    expect(a.status, JSON.stringify(a.body)).toBe(201);
+    expect(b.status, JSON.stringify(b.body)).toBe(201);
+
+    const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+    expect(rows.length).toBe(2);
+    const collected = rows.reduce((s, p) => s + Number(p.amount), 0);
+    expect(collected).toBeCloseTo(total, 2);
+    const after = await prisma.order.findUnique({ where: { id: o.id } });
+    expect(after.status).toBe('PAID');
+  });
 });
 
 describe('order isolation and ATC read-only', () => {
