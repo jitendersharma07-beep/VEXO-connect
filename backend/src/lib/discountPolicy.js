@@ -328,6 +328,25 @@ export const describeCeiling = ({ maxPctMilli, maxFlatPaise }) => {
   return maxPctMilli !== null ? pct(maxPctMilli) : rupees(maxFlatPaise);
 };
 
+// The authority the actor actually had, as resolved for THIS request.
+//
+// Written onto the allowed discounts as well as the refused ones. A trail that
+// only records ceilings when they were breached answers "was this blocked?"
+// but not "was a 40% discount inside what that cashier was trusted with at the
+// time?" — and the second question is the one asked months later, by which
+// point the policy row has been edited and no longer says what it said.
+//
+// Shared rather than rebuilt at each call site, so the refusal trail and the
+// approval trail cannot drift into recording different shapes of the same
+// fact.
+export const limitForAudit = (policy) => ({
+  allowLineDiscount: policy.allowLineDiscount,
+  allowOrderDiscount: policy.allowOrderDiscount,
+  maxPctMilli: policy.maxPctMilli,
+  maxFlatPaise: policy.maxFlatPaise,
+  ceiling: describeCeiling(policy),
+});
+
 // Counter-side wording. Says what the limit is and what the discount came to,
 // because "not permitted" alone leaves a queue standing there guessing.
 export const describeBreach = (breach) => {

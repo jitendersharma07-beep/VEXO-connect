@@ -24,6 +24,7 @@ import {
   combinedPctMilli,
   describeBreach,
   describeCeiling,
+  limitForAudit,
   resolveDiscountPolicy,
 } from './discountPolicy.js';
 
@@ -74,14 +75,6 @@ const burnVerify = async () => {
 // account" and "wrong password" it was is exactly what an attacker wants.
 const CREDENTIALS_REFUSED = 'Those approver credentials were not accepted.';
 
-const policyDetails = (policy) => ({
-  allowLineDiscount: policy.allowLineDiscount,
-  allowOrderDiscount: policy.allowOrderDiscount,
-  maxPctMilli: policy.maxPctMilli,
-  maxFlatPaise: policy.maxFlatPaise,
-  ceiling: describeCeiling(policy),
-});
-
 const exposureForAudit = (e) => ({
   grossPaise: e.grossPaise,
   lineDiscountPaise: e.lineDiscountPaise,
@@ -117,7 +110,7 @@ export const guardDiscountChange = async (
     branchId: order.branchId,
     before: exposureForAudit(before),
     after: exposureForAudit(after),
-    actorLimit: policyDetails(policy),
+    actorLimit: limitForAudit(policy),
     breach: breachForAudit(verdict.breach),
   };
 
@@ -132,7 +125,7 @@ export const guardDiscountChange = async (
     throw discountDenied(describeBreach(verdict.breach), {
       approvalRequired: true,
       breach: breachForAudit(verdict.breach),
-      yourLimit: policyDetails(policy),
+      yourLimit: limitForAudit(policy),
     });
   }
 
