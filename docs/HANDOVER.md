@@ -647,13 +647,44 @@ Only if online payment is wanted:
 | Docker at boot | `enabled` |
 | Survives reboot | **observed** — Postgres has been up since the host's last boot, not restarted by hand |
 | Health endpoint | `GET /pos/api/health` → 200 |
-| Container healthcheck | Postgres only |
+| Container healthcheck | **All three**, added `b75b062` and applied 15:26 UTC — `docker ps` reports `(healthy)` for postgres, backend and frontend |
 
-The last row is a gap. The backend has an HTTP health endpoint but no Docker
-`healthcheck`, so Docker cannot tell a wedged backend from a running one and
-nothing restarts it. `depends_on: service_healthy` protects the *start* order
-only. Wiring the endpoint into a container healthcheck is a compose change and
-a container recreate — worth doing, but not in the middle of a handover week.
+That last row was a gap until 15:26 UTC: a node process that has stopped
+accepting requests still reports `Up`, so `docker ps` could not tell a working
+till from a wedged one.
+
+**Read the row for exactly what it claims.** Compose does *not* restart a
+container for failing its healthcheck — that needs a watchdog nobody has
+asked for yet. What this buys is an honest answer to "is it serving?" and
+correct `depends_on` ordering. Anyone reading `(healthy)` as "it will heal
+itself" will be wrong at the worst possible moment.
+
+Each probe uses a client its own image actually has, which was checked in the
+running containers rather than assumed: `node:20-bookworm-slim` ships neither
+`curl` nor `wget`, and `nginx:1.27-alpine` ships `wget` and no `node`. A
+healthcheck invoking a binary the image lacks reports unhealthy forever, which
+looks identical to the fault it was added to catch.
+
+It was proved able to fail before being trusted, because a check that has
+never gone red is decoration. Same image, same probe, one difference — pointed
+at a port nothing listens on — in a throwaway compose project that cannot
+reach the production stack:
+
+```sh
+docker compose -f deploy/healthcheck-negctl.yml up -d
+docker inspect -f '{{.State.Health.Status}}' pos-healthcheck-negctl-deadport-1
+docker compose -f deploy/healthcheck-negctl.yml down
+```
+
+That file lives in the repo rather than `/tmp` on purpose: a control that
+evaporates on reboot cannot be re-run by whoever inherits this, and an
+unrunnable control is the same as no control. Its `test:` block must stay
+byte-identical to the backend's in `docker-compose.prod.yml` — if they drift
+it stops being a control and becomes a test of a probe nothing uses.
+
+`unhealthy`, exit code 1 on both retries, while the real backend on the same
+image reports `healthy`. Both halves are needed: the green alone would not
+distinguish a working probe from one that cannot fail.
 
 ### Live payments cannot happen, and this is verifiable
 
