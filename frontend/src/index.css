@@ -11,9 +11,27 @@
   }
 }
 
+/* Touch-target floor. A café terminal is driven by a thumb, often a wet or
+   gloved one, never a mouse: WCAG 2.5.5 asks for 44 px and both Apple and
+   Google publish the same figure. Putting the floor on .btn/.input rather
+   than on each call site means a control cannot be added later at 38 px by
+   accident — every button in the app inherits the floor. py-2 stays so the
+   label keeps its optical padding; min-h only grows the box when the text
+   alone would leave it short. */
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  /* Bare icon buttons and the qty stepper: square, so the floor applies to
+     width as well or a 44 px-tall button is still a 24 px-wide target. */
+  .btn-touch {
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  /* Text-link actions (Reprint KOTs, Void order, line disc). Kept visually as
+     links — padding does the work, so the hit box clears 44 px without the
+     link turning into a button. */
+  .link-touch {
+    @apply -mx-1 inline-flex min-h-[44px] items-center gap-1 px-1 font-semibold hover:underline disabled:opacity-40;
   }
   .btn-primary {
     @apply btn bg-pos-royal text-white hover:bg-pos-deep;
@@ -29,7 +47,7 @@
     @apply rounded-xl border border-slate-200 bg-white shadow-sm;
   }
   .input {
-    @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-pos-ink focus:border-pos-royal focus:outline-none focus:ring-2 focus:ring-pos-royal/20;
+    @apply min-h-[44px] w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-pos-ink focus:border-pos-royal focus:outline-none focus:ring-2 focus:ring-pos-royal/20;
   }
   .label {
     @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500;
