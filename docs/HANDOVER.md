@@ -728,7 +728,10 @@ Written down so they are disclosed rather than discovered.
 5. **Printing is browser-based** and has not been tested against any physical
    printer. §7.
 6. **Backups are on the same disk as the database.** There is no off-host copy.
-   This survives a bad migration; it does not survive losing the server.
+   This survives a bad migration; it does not survive losing the server. The
+   procedure for fixing it is now written out in `BACKUP-RESTORE.md` §8 — it is
+   waiting on a destination and a public key, both of which only the owner can
+   supply. Written and unrun is better than unwritten, and worse than done.
 7. **No alerting on a failed backup.** Someone must look.
 8. ~~Reconciliation zero KPIs, Branches "0 of 0", Team browser-locale dates.~~
    Fixed in `652732f` and **deployed** (§1). Verified against the bundle pulled
@@ -858,6 +861,26 @@ Written down so they are disclosed rather than discovered.
     the client as one. It guarantees one narrow thing: a *render* failure
     degrades to a readable screen instead of a white one.
 
+14. **The billing chain has been proved over HTTP, not through a browser.**
+    Order → KOT → bill → manual payment → partial refund → sales
+    reconciliation has been driven end to end against the deployed URL and
+    verified in the database, and individual screens have been rendered and
+    checked (items 8, 9, 12, 13 above). What has *not* happened is one
+    continuous run where a person's clicks produce that whole chain. The
+    harness for it is written — accounts provisioned per run and neutralised
+    afterwards, an isolated till with no prior activity for the day-close, a
+    wrong-password control, a double-click control, and a cross-branch
+    isolation control — and it has never been executed, because script
+    execution is blocked in the environment it was written in.
+
+    The distinction matters in one specific direction. HTTP proves the server
+    does the right thing when asked correctly. It does not prove the screen
+    asks correctly — a button wired to the wrong handler, a form that submits
+    twice, a total that renders stale after a refund all pass an HTTP suite
+    untouched. Treat the billing chain as **server-verified, not
+    cashier-verified**, and have a human click through one full sale, one
+    refund and one closing before the client is left alone with it.
+
 ---
 
 ## 7. What ATC must do before the client bills for real
@@ -894,10 +917,17 @@ Ask for all of it at once. Everything else is finished.
 5. **Printer make and model**, and whether the kitchen printer is a separate
    machine.
 6. **A discount rule** — the cap above which a manager must approve (§6.1).
+7. **The till hardware** — what the cashier will actually look at: screen size
+   and resolution, touch or mouse, and whether it sits portrait or landscape.
+   The layout has been checked at 1440×900 on a desktop browser. That is not a
+   claim about a 10-inch tablet, and the difference is the kind that is only
+   found by looking. One line of answer is enough — "15.6" landscape
+   touchscreen, 1920×1080" — and it decides whether any layout work is needed
+   before the client sees the screen.
 
 Only if online payment is wanted:
 
-7. **The client's own Razorpay merchant account**, with test credentials first.
+8. **The client's own Razorpay merchant account**, with test credentials first.
    ATC then completes the sandbox sequence in §5.2 — a real captured payment, a
    duplicate webhook, and a real refund — before any live key is installed.
    **Live payments stay off until that is done and the client authorises it in
@@ -1096,3 +1126,66 @@ All five read `<unset>` in production today. `gatewayEnabled` is
 "Pay online" button does not render at all. `config/env.js` additionally
 refuses to boot with a provider set but no webhook secret — a half-configured
 gateway is worse than none.
+
+### The demo catalog was edited directly in the database, 2026-09-22
+
+Recorded here because it was done by hand, outside the application, and the
+application's own history does not show it.
+
+**What was wrong.** Two acceptance-harness products were left `ACTIVE` in the
+demo company and were rendering on the cashier's Sell screen, with two dead
+category chips beside them. They were found by looking at a screenshot, not by
+a test — nothing asserts that the demo catalog contains only demo items.
+
+**The four records.**
+
+| Record | Id | Change |
+|---|---|---|
+| Product "UAT Filter Coffee 1279c8" | `cmucxdysh001jv86urn3glsmo` | `ACTIVE` → `ARCHIVED`, category → Hot Coffee |
+| Product "UAT Filter Coffee 3f4301" | `cmucwmqni000fv86u714v1etw` | `ACTIVE` → `ARCHIVED`, category → Hot Coffee |
+| Category "UAT Coffee 1279c8" | `cmucxdyrp001gv86uzaonzbct` | deleted |
+| Category "UAT Coffee 3f4301" | `cmucwmqmh000cv86u5k5pw6wm` | deleted |
+
+**Why archive and not delete.** `OrderItem.productId` is `ON DELETE RESTRICT`
+and each product carries one real order line. Archiving is also what the
+application itself does — `catalog.js` `DELETE /products/:id` sets
+`status: 'ARCHIVED'` rather than removing the row. `GET /products` defaults to
+`status: 'ACTIVE'`, so archived items leave the till, and `orders.js` refuses
+to add a non-`ACTIVE` product to a new order. The categories were only
+deletable *after* the products were moved off them, for the same FK reason.
+
+**Before and after.**
+
+| | Before | After |
+|---|---|---|
+| Active products | 25 | 23 |
+| Archived products | 0 | 2 |
+| Categories | 9 | 7 |
+| Active products matching `uat\|recon\|probe\|test` | 2 | 0 |
+| `BSC-CP/26-27/00004` | PAID, ₹210.00, 1 line | unchanged |
+| `BSC-CP/26-27/00005` | PAID, ₹210.00, 1 line | unchanged |
+
+The order rows are the control: a cleanup that altered a historical total
+would have been the wrong cleanup.
+
+**No application audit entry exists for any of it, and none was fabricated.**
+Measured rather than assumed:
+
+- Audit rows for these four ids: **4** — `CATEGORY_CREATE` and
+  `PRODUCT_CREATE` ×2, written through the API by the harness owner accounts
+  when the records were made.
+- Audit rows at or after the archive, with a minute of grace either side: **0**.
+- `PRODUCT_ARCHIVE` / `CATEGORY_DELETE` / any catalog mutation action anywhere
+  in `PosAuditLog`, ever: **0**.
+
+So the trail for these four records ends at creation. Read on its own it says
+they still exist, and it is wrong. That is the cost of reaching past the
+application, and it is the reason the same fix should go through the API if it
+ever has to be done again — an owner signing in and archiving from
+**Catalog** produces the row that this did not.
+
+**Post-cleanup acceptance: NOT RUN.** `deploy/uat-acceptance.mjs` last returned
+24 PASS / 0 FAIL / 2 NOT TESTED *before* these records changed. The rerun that
+would confirm the catalog edit broke nothing was attempted and refused by the
+environment. Nothing here is regression-checked; the evidence above is direct
+database observation only.
