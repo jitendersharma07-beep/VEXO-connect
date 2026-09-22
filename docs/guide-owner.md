@@ -230,9 +230,16 @@ access is logged.
 
 For backup and recovery, ATC holds the runbook (`docs/BACKUP-RESTORE.md`). What
 you need to know: a backup of this database **has been taken and has been
-proven to restore** — not assumed, actually restored and compared. The nightly
-schedule is written but **must be switched on by ATC before you go live**; until
-it is, backups are being taken by hand.
+proven to restore** — not assumed, actually restored into a separate database
+and compared row by row, including that every staff login still worked. The
+nightly schedule is **switched on**, and runs at about 02:30 each night.
 
-"When was the last successful backup?" is a fair question with a one-line
-answer. Ask it before you start billing, and occasionally afterwards.
+Two things to ask ATC about, because they are real and they are not fixed:
+
+- The backups sit on the **same machine** as the café's data. That survives a
+  bad upgrade. It does not survive losing the machine. Ask ATC when a copy will
+  be kept somewhere else.
+- **Nothing tells anyone if a backup fails.** It would simply stop happening,
+  quietly. "When was the last successful backup?" is a fair question with a
+  one-line answer — ask it before you start billing, and occasionally
+  afterwards.

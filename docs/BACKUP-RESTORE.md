@@ -77,23 +77,49 @@ directory ever holding the secret.
 
 ## 2. Install the schedule (one time, as root)
 
-**This has not been done yet.** Until it is, backups are manual, which means
-they are not happening.
+**Done — 2026-09-22 13:33 UTC.** The timer is `enabled`, the first run produced
+`pos-prod-20260922T133322Z.dump`, and that dump has been restore-drilled (§6).
+Kept here because it is what you repeat on the next machine, and because the
+verification steps are the part worth copying.
+
+**Run this on the server, over SSH.** Obvious until it isn't: the paths below
+exist only on the POS host, and `systemctl` does not exist on macOS at all. A
+block pasted into a laptop terminal prompts for the *laptop's* password, refuses
+the server's, and looks for all the world like "sudo is rejecting my password".
+Check the shell prompt says `atc-noc@atc-noc` before you type anything.
 
 ```sh
-sudo cp /home/atc-noc/atc-pos/deploy/systemd/atc-pos-backup.service /etc/systemd/system/
-sudo cp /home/atc-noc/atc-pos/deploy/systemd/atc-pos-backup.timer   /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now atc-pos-backup.timer
+sudo install -m 644 -o root -g root \
+  /home/atc-noc/atc-pos/deploy/systemd/atc-pos-backup.service \
+  /home/atc-noc/atc-pos/deploy/systemd/atc-pos-backup.timer \
+  /etc/systemd/system/ && echo "STEP1 copy PASS" || echo "STEP1 copy FAIL"
+
+sudo systemctl daemon-reload && echo "STEP2 reload PASS" || echo "STEP2 reload FAIL"
+
+sudo systemctl enable --now atc-pos-backup.timer && echo "STEP3 enable PASS" || echo "STEP3 enable FAIL"
+
+test "$(systemctl is-enabled atc-pos-backup.timer)" = enabled && echo "STEP4 enabled PASS" || echo "STEP4 enabled FAIL"
 
 # prove it once — do not wait until 02:30 to find out
 sudo systemctl start atc-pos-backup.service
-systemctl status atc-pos-backup.service --no-pager
-journalctl -u atc-pos-backup.service -n 40 --no-pager
+ls -t /home/atc-noc/atc-backups/pos-prod/*.dump | head -1
 
 # and prove the file it produced is restorable
 node /home/atc-noc/atc-pos/deploy/pos-backup.mjs --drill
 ```
+
+One `echo` per step, rather than one `&&` chain across all of them: `sudo`
+asks for a password once and the rest of a chain inherits the failure silently,
+so a mistyped password at the top leaves you reading a success message printed
+by a later command that never ran.
+
+**A new `.dump` filename is the only proof the service ran.** Not the exit code,
+and emphatically not `systemctl show`: asked about a unit that does not exist at
+all, it answers `Result=success` and `ExecMainStatus=0`, because those are its
+defaults for a unit it has never heard of. That is a green tick for a service
+that was never installed. `systemctl is-enabled` answers `not-found` and is the
+one to trust; a dump file with a newer timestamp is better still, because it is
+the artefact rather than a claim about it.
 
 The unit runs as `atc-noc`, who must be in the `docker` group:
 
@@ -104,6 +130,16 @@ id -nG atc-noc | tr ' ' '\n' | grep -x docker    # must print: docker
 It deliberately does **not** run as root. Nothing here needs it, and a
 root-owned backup directory is one more thing a recovery has to fight at the
 worst possible moment.
+
+There are two `node` installs on this box. The unit pins `/usr/bin/node`,
+because a service must not depend on whether nvm happened to be sourced; your
+interactive shell gets nvm's. They are the same version today, so a hand-run
+`--drill` and the nightly run behave identically — but an nvm upgrade moves one
+and not the other, so check both if the two ever disagree:
+
+```sh
+/usr/bin/node --version; node --version
+```
 
 The timer is `Persistent=true`, so a backup missed while the box was off is
 taken at the next boot rather than skipped — the most likely reason the machine
@@ -309,20 +345,41 @@ Stated separately on purpose. The difference between "implemented" and
 - A second dump after that deploy: `pos-prod-20260922T131500Z.dump`, 72 763
   bytes, SHA-256 `dc5305cc…`, read back with `pg_restore --list` — all 22
   tables. Manifest written beside it.
+- **The schedule is installed and has run.** 2026-09-22 13:33 UTC:
+  `systemctl is-enabled` → `enabled`, next fire 21:01 UTC (02:31 IST). The unit
+  produced `pos-prod-20260922T133322Z.dump` with a manifest recording 22 tables,
+  8 migrations and 4 staff logins.
+- **`deploy/pos-backup.mjs` has executed end to end**, for the first time, as
+  that unit. Its own output: container running, directory mode 700, 19 327 MB
+  free, 22 tables / 148 rows, archive lists all 22 tables, retention kept 4 and
+  expired 0.
+- **That dump was restore-drilled and passed.** `pg_restore` with
+  `--exit-on-error` into a throwaway `pos_restore_drill`; all 22 tables restored
+  to the counts the manifest recorded; 4 staff logins survived with their
+  password hashes intact; the drill copy was dropped afterwards.
 
 **Not proven:**
 
-- **`deploy/pos-backup.mjs` has never been run end to end.** Every invocation,
-  including `--check`, was refused by the sandbox in which it was written. Each
-  individual operation it performs was carried out by hand and worked; the
-  script as a program has not executed once. Treat §2's `systemctl start` as
-  its first real run and read the output.
-- **The schedule is not installed.** §2 is an outstanding action.
-- The post-deploy dump has **not** been restore-drilled — only its table list
-  was verified.
+- **The money comparison is vacuous.** `paymentAmountSum` is 0, because no real
+  sale has been taken yet. A drill that matches 0 against 0 has demonstrated
+  nothing about money. **Re-run `--drill` once the café has billed for a day**;
+  that is the run that actually tests whether takings survive a restore, and
+  until it happens this row belongs under "not proven" rather than above.
 - There is no off-host copy of anything. Both dumps and the database they came
   from are on the same disk. That is not a backup policy, it is a
   faster-to-restore copy, and it does not survive the loss of this machine.
+- Nobody has restored into a *rebuilt* host, only into a container that was
+  already running. §5-C is written but has not been walked end to end.
+
+**The drill's baseline is the manifest, not live.** Worth understanding before
+reading a failure. A backup restores to the database as it *was*; live is that
+database plus everything written since, so comparing the two fails every backup
+for the crime of being older than now. Measured here on 2026-09-22, before this
+was corrected: a byte-perfect restore reported PosUser 10 vs 4 and PosAuditLog
+59 vs 69 and concluded "NOT proven restorable". Nothing was wrong with the
+backup. Live is still read, but only to report how far the database has moved on
+since — which is the data-loss window, and the number an operator actually
+wants.
 
 **Caveat on `pos-prod-20260922T131500Z.dump`:** it was taken while another
 acceptance probe was mid-run, so it very likely contains two short-lived probe
@@ -341,4 +398,5 @@ take a backup while a probe is running.
 3. **No restore-time objective.** Nobody has timed a full §5-C recovery. Until
    someone has, "how long would we be down" has no answer.
 4. **The `.env` has no second copy.** §1.
-5. **Schedule not installed.** §2.
+5. **The drill has never seen real money.** §6. Re-run `--drill` after the first
+   full day of billing.

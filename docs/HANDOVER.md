@@ -48,13 +48,13 @@ branch isolation, role restrictions, licence expiry behaviour.
 
 ### Ready for a real café to bill on
 
-The same workflow, subject to four things being done first, all listed in §7:
-the backup schedule switched on, the client's own company and menu created, a
-printer proven against the real hardware, and the demo tenant separated from
-the client's.
+The same workflow, subject to three things being done first, all listed in §7:
+the client's own company and menu created, a printer proven against the real
+hardware, and the demo tenant separated from the client's.
 
-None of them is development work. All of them need either root on this host or
-information only the client has.
+None of them is development work. All of them need information only the client
+has. A fourth item stood here until 2026-09-22 — the backup schedule — and it
+is now installed, run and drilled; see §5.
 
 ### Not ready, and out of scope for this handover
 
@@ -236,10 +236,18 @@ A check that has never failed is a decoration, not evidence.
 
 ### Backup and restore
 
-A dump of production was taken, verified by reading it back, and **restored into
-a throwaway database and compared** against the live one — row counts, the
-payment total, and the count of staff whose password hash survived. It matched.
-Full detail and caveats: `docs/BACKUP-RESTORE.md` §6.
+The nightly schedule is **installed and has run** (2026-09-22 13:33 UTC, next
+fire 02:31 IST). `deploy/pos-backup.mjs` executed end to end for the first time
+as that systemd unit and reported its own eight PASS lines.
+
+The dump it produced was **restored into a throwaway database with
+`--exit-on-error` and compared**: all 22 tables to the counts the backup itself
+recorded, and 4 staff logins with their password hashes intact.
+
+**The money comparison proved nothing**, and says so out loud in its own output:
+`paymentAmountSum` is 0 because no real sale exists yet. Re-run `--drill` after
+the first full day of billing — that is the run that tests whether takings
+survive a restore. Full detail and caveats: `docs/BACKUP-RESTORE.md` §6.
 
 ---
 
@@ -261,13 +269,18 @@ Written down so they are disclosed rather than discovered.
 6. **Backups are on the same disk as the database.** There is no off-host copy.
    This survives a bad migration; it does not survive losing the server.
 7. **No alerting on a failed backup.** Someone must look.
-8. **Reconciliation page shows five zero KPIs** when no gateway provider is
-   configured — which is every tenant today. It reads as broken rather than as
-   not-applicable. Cosmetic, but a client will ask.
-9. **Branches page reads "0 active of 0 allowed"** for a company with no
-   licence, instead of saying there is no licence.
-10. **Team page renders `lastLoginAt` in the browser's locale**, unlike every
-    other date in the product, which is IST.
+8. ~~Reconciliation zero KPIs, Branches "0 of 0", Team browser-locale dates.~~
+   Fixed in `652732f`; verified by rendering the built bundle in six scenarios,
+   each assertion paired with one that catches its inverse. **Not yet deployed**
+   — see §1.
+9. **Licence expiry in the top bar uses the browser's timezone.** The same
+   licence reads "until 3/31/2027" in UTC and "3/30/2027" in New York. Same
+   defect as the Team one above, in `Layout.jsx`, which a parallel session has
+   uncommitted; left alone rather than overwritten.
+10. **The product name is unsettled.** The built UI now says "VEXO Connect"
+    while all three guides say "ATC POS". The client must not be handed guides
+    naming a product that appears nowhere on their screen — decide the shipping
+    name before handover.
 11. **No pull-based payment recovery.** If a gateway `payment.captured` webhook
     is missed, nothing polls the provider to find out. Only relevant once the
     gateway is switched on, and it should be built before it is.
@@ -276,9 +289,12 @@ Written down so they are disclosed rather than discovered.
 
 ## 7. What ATC must do before the client bills for real
 
-1. **Switch on the backup schedule.** Root, one time,
-   `docs/BACKUP-RESTORE.md` §2. Until this is done backups are manual, which
-   means they are not happening.
+1. ~~**Switch on the backup schedule.**~~ Done 2026-09-22; timer enabled, first
+   run drilled. Two follow-ups remain and neither is optional for a café that
+   has started taking money: **get a copy off this host** (right now the backups
+   and the database share a disk), and **re-run `--drill` after the first day of
+   real billing**, because today's drill compared a payment total of zero
+   against zero.
 2. **Create the client's own company and branches**, separate from
    `Brew Street Café (Demo)`. The demo tenant is `isDemo = true` and must stay
    that way: acceptance probes refuse to run anywhere else, and that refusal is
