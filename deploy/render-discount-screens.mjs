@@ -10,12 +10,18 @@
 // and when the server refuses, does a prompt appear, does the wrong manager
 // get turned away, does the right one get through.
 //
-//   BASE_URL=http://127.0.0.1:5177 DATABASE_URL=...atc_pos_discounts_test \
-//   RENDER_PASSWORD=... node deploy/render-discount-screens.mjs
+//   cd deploy && node ./seed-discount-render.mjs \
+//     && BASE_URL=http://127.0.0.1:5182 node ./render-discount-screens.mjs
 //
-// Expects deploy/seed-discount-render.mjs to have just run. PASS/FAIL lines
-// only — the password is typed into the form and never printed. Exit 0 = all
-// green.
+// Run it from deploy/, as above. An earlier note here claimed this environment
+// refuses to run the file at all; it refuses `node deploy/<script>` from the
+// repo root and accepts `./<script>` from inside deploy/, which is a different
+// thing. It has since been run: 39/39 green against backend :5011 + vite :5182.
+//
+// DATABASE_URL and RENDER_PASSWORD come from the env file below, not the
+// command line. Expects deploy/seed-discount-render.mjs to have just run.
+// PASS/FAIL lines only — the password is typed into the form and never
+// printed. Exit 0 = all green.
 
 import { mkdirSync, readFileSync } from 'node:fs';
 import { chromium } from '/home/atc-noc/mg-bulk-probe/node_modules/playwright-core/index.mjs';
@@ -69,11 +75,23 @@ page.on('pageerror', (e) => console.log(`FAIL page-error — ${e.message}`));
 
 const shot = (n) => page.screenshot({ path: `${OUT}/${n}.png`, fullPage: true });
 
+// Prisma hands back Decimal objects, which are never === a number.
+const pctOf = (d) => (d === null || d === undefined ? d : Number(d));
+
 const login = async (email) => {
   await page.goto(`${BASE}/login`, { waitUntil: 'networkidle' });
   await page.fill('input[type="email"]', email);
   await page.fill('input[type="password"]', PW);
-  await page.click('button[type="submit"]');
+  // Sign-in is an XHR, not a navigation, so the page is ALREADY idle when the
+  // click lands and waitForLoadState resolves immediately — before the session
+  // cookie exists. Every later step then ran signed out and the whole file
+  // reported the login screen as a missing feature. Wait for the thing that
+  // only happens on success.
+  await Promise.all([
+    page.waitForResponse((r) => r.url().includes('/api/auth/login') && r.request().method() === 'POST'),
+    page.click('button[type="submit"]'),
+  ]);
+  await page.waitForURL(/\/(dashboard|sell)/, { timeout: 15000 });
   await page.waitForLoadState('networkidle');
 };
 
@@ -95,6 +113,22 @@ const saveModal = async () => {
 };
 
 const fox = await prisma.company.findFirst({ where: { slug: 'foxtrot-foods' } });
+// The vitest suite wipes this same _test database, so a run that follows
+// `npm test` finds nothing here and would otherwise die on a null id twelve
+// lines later, reading like a product fault.
+if (!fox) {
+  console.error('FAIL: no fixture — run ./seed-discount-render.mjs first (npm test wipes this database)');
+  process.exit(1);
+}
+// Section A is about the day the product is handed over: nothing configured.
+// The file then types a policy in, so a second run over the same database has
+// one already and A2/A5 go red — a setup problem wearing the costume of a
+// feature failure. Refuse up front instead of reporting it as a finding.
+const preexisting = await prisma.discountPolicy.count();
+if (preexisting > 0) {
+  console.error(`FAIL: ${preexisting} discount policies already exist — re-run ./seed-discount-render.mjs for a clean fixture`);
+  process.exit(1);
+}
 const f1 = await prisma.branch.findFirst({ where: { companyId: fox.id, code: 'F1' } });
 const f2 = await prisma.branch.findFirst({ where: { companyId: fox.id, code: 'F2' } });
 const mgrF1 = await prisma.posUser.findFirst({ where: { email: 'mgr.f1@test.local' } });
@@ -132,7 +166,11 @@ await shot('02-company-default-10pct');
 
 const companyRow = await prisma.discountPolicy.findFirst({ where: { companyId: fox.id, branchId: null, userId: null } });
 ok('B1 company default written by the screen', !!companyRow);
-ok('B2 stored as 10% in milli-percent', companyRow?.maxPctMilli === 10000, `got ${companyRow?.maxPctMilli}`);
+// The STORED column is maxPercent, a Decimal. maxPctMilli is what the
+// resolver hands the till after merging the three levels, and does not exist
+// on a row — reading it here returned undefined against every value and so
+// could never have failed for the right reason.
+ok('B2 stored as 10 percent', pctOf(companyRow?.maxPercent) === 10, `got ${companyRow?.maxPercent}`);
 ok(
   'B3 a blank amount box is not a ceiling of zero',
   companyRow?.maxFlatPaise === null,
@@ -151,7 +189,7 @@ await shot('03-branch-override-f2');
 
 const f2Row = await prisma.discountPolicy.findFirst({ where: { companyId: fox.id, branchId: f2.id, userId: null } });
 const f1Row = await prisma.discountPolicy.findFirst({ where: { companyId: fox.id, branchId: f1.id, userId: null } });
-ok('C1 branch override written against the right branch', f2Row?.maxPctMilli === 20000, `got ${f2Row?.maxPctMilli}`);
+ok('C1 branch override written against the right branch', pctOf(f2Row?.maxPercent) === 20, `got ${f2Row?.maxPercent}`);
 ok('C2 the other branch is NOT changed by it', f1Row === null);
 
 // ---------------------------------------------------------------------------
@@ -166,11 +204,11 @@ await shot('04-staff-approval-grant');
 
 const mgrRow = await prisma.discountPolicy.findFirst({ where: { companyId: fox.id, userId: mgrF1.id } });
 ok('D1 approval grant written', mgrRow?.canApprove === true);
-ok('D2 approval ceiling 50%', mgrRow?.maxApprovalPctMilli === 50000, `got ${mgrRow?.maxApprovalPctMilli}`);
+ok('D2 approval ceiling 50 percent', pctOf(mgrRow?.maxApprovalPercent) === 50, `got ${mgrRow?.maxApprovalPercent}`);
 ok(
   'D3 approving for others did NOT raise their own limit',
-  mgrRow?.maxPctMilli === null,
-  `got ${mgrRow?.maxPctMilli}`,
+  mgrRow?.maxPercent === null,
+  `got ${mgrRow?.maxPercent}`,
 );
 
 const bodyD = await page.textContent('body');
@@ -194,8 +232,14 @@ await login('cashier.f1@test.local');
 await page.goto(`${BASE}/sell`, { waitUntil: 'networkidle' });
 await page.waitForTimeout(900);
 
+// The till refuses to hold items before it knows what kind of order this is
+// — "Choose Takeaway or pick a table first". Clicking the product without
+// this leaves an empty cart, and every later step then hunts for a discount
+// control on an order that does not exist.
+await page.click('button:has-text("Takeaway")');
+await page.waitForTimeout(700);
 await page.click('text=Filter Coffee');
-await page.waitForTimeout(900);
+await page.waitForTimeout(1200);
 await shot('05-till-with-item');
 
 await page.click('[aria-label="Edit order discount"]');
@@ -294,14 +338,26 @@ const audit = await prisma.posAuditLog.findMany({
   orderBy: { at: 'desc' },
   take: 20,
 });
-const approved = audit.find((a) => /APPROV/i.test(a.action));
+// An approved discount is an ORDER_DISCOUNT_SET that happens to name an
+// approver — there is no separate "approved" action, and looking for one by
+// name found section H's ORDER_DISCOUNT_APPROVAL_FAILED instead, which is the
+// refusal. Ask for the approver, not for a word in the action.
+const approved = audit.find((a) => a.action === 'ORDER_DISCOUNT_SET' && a.meta?.approvedBy);
 ok('I6 an audit row records the approval', !!approved, audit.map((a) => a.action).join(',') || 'no discount audit rows');
 ok(
   'I7 the audit names the actor and the approver separately',
-  approved && approved.actorId === cashierF1.id && JSON.stringify(approved.meta || {}).includes(mgrF1.id),
-  approved ? `actor=${approved.actorId} meta=${JSON.stringify(approved.meta)}` : '',
+  approved?.actorId === cashierF1.id && approved?.meta?.approvedBy?.id === mgrF1.id,
+  approved ? `actor=${approved.actorId} approver=${approved.meta?.approvedBy?.id}` : '',
 );
-ok('I8 the audit carries the branch', approved?.branchId === f1.id, `got ${approved?.branchId}`);
+ok('I8 the audit records the role the actor held at the time', approved?.actorRole === 'CASHIER', `got ${approved?.actorRole}`);
+// The branch rides in meta; PosAuditLog itself has no branch column, so the
+// earlier `approved.branchId` read undefined against every possible value.
+ok('I9 the audit carries the branch', approved?.meta?.branchId === f1.id, `got ${approved?.meta?.branchId}`);
+ok(
+  'I10 and the ceiling the discount was measured against',
+  approved?.meta?.actorLimit?.maxPctMilli === 10000,
+  `got ${JSON.stringify(approved?.meta?.actorLimit)}`,
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 console.log(`screenshots: ${OUT}`);

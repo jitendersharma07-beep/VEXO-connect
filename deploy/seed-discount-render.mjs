@@ -132,7 +132,9 @@ await prisma.product.create({
     name: 'Masala Chai', basePrice: '120.00',
   },
 });
-await prisma.diningTable.create({ data: { companyId: fox.id, branchId: f1.id, name: 'T1' } });
+// Tables hang off the branch, not the company — the branch already carries
+// the tenant, and a second copy of it here could disagree with the first.
+await prisma.diningTable.create({ data: { branchId: f1.id, name: 'T1' } });
 
 // NOTHING is configured. The render run starts from the state a company is in
 // on the day it is handed the product: no company default, no branch override,
