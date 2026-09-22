@@ -298,11 +298,12 @@ Separated by kind of evidence, because they are not equally strong.
 
 ### Automated tests — mocked, not a real provider
 
-Backend suite: **222 passed / 222**, 7 files (foundation 20, money 13,
-logRedaction 7, phase2 42, razorpay 53, razorpayFlow 32, gateway 55), run
-against the dev test database and re-measured at `1bcd200`. Money arithmetic, order lifecycle, RBAC, tenant scoping,
-licence gating, refund states, log redaction, and the gateway adapter **against
-a mock**. Re-measure rather than quoting this number:
+Backend suite: **225 passed / 225**, 7 files (foundation 20, money 13,
+logRedaction 7, phase2 45, razorpay 53, razorpayFlow 32, gateway 55), run
+against the dev test database and re-measured at `29d0ed3`, 15:32 UTC. Money
+arithmetic, order lifecycle, RBAC, tenant scoping, licence gating, refund
+states, log redaction, and the gateway adapter **against a mock**. Re-measure
+rather than quoting this number — it has been stale in this document twice:
 
 ```sh
 cd backend
@@ -311,6 +312,13 @@ env -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
   POS_JWT_SECRET="$(openssl rand -hex 32)" \
   NODE_ENV=test LOG_LEVEL=silent npx vitest run
 ```
+
+`<dev-db-password>` is `POSTGRES_PASSWORD` in `docker-compose.yml` — a
+throwaway development credential on a loopback-only port, nothing to do with
+production, which publishes no host port at all.
+
+`POS_JWT_SECRET` is not optional. Without it vitest reports a confident, much
+smaller pass count instead of an error.
 
 A mock has no MVCC and no second connection, so it cannot answer the two
 questions a handover turns on: a lost update between racing connections, and one
@@ -330,6 +338,15 @@ State it plainly rather than implying more:
 
 This blocks nothing in this handover, because gateway payment is switched off
 for the client. It blocks turning it on.
+
+**Before running that sequence, restart the dev backend on 5010.** As of 15:30
+UTC the process serving it (pid 2502017) started at 11:07:59, and the
+double-click payment fix landed at 12:29 in `7dbe58e` — so it is running
+pre-fix code and will reproduce a bug that is already fixed in the tree. This
+is not a guess from a file timestamp: a node process serves whatever was on
+disk when it loaded the module, and that commit is an hour and a half younger
+than the process. It is a *development* backend, unrelated to the production
+containers; left alone deliberately, because another session may own it.
 
 ### Against the running production server
 
