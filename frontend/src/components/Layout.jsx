@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Armchair,
   BadgeCheck,
@@ -21,6 +21,7 @@ import {
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
 import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope } from '../lib/pos.js';
+import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
 
@@ -111,6 +112,7 @@ function ChangePasswordModal({ open, onClose, forced }) {
 export default function Layout() {
   const { user, company, branch, license, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [pwOpen, setPwOpen] = useState(false);
 
   const isAtc = user.role === 'POS_SUPER_ADMIN';
@@ -260,7 +262,14 @@ export default function Layout() {
         </header>
 
         <main className="flex-1 px-4 py-6 md:px-6">
-          <Outlet />
+          {/* Keyed on the path so the boundary RESETS when the user navigates.
+              Without the key an error latches: React keeps the errored state,
+              so every subsequent screen shows the same message and the only
+              escape is a full reload. The key is what makes "Go to Orders"
+              actually work. Inside <main>, so the nav survives the crash. */}
+          <ErrorBoundary key={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
 
         <footer className="border-t border-slate-200 bg-white px-4 py-3 text-center text-xs text-slate-400 md:px-6">
