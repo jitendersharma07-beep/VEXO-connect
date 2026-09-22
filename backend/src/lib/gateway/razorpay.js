@@ -273,6 +273,109 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
   };
 };
 
+// --- settlement lookup ------------------------------------------------------
+
+// Razorpay reports the instrument as lowercase 'card' | 'upi' | 'netbanking' |
+// 'wallet' | 'emi'. Only the first two have a column here; the rest are OTHER
+// rather than guessed at, because this feeds the sales report's breakdown.
+//
+// Declared here, above both readers, because fetchSettlement and verifyWebhook
+// each map it and two copies would drift.
+const METHOD_MAP = new Map([['card', 'CARD'], ['upi', 'UPI']]);
+
+// The most payments one fetch can return. An order with more attempts than
+// this is not something this adapter can create — Razorpay closes an order on
+// capture — but a truncated page would make "exactly one capture" unprovable,
+// so it is detected rather than assumed away.
+const PAYMENT_PAGE_MAX = 100;
+
+// What does Razorpay say happened to this attempt?
+//
+// Two calls, because the two halves live on different entities and both are
+// needed. The ORDER carries `receipt` and `notes.pos_order_id` — the values we
+// sent when we opened it, which are what let the caller prove this record is
+// ours. The PAYMENTS carry the capture, the charge id and the instrument.
+//
+// Nothing here decides anything. It returns what the account says and lets
+// orders.js compare that against our own rows.
+const fetchSettlement = async ({ intentProviderRef }) => {
+  if (typeof intentProviderRef !== 'string' || !intentProviderRef.startsWith('order_')) {
+    // LOCAL: Razorpay was never asked, so it has no opinion. An intent with no
+    // order_… was never opened with the provider and there is nothing to find.
+    throw new RazorpayError(
+      'this payment attempt has no Razorpay order id recorded, so the provider cannot be asked about it',
+      { kind: 'LOCAL' },
+    );
+  }
+
+  const order = await request('GET', `/v1/orders/${encodeURIComponent(intentProviderRef)}`);
+  const page = await request(
+    'GET',
+    `/v1/orders/${encodeURIComponent(intentProviderRef)}/payments?count=${PAYMENT_PAGE_MAX}`,
+  );
+  const items = Array.isArray(page?.items) ? page.items : null;
+  if (!items) {
+    throw new RazorpayError('Razorpay listed payments in a shape this adapter cannot read', {
+      kind: 'UNKNOWN',
+    });
+  }
+
+  // `captured` and `status` are checked together. Either alone has been seen to
+  // disagree with the other in Razorpay's own docs' examples, and recording
+  // money on the strength of one field that says yes while another says no is
+  // the precise failure this whole module is built to avoid.
+  const captures = items.filter((p) => p?.status === 'captured' && p?.captured === true);
+
+  // Absence is only evidence when the list was complete.
+  if (captures.length === 0 && items.length >= PAYMENT_PAGE_MAX) {
+    throw new RazorpayError(
+      'Razorpay returned a full page of payments with no capture on it, so whether one exists cannot be established',
+      { kind: 'UNKNOWN' },
+    );
+  }
+  if (captures.length === 0) {
+    const tried = items.length;
+    return {
+      settled: false,
+      reason: tried === 0
+        ? 'the provider has no payment on this attempt'
+        : `the provider has ${tried} payment attempt(s) on this order but none captured`,
+    };
+  }
+  // Two captures on one order is a state this adapter cannot have created, and
+  // choosing one would be a guess about which money is the order's.
+  if (captures.length > 1) {
+    throw new RazorpayError(
+      'Razorpay reports more than one captured payment on this order; a human must decide which is correct',
+      { kind: 'MISMATCH' },
+    );
+  }
+
+  const payment = captures[0];
+  const amountPaise = paiseFrom(payment.amount);
+  if (amountPaise === null) {
+    throw new RazorpayError('Razorpay reported a captured payment with an unreadable amount', {
+      kind: 'UNKNOWN',
+    });
+  }
+
+  return {
+    settled: true,
+    // The ATTEMPT, echoed from the payment rather than from our argument, so a
+    // provider that answered about a different order is visible to the caller
+    // instead of being papered over by the id we asked with.
+    providerRef: typeof payment.order_id === 'string' ? payment.order_id : null,
+    chargeRef: typeof payment.id === 'string' && payment.id ? payment.id : null,
+    amountPaise,
+    currency: typeof payment.currency === 'string' ? payment.currency : null,
+    method: METHOD_MAP.get(payment.method) ?? 'OTHER',
+    captured: true,
+    // Ours, stored by Razorpay at create time. The caller's proof of ownership.
+    receipt: typeof order?.receipt === 'string' ? order.receipt : null,
+    posOrderId: typeof order?.notes?.pos_order_id === 'string' ? order.notes.pos_order_id : null,
+  };
+};
+
 // --- refunds ----------------------------------------------------------------
 
 // The most refunds one fetch can return (docs: default 10, maximum 100). It
@@ -418,11 +521,6 @@ const EVENT_MAP = new Map([
   ['refund.failed', EVENT_REFUND_FAILED],
 ]);
 
-// Razorpay reports the instrument as lowercase 'card' | 'upi' | 'netbanking' |
-// 'wallet' | 'emi'. Only the first two have a column here; the rest are OTHER
-// rather than guessed at, because this feeds the sales report's breakdown.
-const METHOD_MAP = new Map([['card', 'CARD'], ['upi', 'UPI']]);
-
 const refusal = (reason) => ({ valid: false, reason });
 
 const verifyWebhook = ({ rawBody, headers, secret, toleranceSeconds, nowMs }) => {
@@ -539,6 +637,7 @@ export const razorpayAdapter = {
   name: 'razorpay',
   createSession,
   createRefund,
+  fetchSettlement,
   verifyWebhook,
   verifyCheckoutHandoff,
 };

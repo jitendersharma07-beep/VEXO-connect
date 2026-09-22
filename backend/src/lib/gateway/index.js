@@ -43,7 +43,40 @@
 //     let an attacker squat the idempotency key with a forged id and block
 //     the genuine event for good. The caller cannot misuse what it is not given.
 //
-// One method is OPTIONAL, because not every provider has a browser step:
+// Two methods are OPTIONAL. The first exists because not every provider has a
+// browser step; the second because not every provider can be asked after the
+// fact what it did.
+//
+//   fetchSettlement({ intentProviderRef })
+//     -> { settled: true, providerRef, chargeRef, amountPaise, currency,
+//          method, captured, receipt, posOrderId }
+//      | { settled: false, reason }
+//     Asks the provider what actually happened to one attempt. This is the
+//     pull half of the webhook's push: a webhook that is merely LATE — tunnel
+//     down, retries exhausted, endpoint misconfigured — leaves a customer who
+//     has paid facing a POS that still shows the bill as due, and nothing in a
+//     push-only design can ever close that gap.
+//
+//     It reports facts, never conclusions. `settled` means the provider says
+//     the money was captured; it does NOT mean the POS may record a payment.
+//     That decision belongs to the caller, which holds the records this has to
+//     be checked against, and orders.js makes every one of those comparisons
+//     explicitly rather than trusting a boolean computed in here.
+//
+//     `receipt` and `posOrderId` are the two values WE sent at createSession
+//     and the provider stored verbatim. They are returned so the caller can
+//     prove the thing it just fetched is its own: without them, a reconcile
+//     is only as good as the assumption that the configured key pair still
+//     points at the account the intent was opened on. They are the account
+//     check, and they are checked against our own row, not against config.
+//
+//     `captured` is separate from `settled` on purpose. An AUTHORIZED payment
+//     is money blocked on a card that the merchant has not received, and a
+//     provider that reports one must not be able to close an order here.
+//
+//     Absent on adapters with no such query. A caller MUST treat its absence
+//     as "reconciliation unavailable" and say so, rather than falling back to
+//     anything that writes a payment on weaker evidence.
 //
 //   verifyCheckoutHandoff({ intentProviderRef, paymentId, signature })
 //     -> boolean
