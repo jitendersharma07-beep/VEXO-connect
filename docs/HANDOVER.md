@@ -45,11 +45,19 @@ is in this build; `git log --oneline 0084936..HEAD` returns only documentation.
 Do not trust that sentence either. Re-derive it:
 
 ```sh
-git log --oneline <deployed-commit>..HEAD -- frontend/ backend/
+git log --oneline <deployed-commit>..HEAD -- \
+  frontend/ backend/src backend/prisma backend/scripts backend/package.json
 ```
 
 using the commit you just *proved* by rebuild, not the one this table claims.
 Empty output is the only acceptable answer.
+
+**Scope that pathspec deliberately.** `backend/Dockerfile` copies exactly four
+things — `package*.json`, `prisma`, `src`, `scripts` — so `backend/tests/`
+never enters the image. The broader `-- frontend/ backend/` reports a
+test-only commit as an undeployed change, which sends someone into a
+build-and-deploy cycle that cannot alter a single byte of the running
+service. Widen the pathspec only if the Dockerfile widens first.
 
 One ordering rule survives, because it will apply again the next time
 `817b438`-shaped work ships: **its two halves are not symmetric.** Backend
@@ -401,11 +409,24 @@ Written down so they are disclosed rather than discovered.
    on a page somebody has to open. It also only looks back 30 days, because
    that is the window the list queries.
 
-   Evidence, measured rather than asserted: backend 224/224 across 7 files
-   (day-close 11). Two perturbations of `postCloseFor` reddened exactly the two
-   new tests and left the nine pre-existing day-close tests green, then
-   restored byte-identical by sha256. The screens were rendered, not reasoned
-   about — 34/34 in `/tmp/pos-render/render-postclose.mjs` across mixed,
+   Evidence, measured rather than asserted: backend 225/225 across 7 files
+   (day-close 12). Five perturbations of `postCloseFor` reddened exactly the
+   new tests and left the pre-existing day-close tests green, each restored
+   byte-identical by sha256 afterwards.
+
+   Three of those five were worth the trouble on their own, because they found
+   a gap rather than confirming one. The refund half of `postCloseFor` had no
+   test at all: `expectedCashDelta` is `cashTaken - cashRefunded`, and changing
+   that one operator to `+` left **all 44 other tests green**. That is the
+   direction that costs money — a closing would report the drawer as *up* after
+   cash was handed back, sending a manager to look for takings that were
+   actually paid out. The other two: a GATEWAY refund must count as activity
+   without moving any cash figure, and a PENDING refund must not count at all,
+   which `schema.prisma` had been asserting in a prose comment and nothing had
+   been enforcing. All three now redden one named test and nothing else.
+
+   The screens were rendered, not reasoned about — 34/34 in
+   `/tmp/pos-render/render-postclose.mjs` across mixed,
    refund-only, card-only, clean-day and absent-field fixtures; the same set
    against a **pre-feature** bundle (`269b0f5`, which was what production was
    serving when the control was run) scores 15/34, with every assertion naming
@@ -418,6 +439,16 @@ Written down so they are disclosed rather than discovered.
    backend that never sends the field: `postCloseFor` appears 3× and
    `staleDays` 1× in `/app/src/api/routes/reports.js` inside the running
    container, whose digest matches the repo.
+
+   That seam deserves naming, because it is the one place this evidence could
+   have been circular. The render fixtures and the screen that reads them were
+   written from the same reading of the same backend file, so a misreading
+   would have been consistent across both and invisible in a green harness.
+   What breaks the circle is that the backend tests assert field names against
+   a real HTTP response from the real app and a real Postgres — and as of the
+   refund test, **all eight fields** the screen reads (`payments`, `refunds`,
+   `ordersBilled`, `expectedCashDelta`, `cashTaken`, `cashRefunded`,
+   `nonCashTaken`, `lastAt`) are pinned there. Before it, two were not.
 
    Two things that control run caught, worth repeating because neither would
    have shown up any other way. First, two of my own assertions passed with no
