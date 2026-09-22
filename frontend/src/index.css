@@ -72,6 +72,16 @@
    the content box is the 72 mm printable width, and the breathing space is
    padding INSIDE that box where it cannot push anything off the paper. */
 @media print {
+  /* `80mm auto` is the right declaration for a continuous roll, and Firefox
+     honours it. Chromium — what the till runs — rejects a `<length> auto`
+     pair and silently falls back to US Letter (measured: 612x792pt), which
+     the driver then scales or crops onto 80 mm paper. So this rule is the
+     fallback; src/lib/printPageSize.js overrides it on `beforeprint` with the
+     same width and a height measured from the receipt. Do not delete that
+     module as redundant — without it Chromium prints these Letter-sized. Do
+     not hard-code a height here either: these receipts run 64-153 mm, so a
+     page tall enough for the longest wastes ~136 mm of roll on the shortest
+     and puts the auto-cut in the wrong place. */
   @page {
     size: 80mm auto;
     margin: 0;

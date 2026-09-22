@@ -6,6 +6,14 @@
 import { createRoot } from 'react-dom/client';
 import './index.css';
 import { ReceiptView, KotView } from './components/Receipt.jsx';
+import { installPrintPageSize } from './lib/printPageSize.js';
+
+// Mirrors main.jsx. This harness is a second Vite entry, so nothing in
+// main.jsx runs here — and the page size is installed from JS because
+// Chromium ignores `@page { size: 80mm auto }`. Without this line the
+// harness would render the real receipt onto a US Letter page and report
+// the print geometry of a document the app never produces.
+installPrintPageSize();
 
 const LABEL_MANUAL = 'MANUAL PAYMENT RECORD — not gateway-verified';
 const LABEL_GATEWAY = 'GATEWAY PAYMENT — confirmed by the provider';
