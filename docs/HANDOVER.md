@@ -19,17 +19,19 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Backend commit | `269b0f5`…`37d5ad8` — `backend/` is byte-identical across that whole range, so content cannot narrow it further and does not need to. Image `pos-prod-backend:20260922-vexo-rebrand` (`fd5e33f8a045`), container created 14:04 UTC |
-| Frontend commit | **`37d5ad8`**, image `pos-prod-frontend:20260922-dates-errboundary` (`173962d8e5f1`), container created 14:49 UTC |
-| Frontend bundle | `assets/index-BX2Iv59k.js`, sha256 `d5d7abeb…`. Reproduced byte-identical from `37d5ad8` at 15:00 UTC |
-| Rollback tags | `pos-prod-frontend:rollback-20260922-1428` (`8f80e8f996b4` — the frontend that was live before 14:49), `pos-prod-backend:rollback-20260922-1402` (`9b7c4aa90e94`) |
-| Database migrations applied | 8 |
+| Backend commit | `817b438`…`0084936` — `0084936` is frontend-only, so `backend/` is byte-identical across that range and content cannot narrow it further. Proven by tree digest, not by tag: `/app/src` in the running container and `backend/src` in the clean working tree both hash `6b9cbcd3…`. Image `pos-prod-backend:20260922-dayclose-stale` (`b4de17df52df`), container created 15:03 UTC |
+| Frontend commit | **`0084936`**, image `pos-prod-frontend:20260922-dayclose-stale` (`b4e84ea39f19`), container created 15:03 UTC |
+| Frontend bundle | `assets/index-BKEWKpgq.js`, sha256 `6989289f…`. Reproduced byte-identical from `0084936` at 15:07 UTC |
+| Rollback tags | `pos-prod-frontend:rollback-20260922-1501` (`173962d8e5f1` — the frontend that was live before 15:03), `pos-prod-backend:rollback-20260922-1501` (`fd5e33f8a045`) |
+| Database migrations applied | 8, unchanged. This deploy carried no migration and the boot log says so: `8 migrations found` then `No pending migrations to apply.` |
 
-**This table went stale three times in one afternoon** — the third time while
-this very section was being edited. At 14:49 UTC another session deployed
-`1ca40bc` + `1e64b24`, and four paragraphs below this one had just been written
-saying both were missing from production. They were true when written and false
-twenty minutes later.
+**This table went stale four times in one afternoon** — twice while this very
+section was being edited. At 14:49 UTC another session deployed `1ca40bc` +
+`1e64b24` while the paragraph below was being written to say they were missing
+from production. The correction to *that* was committed at 15:06, by which
+point it was already wrong again: `817b438` + `0084936` had gone out at 15:03,
+and the sentence announcing them as undeployed outlived the deploy by three
+minutes.
 
 So: it is the most perishable thing in this document. Production is redeployed
 by whoever is working on it and the table does not update itself. Treat every
@@ -37,9 +39,8 @@ row as a claim to re-check, and re-check it by **content** — image tags and
 directory names have both lied here already. The reproduce recipe below is the
 check, and it takes about a minute.
 
-**Two commits are in git but not in this build:** `817b438` + `0084936`, the
-day-close staleness work (item 2). Nothing else is outstanding — `1ca40bc` and
-`1e64b24` went live at 14:49 UTC.
+**Nothing is outstanding.** Every commit that touches `frontend/` or `backend/`
+is in this build; `git log --oneline 0084936..HEAD` returns only documentation.
 
 Do not trust that sentence either. Re-derive it:
 
@@ -48,26 +49,30 @@ git log --oneline <deployed-commit>..HEAD -- frontend/ backend/
 ```
 
 using the commit you just *proved* by rebuild, not the one this table claims.
+Empty output is the only acceptable answer.
 
-The two halves of `817b438` are not symmetric. Backend first is inert and
-harmless — the API returns a field nothing reads. Frontend first is the one to
-avoid: the page renders perfectly and the banner never appears, because
-`existing.postClose` is simply absent, which is indistinguishable on screen
-from "this day is clean". Ship the backend first, or ship both.
+One ordering rule survives, because it will apply again the next time
+`817b438`-shaped work ships: **its two halves are not symmetric.** Backend
+first is inert and harmless — the API returns a field nothing reads. Frontend
+first is the one to avoid, because the page renders perfectly and the banner
+never appears: `existing.postClose` is simply absent, which on screen is
+indistinguishable from "this day is clean". A frontend-only deploy of a
+feature like this does not fail, it goes quiet. Ship the backend first, or
+ship both. The 15:03 deploy recreated both containers together.
 
 The frontend commit is not read off an image tag or a directory name. Both lie
 — the worktree this was first traced through was named `atc-pos-deploy-269b0f5`
 and had already been deleted by the time it was looked at. It is proven by
 rebuilding the candidate commit and getting a **byte-identical** bundle. Run at
-15:00 UTC against `37d5ad8`, which is how the row above was established:
+15:07 UTC against `0084936`, which is how the row above was established:
 
 ```sh
-git worktree add --detach /tmp/v 37d5ad8
+git worktree add --detach /tmp/v 0084936
 ln -s "$PWD/frontend/node_modules" /tmp/v/frontend/node_modules
 cd /tmp/v/frontend && VITE_BASE_PATH=/pos/ npx vite build   # trailing slash — see below
 docker exec pos-prod-frontend-1 ls /usr/share/nginx/html/assets/   # get the live name
-docker cp pos-prod-frontend-1:/usr/share/nginx/html/assets/index-BX2Iv59k.js /tmp/live.js
-cmp /tmp/live.js dist/assets/index-BX2Iv59k.js && echo REPRODUCED
+docker cp pos-prod-frontend-1:/usr/share/nginx/html/assets/index-BKEWKpgq.js /tmp/live.js
+cmp /tmp/live.js dist/assets/index-BKEWKpgq.js && echo REPRODUCED
 
 # Clean up — DELETE THE SYMLINK FIRST. `git worktree remove --force` deletes
 # the directory tree, and the link it is about to walk over points at the real
@@ -83,6 +88,21 @@ calls `/pos/api` and works. The two builds differ by **three bytes** in 415 kB.
 Nothing warns you — the build succeeds, the hash merely changes, nginx serves
 it, the login screen paints normally, and the only symptom is that signing in
 does nothing at all. Worth knowing before it happens during a real deploy.
+
+**The backend has no bundle to hash**, so it gets the same treatment a
+different way: digest the whole source tree on both sides and compare. Not one
+file — a single changed file is exactly what a stale image would still get
+right, since most of a deploy is unchanged:
+
+```sh
+docker exec pos-prod-backend-1 sh -lc 'cd /app/src && find . -type f | sort | xargs sha256sum | sha256sum'
+find backend/src -type f -printf './%P\n' | sort | (cd backend/src && xargs sha256sum) | sha256sum
+```
+
+Both printed `6b9cbcd3…` at 15:05 UTC. This only proves the image matches the
+**working tree**, so it is worth something only when `git status --porcelain`
+is empty — otherwise it proves the image matches somebody's uncommitted edit,
+which is a different and much worse fact. Check that first.
 
 Confirm before quoting any of this. Re-read it from the live site rather than
 trusting the table — a docs table is a claim, the served bundle is the fact:
@@ -353,9 +373,10 @@ Written down so they are disclosed rather than discovered.
    small but ATC cannot pick the threshold — ask the owner for a number and a
    rule ("above 10 %, manager approves").
 2. **Daily closing deliberately does not lock the day** — but it now says when
-   it has stopped being true. `817b438` + `0084936`. **In git, NOT yet in
-   production** (§1); unlike items 9 and 13 this one has a *backend* half, so
-   shipping it is a backend deploy too, not a frontend-only one.
+   it has stopped being true. `817b438` + `0084936`, **deployed** at 15:03 UTC
+   and verified afterwards against the running build, not the working tree.
+   Unlike items 9 and 13 this one has a *backend* half, and both containers
+   were recreated together; the ordering trap is in §1.
 
    Locking was the obvious fix and it is the wrong one. A cashier who cannot
    record cash they have already been handed will take it and keep it out of
@@ -389,6 +410,14 @@ Written down so they are disclosed rather than discovered.
    against a **pre-feature** bundle (`269b0f5`, which was what production was
    serving when the control was run) scores 15/34, with every assertion naming
    the feature red and only the controls green.
+
+   Re-run against the **deployed** bundle after the 15:03 deploy, by the same
+   method as items 9 and 13 — pulled out of the running container, `--prefix
+   /pos` — it is 34/34. The backend half was checked separately, because a
+   green frontend harness is fed by fixtures and would score 34/34 against a
+   backend that never sends the field: `postCloseFor` appears 3× and
+   `staleDays` 1× in `/app/src/api/routes/reports.js` inside the running
+   container, whose digest matches the repo.
 
    Two things that control run caught, worth repeating because neither would
    have shown up any other way. First, two of my own assertions passed with no
@@ -435,8 +464,11 @@ Written down so they are disclosed rather than discovered.
 
    Final: 27/27 green on the fixed build, 14 red on the pre-fix build, and
    **27/27 green on the bundle production is serving right now** — pulled out
-   of the running container at 15:00 UTC and rendered, which is how "deployed"
-   is known rather than assumed:
+   of the running container and rendered, which is how "deployed" is known
+   rather than assumed. Re-run at 15:09 UTC against `index-BKEWKpgq.js`, after
+   the 15:03 deploy replaced the bundle this was first proved on. Re-running it
+   was not ceremony: "the fix is an ancestor of what shipped" is a claim about
+   the commit graph, and the graph is not what the café loads.
 
    ```sh
    docker cp pos-prod-frontend-1:/usr/share/nginx/html /tmp/pos-render/dist-live
@@ -454,10 +486,11 @@ Written down so they are disclosed rather than discovered.
 10. ~~The product name is unsettled.~~ Settled, and it is **VEXO Connect**.
     Production was redeployed at 14:02 UTC on 2026-09-22 with the rebrand
     (`f94b9ce`, `269b0f5`), so the live site now says "VEXO Connect" and
-    "ATC POS" appears nowhere in it. The 14:49 UTC frontend redeploy (§1) was
-    built on top of the rebrand and carries it forward, so this is still true of
-    `37d5ad8`. The three client documents were rewritten to match — 24
-    references across `guide-owner.md` and `guide-cashier.md`.
+    "ATC POS" appears nowhere in it. Two further deploys have landed on top
+    since, so this was re-checked against the bundle currently served rather
+    than assumed to carry forward: `index-BKEWKpgq.js` contains "VEXO Connect"
+    once and "ATC POS" zero times. The three client documents were rewritten to
+    match — 24 references across `guide-owner.md` and `guide-cashier.md`.
 
     Two things this did **not** change, deliberately: the URL is still
     `atcworkspace.com/pos`, and the footer still credits ATC Infocom Solutions
@@ -481,7 +514,8 @@ Written down so they are disclosed rather than discovered.
     the client wants phones, and `Layout.jsx` is the only file it touches.
 13. ~~**No error boundary.**~~ Fixed 2026-09-22 in `1e64b24` and **deployed**
     at 14:49 UTC in the same push as item 9 — 18/18 green against the bundle
-    pulled out of the running container at 15:00 UTC, same method and same
+    pulled out of the running container, re-confirmed at 15:09 UTC against
+    `index-BKEWKpgq.js` after the 15:03 deploy, same method and same
     `POS_BASE=/pos` caveat as item 9. The measured
     before-and-after: a 200 whose body the Dashboard could not render left the
     page with **zero characters of text**, and now leaves a readable screen of
