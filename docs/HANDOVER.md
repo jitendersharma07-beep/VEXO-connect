@@ -821,9 +821,34 @@ Only if online payment is wanted:
   when ATC only looks", which asserts both halves of the bullet above and was
   confirmed to go red when the `COMPANY_CREATE` write is removed.
 - Audit queries, read-only and safe during service:
-  `docker exec -i pos-prod-postgres-1 psql -U atc_pos -d atc_pos < deploy/audit-queries.sql`.
-  Run query 0 first — it is a control, and if its `correct_ist` column is not
-  `stored` + 5:30 the rest of the output should not be trusted.
+
+  ```sh
+  # ATC-side review, every tenant
+  docker exec -i pos-prod-postgres-1 psql -U atc_pos -d atc_pos \
+    < deploy/audit-queries.sql
+
+  # answering one customer — pass their company, printed by query 0
+  docker exec -i pos-prod-postgres-1 psql -U atc_pos -d atc_pos \
+    -v company=<companyId> < deploy/audit-queries.sql
+  ```
+
+  **Use the scoped form before showing anything to a client.** The file spans
+  every company by default, which is right for ATC and wrong the moment the
+  output leaves this building. `guide-owner.md` §5 now tells owners to ask for
+  this, so the unscoped form is a standing way to hand one customer another's
+  cashier names.
+
+  Two things about the scope are not obvious and are written into the file
+  beside the queries. Rows with a null `companyId` vanish under it — on
+  2026-09-22 the scope took `LOGIN_FAILED` from 36 rows to 4 and `LOGIN_SUCCESS`
+  from 23 to 18, the missing sign-ins being ATC's own, since a VEXO
+  administrator belongs to no company. And query 4 is deliberately left
+  unscoped, because a failed sign-in against an address that does not exist
+  resolves no company, so scoping would drop precisely the attack signal while
+  keeping the ordinary forgotten passwords.
+
+  Run query 0 first either way — it is a control, and if its `correct_ist`
+  column is not `stored` + 5:30 the rest of the output should not be trusted.
 - Logs: `docker compose -f docker-compose.prod.yml logs backend`.
 - Restart: `docker compose -f docker-compose.prod.yml up -d --no-deps backend`
   — `restart` alone re-runs the old container with the old environment.
