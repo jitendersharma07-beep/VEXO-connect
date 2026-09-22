@@ -444,33 +444,72 @@ production, which publishes no host port at all.
 `POS_JWT_SECRET` is not optional. Without it vitest reports a confident, much
 smaller pass count instead of an error.
 
+Unmerged branches carry their own counts, and mixing them with the release's
+is how this number goes stale. `phase2-reconcile-tests` is **253 / 253** (
+gateway 55 → 73: reconciliation, the webhook race, and delivery-versus-replay).
+That is a statement about **that branch**, not about `f014ab5`, which remains
+235 until the branch merges. Two of those 18 were failing when written, and are
+what found the two gateway defects written up in `docs/RAZORPAY-SANDBOX.md` —
+one of which, a capture settled in a foreign currency closing an INR bill at
+face value, was on the **webhook** path, not only on the new route.
+
+Run an unmerged branch against **its own** database, not `atc_pos_test`. Two
+suites sharing one database delete each other's sessions mid-run, and the
+symptom is not a clash — it is every authenticated test failing with "your
+session has expired", which reads exactly like a broken auth change.
+
 A mock has no MVCC and no second connection, so it cannot answer the two
 questions a handover turns on: a lost update between racing connections, and one
 branch's token against another branch's row. Those are answered in §5.3.
 
-### Real Razorpay sandbox — incomplete
+### Real Razorpay sandbox — the money legs are now verified
 
-State it plainly rather than implying more:
+**This section said "incomplete — the webhook was never delivered" until
+2026-09-22 evening. That is no longer true and must not be quoted.** The
+blocker was found and fixed: the account had **0 webhooks registered**, and the
+registration script sent `events` as an array where the API wants a
+name→enabled map. Every tunnel hostname expiring was a symptom that hid it.
 
-- The adapter is written and unit-tested against a mock.
-- A **real sandbox order was created** against Razorpay's live test endpoint.
-- The **webhook was never delivered**, because no webhook is registered on the
-  account. Every tunnel hostname supplied for that purpose has since expired.
-- Therefore: `payment.captured` → order PAID with a real `pay_…` reference,
-  duplicate-event suppression against real replays, and `refund.processed`
-  settling a real refund are **not verified against the provider**.
+Verified against the live TEST account, on order `cmucyvfuj002t1grlxxb6smh6`
+/ `order_TfAcLrKPDwVYez`, ₹105:
 
-This blocks nothing in this handover, because gateway payment is switched off
-for the client. It blocks turning it on.
+| Leg | Provider's record | POS record |
+|---|---|---|
+| Capture | `pay_TfAz6n5mPXApUi` `captured=true` | genuine event `TfAzJXOLfmOqii`, 18:09:13Z → **exactly one** `Payment`, ₹105, `GATEWAY`, `receivedById=null`, order `PAID` |
+| Refund | `rfnd_TfB3TLNRxpbgl5` `processed` ₹40 | genuine event `TfB42UGWqm3vNh` → `Refund` `SUCCEEDED` |
+| Replay | same bytes, twice each — as a provider retry and under a fresh event id | totals held at `payments=1/105 refunds=1/40` |
 
-**Before running that sequence, restart the dev backend on 5010.** As of 15:30
-UTC the process serving it (pid 2502017) started at 11:07:59, and the
-double-click payment fix landed at 12:29 in `7dbe58e` — so it is running
-pre-fix code and will reproduce a bug that is already fixed in the tree. This
-is not a guess from a file timestamp: a node process serves whatever was on
-disk when it loaded the module, and that commit is an hour and a half younger
-than the process. It is a *development* backend, unrelated to the production
-containers; left alone deliberately, because another session may own it.
+The refund was **partial on purpose**: a full refund is a weak test, because
+code ignoring the requested amount and returning the whole payment would look
+perfect. ₹40 of ₹105 forces the figure to survive every hop.
+
+`receivedById=null` is the load-bearing detail — no cashier is credited,
+because no human recorded it. The order went `PAID` on the provider's word.
+
+What is still **not** verified against the provider, stated so it cannot be
+read as covered:
+
+- The **payment-intent reconcile route** (the pull half, for a capture whose
+  webhook never arrives). Proved against the test adapter, 18 tests, not yet
+  run against a real captured payment. Branch `phase2-reconcile-tests`.
+- A genuine captured ₹105 from 11:54Z — `pay_Tf4bqZCtM4GOU2` — is still
+  unrecorded, from before the webhook existed. That route is its remedy and
+  closing it is a deliberate act for the release owner. **Do not hand-write a
+  `Payment` row.**
+
+None of this changes the client position: **gateway payment is switched off**
+and the production stack has no `POS_GATEWAY_PROVIDER` at all, so there is no
+gateway to enable by accident. It unblocks turning it on later.
+
+Full evidence, including how to tell a genuine event row from a synthetic one:
+`docs/RAZORPAY-SANDBOX.md`.
+
+**The dev backend has moved off 5010** — it is on 5015, with a webhook capture
+proxy on 5014. Do not pin either in source; read them from the sandbox doc at
+the time of the run. A node process serves whatever was on disk when it loaded
+the module, so restart it before any sandbox run rather than assuming it
+carries the current tree. It is a *development* backend, unrelated to the
+production containers, and another session may own it.
 
 ### Against the running production server
 
