@@ -12,11 +12,38 @@
 // JSON middleware would do — would invalidate every event.
 
 import http from 'node:http';
+import fs from 'node:fs';
 
 const PORT = Number(process.env.POS_WEBHOOK_PROXY_PORT || 5011);
 const TARGET_PORT = Number(process.env.POS_WEBHOOK_TARGET_PORT || 5010);
 const PATH = '/api/gateway/webhook';
 const MAX_BODY = 256 * 1024; // matches the route's own express.raw limit
+
+// Optional capture of genuine deliveries, off unless a path is given.
+//
+// This exists to make the duplicate-event test REAL. Re-sending an event needs
+// the exact bytes Razorpay signed plus its signature header; anything we
+// synthesise ourselves proves our own HMAC round-trips, not that a genuine
+// redelivery is refused. Captured lines are written 0600 because a signed body
+// is replayable against this backend for as long as the secret stands.
+//
+// It is dev-only and opt-in: the production edge is nginx and never runs this.
+const CAPTURE = process.env.POS_WEBHOOK_CAPTURE || '';
+const capture = (headers, body) => {
+  if (!CAPTURE) return;
+  try {
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
+      signature: headers['x-razorpay-signature'] ?? null,
+      eventId: headers['x-razorpay-event-id'] ?? null,
+      bodyB64: body.toString('base64'),
+    });
+    fs.appendFileSync(CAPTURE, `${line}\n`, { mode: 0o600 });
+  } catch (err) {
+    // Capture is a diagnostic, never a reason to drop a real payment event.
+    console.log(`capture failed (delivery unaffected): ${err.message}`);
+  }
+};
 
 // Only what the signature check and the event log need. Everything else —
 // cookies above all, but also authorization and forwarded-identity headers —
@@ -64,6 +91,7 @@ const server = http.createServer((req, res) => {
       if (FORWARD.has(k.toLowerCase())) headers[k] = v;
     }
     headers['content-length'] = String(body.length);
+    capture(headers, body);
 
     const up = http.request(
       { host: '127.0.0.1', port: TARGET_PORT, method: 'POST', path: PATH, headers },

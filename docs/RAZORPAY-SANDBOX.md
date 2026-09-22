@@ -15,13 +15,24 @@ and a surprise on a live counter. As of 2026-09-22:
 | Outbound reachability to `api.razorpay.com` | **Verified** |
 | `createSession` payload accepted, returns an `order_…` | **Verified** |
 | `capture_options` shape accepted | **Verified**, and found to be *optional* — see below |
+| Tunnel exposes the webhook path and nothing else | **Verified** — 14 external probes, twice, plus traversal and query-string variants |
+| Dev chain 5177 → 5010 → dev Postgres | **Verified** — a unique marker sent through vite appeared verbatim in the backend log |
+| Unsigned webhook is refused | **Verified** — HTTP 400 from the public hostname |
+| `payment.authorized` does not create a Payment | **Verified** — recorded with `skippedReason`, no `Payment` row |
+| A webhook is registered on the account | **NO** — the account reports **0 webhooks**. Nothing will ever be delivered until this is fixed. |
 | Automatic capture actually honoured | **Not verified** — needs a real payment |
-| Webhook delivery, signature, and application | **Not verified** — needs the tunnel |
+| Webhook delivery, signature, and application | **Not verified** — blocked on the row above |
 | Refund create / settle / replay | **Not verified** |
 
 Everything in the unverified rows is backed only by a stub of Razorpay's API
 and by published documentation. That proves the wire format and the failure
 handling; it proves nothing about a real account.
+
+**The sandbox account currently holds 0 payments and 0 refunds.** Any `pay_…`
+that appears is therefore attributable to the next run. Events in
+`/tmp/pos-demo/webhook-capture.jsonl` whose ids start `evt_probe_` are
+synthetic posts from a local probe, not Razorpay deliveries; they were briefly
+misread as genuine, which is why they are called out here.
 
 One documented claim has already turned out to be wrong, which is the reason
 this table exists. The adapter used to carry a comment saying Razorpay rejects
@@ -82,6 +93,21 @@ A `401` means the stored key id and secret do not match, or the key was
 revoked; re-run the setup script. A failure to connect is reported as a
 connectivity answer and explicitly *not* as a verdict on the credentials.
 
+## 1b. Is the dashboard you are looking at the same account?
+
+```
+cd /home/atc-noc/atc-pos && bash backend/scripts/dev-key-id-compare.sh
+```
+
+An empty dashboard has two explanations — nothing happened, or you are looking
+at a different Razorpay account — and they call for opposite responses. This
+settles it in one step: paste the Key Id from the dashboard (Settings → API
+Keys) at a hidden prompt. It prints `MATCH` or `NO MATCH` and nothing else.
+
+The configured key id is never displayed. It could be — a key id is publishable,
+it is handed to the browser on every checkout — but scrollback from this box
+gets pasted into chats, so the value travels in rather than out.
+
 ## 2. Give Razorpay somewhere to deliver webhooks
 
 Razorpay posts events from the internet, so it needs a public HTTPS URL that
@@ -99,15 +125,35 @@ invalidate every event.
 
 ```
 # terminal 1 — the proxy
-cd /home/atc-noc/atc-pos && node backend/scripts/dev-webhook-proxy.mjs
+cd /home/atc-noc/atc-pos && POS_WEBHOOK_PROXY_PORT=5012 \
+  POS_WEBHOOK_CAPTURE=/tmp/pos-demo/webhook-capture.jsonl \
+  node backend/scripts/dev-webhook-proxy.mjs
 ```
 
-Then expose **the proxy's port, 5011** — not 5010:
+Then expose **the proxy's port** — not 5010:
 
 ```
 # terminal 2 — the tunnel
-cloudflared tunnel --url http://127.0.0.1:5011
+cloudflared tunnel --url http://127.0.0.1:5012
 ```
+
+### Which port is authoritative
+
+Earlier reports named both 5011 and 5012, which is worth settling because the
+tunnel points at exactly one of them and a webhook aimed at the other is simply
+never delivered.
+
+**5012 is authoritative.** It is the one the tunnel forwards to, and the only
+one with `POS_WEBHOOK_CAPTURE` set. 5011 is an earlier instance of the same
+script with capture disabled; it is still listening and still harmless — nothing
+routes to it from outside — but it receives nothing and proves nothing. If only
+one proxy is running, use 5012.
+
+Capture exists for one specific test. Proving that a redelivered event is
+refused needs the exact bytes Razorpay signed plus its signature header;
+anything synthesised here would only prove our own HMAC round-trips. The file
+is written `0600` because a signed body stays replayable for as long as the
+secret stands.
 
 `cloudflared` is not installed on this box. Installing it downloads and runs a
 binary that accepts traffic from the internet, which is an owner's decision, so
@@ -126,12 +172,36 @@ be updated to match.
 
 ## 3. Register the webhook
 
-Razorpay dashboard → **Settings → Webhooks → Add New Webhook**.
+Check first, because "I configured it" and "the account has it" have already
+disagreed once here:
+
+```
+cd /home/atc-noc/atc-pos && node backend/scripts/dev-webhook-register.mjs --list
+```
+
+That asks Razorpay directly and prints how many webhooks the account actually
+has, with their URLs and events. `0` means no delivery will ever happen, no
+matter what the dashboard appeared to accept.
+
+The same script can register it, which also makes the secret match a property
+of the setup rather than something to re-verify:
+
+```
+node backend/scripts/dev-webhook-register.mjs --url https://<hostname>/api/gateway/webhook
+```
+
+Otherwise, by hand: Razorpay dashboard → **Settings → Webhooks → Add New
+Webhook**.
 
 ```
 URL     https://<the-hostname-cloudflared-printed>/api/gateway/webhook
 Secret  the same string typed at the third prompt in step 1
 ```
+
+The secret field is the one to be careful with. A mistyped secret does not fail
+visibly — deliveries arrive and are refused, which looks identical to a webhook
+that was never configured. If step 5 shows events arriving but never applying,
+suspect this field before suspecting the code.
 
 Tick **exactly these four events**:
 
@@ -169,6 +239,49 @@ start if something already holds port 5010 — naming the process rather than
 killing it — and refuses if the dev database is behind on migrations, because a
 backend whose code is ahead of its schema does not fail at boot, it fails at the
 first refund on a column that is not there.
+
+## 4a. Reaching that POS from a browser
+
+Both dev servers bind `127.0.0.1` on purpose, so there is no URL on this box
+that a browser elsewhere can open. That is not an oversight to work around: the
+dev backend serves the whole POS with a live gateway attached, and the one
+public hostname in this setup is deliberately webhook-only.
+
+Forward the port over SSH instead — it changes nothing on the server and needs
+no SSH config edit:
+
+```
+# on YOUR machine, in its own terminal, leave it running
+ssh -N -L 5177:127.0.0.1:5177 atc-noc@20.20.20.55
+```
+
+Then open **`http://127.0.0.1:5177/pos/`** in your browser. Razorpay Checkout
+works from `127.0.0.1` in test mode.
+
+Two URLs that will *not* work, and are worth naming because both look right:
+
+| URL | What it actually is |
+| --- | --- |
+| `https://atcworkspace.com/pos` | The **production** POS — a different deployment, different database, gateway not configured at all. Signing in there produces no request on 5010. |
+| `http://<this box>:5177/pos/` | Nothing. Vite is bound to loopback; there is no listener on the LAN address. |
+
+If a sign-in seems to work but nothing appears in the dev backend's log, it went
+to production. That is the same confusion this section exists to prevent, and
+the absence of a log line is evidence of *where* the request went, not that no
+request was made.
+
+Sign in as **`sandbox.owner@atcpos.dev`** — `CUSTOMER_OWNER` can both take a
+payment and issue a refund, so one account covers the whole run. Its password
+was randomly generated by the seed script, so set one you know:
+
+```
+cd /home/atc-noc/atc-pos && node backend/scripts/dev-sandbox-password.mjs --check   # shows scope, changes nothing
+cd /home/atc-noc/atc-pos && node backend/scripts/dev-sandbox-password.mjs           # two hidden prompts
+```
+
+It is scoped to the `@atcpos.dev` accounts in the "Razorpay Sandbox (Dev)"
+company in the dev container, and it cannot reach production — the prod
+database publishes no host port.
 
 ## 5. The run that actually verifies the gateway
 
