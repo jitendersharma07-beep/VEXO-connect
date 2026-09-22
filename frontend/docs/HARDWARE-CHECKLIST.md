@@ -90,6 +90,24 @@ with no replacement navigation (see the known gap in the handover note).
 - [ ] Confirm the payment and refund wording prints verbatim (see below).
 - [ ] Measure the printed content width with a ruler: ______ mm (expect ~72)
 
+**Page length and the cut.** The browser asks for a page whose height is
+measured from the receipt, one page per ticket — a KOT asks for ~66 mm and a
+long bill ~155 mm. Whether the driver honours a per-job page height or
+overrides it with a fixed form is a printer question, and it is the one most
+likely to differ between models.
+
+- [ ] Print a KOT and a long receipt one after the other. Confirm the paper
+      feed differs between them — the KOT should not feed a bill's worth of
+      roll.
+- [ ] Measure blank paper after the last printed line: ______ mm (a large,
+      constant amount on both means the driver is using a fixed form, not the
+      requested height — record the model, it needs a per-site setting)
+- [ ] Confirm each ticket comes out as **one** piece of paper. A receipt that
+      arrives in two parts is paginating, and on a roll that means it was cut
+      in half.
+- [ ] If the printer has auto-cut: confirm it cuts **after** the last line and
+      does not cut mid-receipt.
+
 ### Wording that must survive printing
 
 These strings are sent by the server and printed verbatim. If any of them is
@@ -106,13 +124,31 @@ Note the refund distinction: a **requested** gateway refund prints without a
 minus sign, because no money has moved yet. Only a settled refund prints
 `-₹x`. Confirm on paper that a pending refund does not read as returned.
 
-### Open question for the release owner
+### Printer routing: what this build can and cannot do
 
-Receipt and KOT both print through the same browser print path, so they go to
-whatever printer the browser is pointed at. If the site wants the **KOT at a
-kitchen printer and the receipt at the counter**, that is not currently
-possible without the operator changing the printer in the dialog each time.
-Confirm whether the customer needs this before go-live.
+Stated plainly, because it is a capability limit and not an open design
+question:
+
+**Can.** Print receipts and KOTs through the browser's own print dialog. The
+operator may pick any printer the operating system offers, and may change it
+per job in that dialog.
+
+**Cannot.** Route automatically. There is no receipt-to-counter and
+KOT-to-kitchen routing in this build. Both documents go through one print
+path to whichever printer the dialog is currently pointed at. A site running
+a counter printer and a kitchen printer needs the operator to change the
+printer by hand for every KOT, and nothing in the software stops a KOT
+printing at the counter or a bill printing in the kitchen.
+
+Also not implemented, and not to be promised: silent printing (every job
+raises the dialog), automatic paper cut triggered by the app, and cash-drawer
+kick. Auto-cut may still happen if the **printer** is configured to cut at
+end of page — that is the driver's behaviour, not this application's, which
+is why it is on the sign-off list above rather than claimed here.
+
+- [ ] Confirm with the customer whether one shared printer is acceptable for
+      go-live. If it is not, this needs scoping as new work — it is not a
+      configuration setting.
 
 ## 3. Network
 

@@ -26,7 +26,13 @@ so **that assertion will fail** on this branch.
 and an element screenshot cannot observe `@page` at all, so it stayed green
 through the entire defect. Details in §2.1.
 
-### 1.2 The design reference exists — earlier "missing" reports were wrong
+### 1.2 A PALETTE reference exists — earlier "missing" reports were wrong
+
+`globals.css` is a **palette reference and nothing more**. It is a stylesheet
+of colour tokens, not a comp, not a screen layout, and not a sign-off. Its
+existence says which blues are ours; it says nothing about whether any screen
+in this build looks the way the customer expects. Do not cite it — or this
+section — as evidence of approved visual design.
 
 `frontend/tailwind.config.js` cites it in a comment, and the file is present:
 
@@ -44,18 +50,41 @@ This is not a claim that the UI matches an approved design. Nobody has signed
 off a comp against these screens. It only means the reference was available
 and was respected.
 
-### 1.3 `Layout.jsx` has two real defects this lane deliberately left alone
+### 1.3 `Layout.jsx` had two real defects — both now FIXED on the release branch
 
-`frontend/src/components/Layout.jsx` is held by the unmerged `phase2-copy-fix`
-branch (`76b9d2e`), so this lane did not touch it. Two findings for whoever
-owns it next:
+**Status: closed.** This section originally handed these on as open findings,
+because `frontend/src/components/Layout.jsx` was held by the unmerged
+`phase2-copy-fix` branch (`76b9d2e`) and this lane could not touch it. The
+release owner resolved that branch and fixed both. Kept here with the
+measurements so the fix can be re-verified rather than taken on trust.
 
-- **All 4 remaining sub-44 px touch targets are its sidebar nav items**
-  (208×40). Everything else in the cashier path now clears the floor.
-- **There is no navigation below 768 px.** The sidebar is `hidden … md:flex`
-  with no drawer or fallback, so on a narrow screen the operator cannot
-  navigate at all. Its top bar also crowds badly at 768 px — the company name
-  truncates to "Brew Stree…" and "Sign out" wraps onto two lines.
+- ~~All 4 remaining sub-44 px touch targets are its sidebar nav items
+  (208×40).~~ **Fixed:** `NavItem` now carries a `min-h-[44px]` floor. Three
+  further sub-44 px links were found during verification in the *page body*
+  of `Dashboard.jsx` (20 px tall) and took the existing `.link-touch` helper.
+- ~~There is no navigation below 768 px.~~ **Fixed:** a drawer, opened by a
+  hamburger in the top bar. The nav tree is now **one component rendered
+  twice** — sidebar and drawer — because every entry in it is a permission
+  decision, and a second hand-maintained copy drifts by showing a cashier the
+  owner's links. The top-bar crowding at 768 px is fixed too: the company name
+  no longer truncates to "Brew Stree…" and "Sign out" stays on one line.
+
+Measured against the **built bundle** (`vite preview`), not the dev server:
+
+| Width | Nav links, cashier / owner | `scrollWidth − clientWidth` |
+|---|---|---|
+| 430×932 | **4 / 12** (drawer) | 0 |
+| 767×1024 | **4 / 12** (drawer) | 0 |
+| 768×1024 | 4 / 12 (sidebar, unchanged) | 0 |
+| 1366×768 | 4 / 12 (sidebar, unchanged) | 0 |
+
+Before the fix the cashier had 4 links at 768 px and **0** at 767 px.
+
+The cashier-vs-owner comparison is the check that matters and is the reason
+the count is reported per role: it is the only assertion that fails if the
+drawer is ever rewired to a hardcoded link list, and that failure mode is a
+permissions leak rather than a layout bug. `deploy/render-nav-widths.mjs`
+asserts it at 430 px and 768 px — 33/33 green.
 
 **Merge order does not matter.** Verified with `git merge-tree`:
 
@@ -159,7 +188,9 @@ credentials). Writes are refused with a 405 rather than faked.
 | 768×1024 tablet portrait | before **1241 px** → after **1012 px** (viewport 1024) | 18/31 → **4/32** |
 
 No horizontal overflow and no console errors at any of the four. The 4
-remaining sub-44 px targets are the `Layout.jsx` nav items from §1.3.
+remaining sub-44 px targets were the `Layout.jsx` nav items from §1.3, and
+are **now fixed on the release branch** — the counts in this table are the
+state of this lane at handover, not of the shipped build.
 
 One harness correction was needed and is worth knowing about: the probe took
 the *first* payment button in DOM order, which measured the panel's button and
@@ -167,7 +198,7 @@ reported a fail while the sticky bar was on screen doing its job. It now
 checks **all** candidates and passes only if one is genuinely in the viewport,
 reporting which — so a pass cannot come from a control the cashier can't see.
 
-### 3.2 Print — 19/19 checks
+### 3.2 Print — 19/19 at handover, **47/47** on the release branch
 
 All four fixtures measure exactly 272 px (72.0 mm) with no internal overflow,
 and 80 mm PDFs render at the paper size. Required wording verified present and
@@ -178,6 +209,29 @@ a REQUESTED refund prints **without** a minus sign.
 ```
 content 272px, printable 272px, cut off: 0px (0.0 mm)
 ```
+
+**The 19/19 was not wrong, but it was not enough.** Two things it could not
+see were found by the release owner and are now checked:
+
+1. **Chromium ignored the page size.** `@page { size: 80mm auto }` is correct
+   CSS and Firefox honours it; Chromium rejects a `<length> auto` pair and
+   falls back to US Letter — so a correct 72 mm layout was still reaching the
+   driver on a 215.9 mm page. Fixed by measuring the receipt on `beforeprint`
+   (`src/lib/printPageSize.js`); the height is per job, so a KOT asks for
+   ~66 mm and a long bill ~155 mm instead of one fixed form.
+2. **Two checks could not fail.** The page size was read from CSSOM, which in
+   Chromium drops the `size` descriptor entirely; and the dead-zone check
+   compared two constants derived from the same literal. Both now come from
+   the PDF MediaBox.
+
+The harness is also negative-controlled now: an 80 mm content box fails the
+width check with 73 escaping elements, and a re-introduced `@page
+{ margin: 4mm }` is caught by a CSSOM scan of **every** `@page` rule — which
+is its only possible defence, since element boxes, `scrollWidth` and the
+MediaBox are all blind to a page margin.
+
+None of this changes the standing caveat in §4: it is all browser geometry.
+**Physical printing remains NOT TESTED.**
 
 ### 3.3 Regression sweep of the other 9 pages — 45/45
 
@@ -245,10 +299,19 @@ Probes that produced them: `/tmp/pos-touchui/{shoot,print-probe,clip-view,page-s
 - **No claim of client readiness or approved-design match.** No comp has been
   signed off against these screens.
 
-Open question for you: receipt and KOT print through the same browser path, so
-they go to whichever printer is selected. If a site needs the KOT at a kitchen
-printer and the receipt at the counter, that is not possible today without the
-operator switching printers in the dialog each time.
+- **The page height the driver receives is NOT TESTED.** The browser now asks
+  for a per-job page height, but whether a given driver honours it or
+  substitutes a fixed form decides how much roll is fed and where the cut
+  lands. `HARDWARE-CHECKLIST.md` §2 has the measurements to take.
+
+**Printer routing — a capability limit, not an open question.** The operator
+may select any printer the OS offers, and may change it per job in the browser
+dialog. There is **no automatic routing**: receipt-to-counter and
+KOT-to-kitchen is not implemented. Both documents go through one print path to
+whichever printer the dialog currently points at, and nothing in the software
+prevents a KOT printing at the counter or a bill printing in the kitchen. A
+site that needs two destinations needs this scoped as new work — it is not a
+setting. See `HARDWARE-CHECKLIST.md` §2.
 
 ## 5. Also in this directory
 
