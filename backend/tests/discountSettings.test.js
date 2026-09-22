@@ -459,6 +459,9 @@ describe('what the audit trail records', () => {
     expect(logs[1].meta.before.maxPercent).toBe(12);
     expect(logs[1].meta.after.maxPercent).toBe(18);
     expect(logs[1].actorId).toBe(users.ownerF.id);
+    // Stored on the row. A limit change is exactly the kind of entry that is
+    // read back long after the person who made it has changed jobs.
+    expect(logs[1].actorRole).toBe('CUSTOMER_OWNER');
     expect(logs[1].companyId).toBe(fox.id);
   });
 

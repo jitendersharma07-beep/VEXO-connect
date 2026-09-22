@@ -55,7 +55,7 @@ const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const tokens = {};
 const users = {};
-let delta, echo, d1, d2, e1, coffee, chai;
+let delta, echo, foxtrot, d1, d2, e1, f1, coffee, chai;
 
 const login = async (email) => {
   const res = await request(app).post('/api/auth/login').send({ email, password: PW });
@@ -109,9 +109,23 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
+  // A third company whose admin switched discounts OFF, deliberately. Echo
+  // has never configured anything; Foxtrot has, and the answer was no. The two
+  // must not collapse into one another — "nobody has decided yet" is a default
+  // waiting to be changed, "switched off" is a decision already taken, and an
+  // admin turning the feature back on has to be able to tell which they are
+  // looking at.
+  foxtrot = await prisma.company.create({
+    data: {
+      name: 'Foxtrot Foods',
+      slug: 'foxtrot-foods',
+      licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
+    },
+  });
   d1 = await prisma.branch.create({ data: { companyId: delta.id, name: 'Delta One', code: 'D1' } });
   d2 = await prisma.branch.create({ data: { companyId: delta.id, name: 'Delta Two', code: 'D2' } });
   e1 = await prisma.branch.create({ data: { companyId: echo.id, name: 'Echo One', code: 'E1' } });
+  f1 = await prisma.branch.create({ data: { companyId: foxtrot.id, name: 'Foxtrot One', code: 'F1' } });
 
   const mk = async (key, data) => {
     users[key] = await prisma.posUser.create({ data: { passwordHash, ...data } });
@@ -137,6 +151,19 @@ beforeAll(async () => {
   });
   await mk('cashierE1', {
     email: 'cashier.e1@test.local', fullName: 'Cashier E1', role: 'CASHIER', companyId: echo.id, branchId: e1.id,
+  });
+  // Delta's fifth till is bounded in rupees rather than as a share.
+  await mk('cashierFlat', {
+    email: 'cashier.flat@test.local', fullName: 'Cashier Flat', role: 'CASHIER', companyId: delta.id, branchId: d1.id,
+  });
+  await mk('ownerF', {
+    email: 'owner.f@test.local', fullName: 'Owner F', role: 'CUSTOMER_OWNER', companyId: foxtrot.id,
+  });
+  await mk('mgrF1', {
+    email: 'mgr.f1@test.local', fullName: 'Manager F1', role: 'BRANCH_MANAGER', companyId: foxtrot.id, branchId: f1.id,
+  });
+  await mk('cashierF1', {
+    email: 'cashier.f1@test.local', fullName: 'Cashier F1', role: 'CASHIER', companyId: foxtrot.id, branchId: f1.id,
   });
 
   // --- what Delta's admin configured -----------------------------------------
@@ -165,6 +192,36 @@ beforeAll(async () => {
   await policy({
     level: 'USER', scopeKey: `user:${users.mgrD2.id}`, userId: users.mgrD2.id,
     canApprove: true, maxApprovalPercent: '25.000',
+  });
+  // One till bounded in cash, not share. The percentage is deliberately slack
+  // so that the rupee cap is the thing doing the refusing — otherwise a FLAT
+  // breach could never be told apart from a PERCENT one.
+  await policy({
+    level: 'USER', scopeKey: `user:${users.cashierFlat.id}`, userId: users.cashierFlat.id,
+    maxPercent: '50.000', maxFlatPaise: 15000, note: 'Bounded in rupees',
+  });
+
+  // --- what Foxtrot's admin configured ---------------------------------------
+  // Off. A ceiling is typed beside the switch on purpose: turning discounts
+  // off must not depend on also clearing the numbers, or an admin who flips
+  // the switch and leaves the figure behind has not turned anything off.
+  await prisma.discountPolicy.create({
+    data: {
+      companyId: foxtrot.id, level: 'COMPANY', scopeKey: 'company',
+      allowLineDiscount: false, allowOrderDiscount: false,
+      maxPercent: '25.000',
+      note: 'Discounts switched off',
+    },
+  });
+  // Foxtrot's one manager keeps the authority to sign an exception through.
+  // Approval authority is a separate grant from permission to operate: the
+  // switch decides what happens at the till unattended, not what a named
+  // person with a password may still authorise.
+  await prisma.discountPolicy.create({
+    data: {
+      companyId: foxtrot.id, level: 'USER', scopeKey: `user:${users.mgrF1.id}`, userId: users.mgrF1.id,
+      canApprove: true, maxApprovalPercent: '25.000',
+    },
   });
 
   const tax = await prisma.taxRate.create({
@@ -196,7 +253,32 @@ beforeAll(async () => {
     data: { companyId: echo.id, categoryId: catE.id, name: 'Filter Coffee', basePrice: '500.00', taxRateId: taxE.id },
   });
   users.echoCoffee = productE.id;
+
+  const taxF = await prisma.taxRate.create({
+    data: { companyId: foxtrot.id, name: 'GST 5%', ratePercent: '5.00' },
+  });
+  const catF = await prisma.category.create({
+    data: { companyId: foxtrot.id, name: 'Coffee', sortOrder: 1 },
+  });
+  const productF = await prisma.product.create({
+    data: { companyId: foxtrot.id, categoryId: catF.id, name: 'Filter Coffee', basePrice: '500.00', taxRateId: taxF.id },
+  });
+  users.foxtrotCoffee = productF.id;
 });
+
+// Every company here sells the same ₹500 coffee, but catalogs are
+// company-scoped, so an order is two of whichever one this user can see.
+const CATALOG = { echo: 'echoCoffee', foxtrot: 'foxtrotCoffee' };
+
+const orderFor = async (key, branchId, tenant) => {
+  const productId = tenant ? users[CATALOG[tenant]] : coffee;
+  const res = await request(app)
+    .post('/api/orders')
+    .set(auth(tokens[key]))
+    .send({ type: 'TAKEAWAY', branchId, items: [{ productId, qty: 2 }] });
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  return res.body.order;
+};
 
 afterAll(async () => {
   await prisma.$disconnect();
@@ -672,6 +754,342 @@ describe('a bill that has already been issued', () => {
       approval: { approverEmail: 'mgr.d1@test.local', password: PW, reason: 'Too late' },
     });
     expect(res.status).toBe(409);
+  });
+});
+
+// --- the switch -------------------------------------------------------------
+
+describe('a company whose admin switched discounts off', () => {
+  it('refuses the till outright, ceiling typed beside the switch or not', async () => {
+    const order = await orderFor('cashierF1', f1.id, 'foxtrot');
+    const denied = await setOrderDiscount(tokens.cashierF1, order.id, { type: 'PERCENT', value: 5 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.code).toBe('POS_DISCOUNT_NOT_PERMITTED');
+    expect(denied.body.error.details.breach.kind).toBe('ORDER_NOT_ALLOWED');
+    // 5% is well inside the 25% the row also carries. The switch decides,
+    // not the number beside it — an admin who turns the feature off without
+    // clearing the figure has still turned it off.
+    expect(denied.body.error.details.yourLimit.maxPctMilli).toBe(25000);
+    expect(denied.body.error.details.yourLimit.allowOrderDiscount).toBe(false);
+    expect((await getOrder(tokens.cashierF1, order.id)).discountAmount).toBe(0);
+  });
+
+  it('refuses a line discount too, not just the one on the bill total', async () => {
+    const order = await orderFor('cashierF1', f1.id, 'foxtrot');
+    const denied = await setLineDiscount(tokens.cashierF1, order, 50);
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.details.breach.kind).toBe('LINE_NOT_ALLOWED');
+    expect((await getOrder(tokens.cashierF1, order.id)).subtotal).toBe(1000);
+  });
+
+  it('refuses the owner who typed it, because off is off', async () => {
+    // The owner's floor is unlimited, but an explicit company row overrides
+    // the floor. If it did not, the switch would be advice rather than a
+    // control, and the account most able to void a bill would be exempt.
+    const order = await orderFor('ownerF', f1.id, 'foxtrot');
+    const denied = await setOrderDiscount(tokens.ownerF, order.id, { type: 'PERCENT', value: 5 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.details.breach.kind).toBe('ORDER_NOT_ALLOWED');
+  });
+
+  it('still lets a named manager sign one exception through, and says so in the trail', async () => {
+    // The documented carve-out: the switch governs what the till does
+    // unattended, and a person with a password and approval authority can
+    // still authorise an exception. The trail has to make that legible —
+    // the limit recorded beside it reads "not allowed", which is what makes
+    // this row worth reviewing.
+    const order = await orderFor('cashierF1', f1.id, 'foxtrot');
+    const ok = await setOrderDiscount(tokens.cashierF1, order.id, {
+      type: 'PERCENT', value: 5,
+      approval: { approverEmail: 'mgr.f1@test.local', password: PW, reason: 'Machine was down' },
+    });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect(ok.body.order.discountAmount).toBe(50);
+
+    const log = await prisma.posAuditLog.findFirst({
+      where: { action: 'ORDER_DISCOUNT_SET', entityId: order.id },
+      orderBy: { at: 'desc' },
+    });
+    expect(log.meta.actorLimit.allowOrderDiscount).toBe(false);
+    expect(log.meta.approvedBy).toMatchObject({ id: users.mgrF1.id, role: 'BRANCH_MANAGER' });
+  });
+
+  it('does not stop the till selling — a switched-off discount is not a switched-off sale', async () => {
+    // Deny-by-default has to be invisible to the ordinary sale. A cashier who
+    // discounts nothing must reach a bill exactly as before.
+    const order = await orderFor('cashierF1', f1.id, 'foxtrot');
+    const billed = await request(app)
+      .post(`/api/orders/${order.id}/bill`)
+      .set(auth(tokens.cashierF1))
+      .send({});
+    expect(billed.status, JSON.stringify(billed.body)).toBe(200);
+    expect(billed.body.order.discountAmount).toBe(0);
+    expect(billed.body.order.total).toBe(1050);
+  });
+});
+
+// --- a ceiling in rupees ----------------------------------------------------
+
+describe('a till bounded in rupees rather than in percent', () => {
+  it('allows a discount inside the cash cap', async () => {
+    const order = await newOrder(tokens.cashierFlat, d1.id);
+    const ok = await setOrderDiscount(tokens.cashierFlat, order.id, { type: 'FLAT', value: 150 });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect(ok.body.order.discountAmount).toBe(150);
+  });
+
+  it('refuses one over it, and names the cash cap rather than the percentage', async () => {
+    // ₹200 of a ₹1000 bill is 20%, comfortably inside this till's slack 50%.
+    // Only the rupee cap refuses it, which is the point of having one.
+    const order = await newOrder(tokens.cashierFlat, d1.id);
+    const denied = await setOrderDiscount(tokens.cashierFlat, order.id, { type: 'FLAT', value: 200 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.details.breach).toMatchObject({
+      kind: 'FLAT', limitPaise: 15000, actualPaise: 20000,
+    });
+    expect(denied.body.error.details.yourLimit.maxFlatPaise).toBe(15000);
+    expect((await getOrder(tokens.cashierFlat, order.id)).discountAmount).toBe(0);
+  });
+
+  it('counts a percentage request against the cash cap as well', async () => {
+    // 20% asked for as a percentage is the same ₹200, and has to meet the
+    // same refusal — otherwise the cap is avoidable by changing the units.
+    const order = await newOrder(tokens.cashierFlat, d1.id);
+    const denied = await setOrderDiscount(tokens.cashierFlat, order.id, { type: 'PERCENT', value: 20 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.details.breach.kind).toBe('FLAT');
+    expect(denied.body.error.details.breach.actualPaise).toBe(20000);
+  });
+});
+
+// --- the whole bill ---------------------------------------------------------
+
+describe('a discount for the entire bill', () => {
+  it('is refused to a cashier by default', async () => {
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const denied = await setOrderDiscount(tokens.cashierD1, order.id, { type: 'PERCENT', value: 100 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.details.breach).toMatchObject({
+      kind: 'PERCENT', limitPctMilli: 10000, actualPctMilli: 100000,
+    });
+    expect((await getOrder(tokens.cashierD1, order.id)).total).toBe(1050);
+  });
+
+  it('is refused to a branch manager by default', async () => {
+    // A manager's role grants nothing on its own: mgrD1 holds approval
+    // authority but no operating ceiling of their own, so at their own till
+    // they are on the same deny floor as anybody else.
+    const order = await newOrder(tokens.mgrD1, d1.id);
+    const denied = await setOrderDiscount(tokens.mgrD1, order.id, { type: 'PERCENT', value: 100 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.details.breach.kind).toBe('PERCENT');
+  });
+
+  it('is not unlocked by the manager who can approve half a bill', async () => {
+    // mgrD1 may sign for 50%. Asking them to sign for 100% is refused on the
+    // ceiling they were delegated, not waved through because they are senior.
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const denied = await setOrderDiscount(tokens.cashierD1, order.id, {
+      type: 'PERCENT', value: 100,
+      approval: { approverEmail: 'mgr.d1@test.local', password: PW, reason: 'Comped the table' },
+    });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.code).toBe('POS_DISCOUNT_APPROVAL_REFUSED');
+    expect(denied.body.error.details.refusal).toBe('APPROVER_OVER_LIMIT');
+    expect(denied.body.error.details.breach.kind).toBe('APPROVER_OVER_PERCENT');
+    expect((await getOrder(tokens.cashierD1, order.id)).total).toBe(1050);
+    resetApprovalThrottle();
+  });
+});
+
+// --- arithmetic that must never be reachable --------------------------------
+
+describe('a figure that is not a discount at all', () => {
+  it('refuses a percentage above 100 before anybody is asked to approve it', async () => {
+    const order = await newOrder(tokens.ownerD, d1.id);
+    const denied = await setOrderDiscount(tokens.ownerD, order.id, { type: 'PERCENT', value: 150 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(400);
+    expect(denied.body.error.details?.field ?? denied.body.error.field).toBe('value');
+    // The owner is unlimited by policy, so if the arithmetic were guarded by
+    // the permission layer alone this would have gone through.
+    expect((await getOrder(tokens.ownerD, order.id)).total).toBe(1050);
+  });
+
+  it('refuses a flat discount larger than the bill, so a total can never go negative', async () => {
+    const order = await newOrder(tokens.ownerD, d1.id);
+    const denied = await setOrderDiscount(tokens.ownerD, order.id, { type: 'FLAT', value: 2000 });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(400);
+    const after = await getOrder(tokens.ownerD, order.id);
+    expect(after.discountAmount).toBe(0);
+    expect(after.total).toBe(1050);
+  });
+
+  it('refuses a line discount larger than the line', async () => {
+    const order = await newOrder(tokens.ownerD, d1.id);
+    const denied = await setLineDiscount(tokens.ownerD, order, 1500);
+    expect(denied.status, JSON.stringify(denied.body)).toBe(400);
+    expect((await getOrder(tokens.ownerD, order.id)).subtotal).toBe(1000);
+  });
+
+  it('refuses zero and refuses a negative, which are not discounts to record', async () => {
+    const order = await newOrder(tokens.ownerD, d1.id);
+    for (const value of [0, -50]) {
+      const denied = await setOrderDiscount(tokens.ownerD, order.id, { type: 'FLAT', value });
+      expect(denied.status, `FLAT ${value}: ${JSON.stringify(denied.body)}`).toBe(400);
+    }
+    const after = await getOrder(tokens.ownerD, order.id);
+    expect(after.discountAmount).toBe(0);
+    expect(after.total).toBe(1050);
+  });
+});
+
+// --- the approval does not outlive the response ------------------------------
+
+describe('an approval that has already been spent', () => {
+  it('does not carry to the next order', async () => {
+    // The thing being tested is that nothing was unlocked. A manager signing
+    // for one bill must not leave the till in a state where the next bill
+    // takes the same discount unattended.
+    const first = await newOrder(tokens.cashierD1, d1.id);
+    const signed = await setOrderDiscount(tokens.cashierD1, first.id, {
+      type: 'PERCENT', value: 30,
+      approval: { approverEmail: 'mgr.d1@test.local', password: PW, reason: 'Long wait' },
+    });
+    expect(signed.status, JSON.stringify(signed.body)).toBe(200);
+
+    const second = await newOrder(tokens.cashierD1, d1.id);
+    const unsigned = await setOrderDiscount(tokens.cashierD1, second.id, { type: 'PERCENT', value: 30 });
+    expect(unsigned.status, JSON.stringify(unsigned.body)).toBe(403);
+    expect(unsigned.body.error.details.approvalRequired).toBe(true);
+    expect((await getOrder(tokens.cashierD1, second.id)).discountAmount).toBe(0);
+  });
+
+  it('cannot be spent a second time on the order it was given for', async () => {
+    // The order carries discountApprovedById once signed. That record is
+    // evidence of what happened, not a credential — raising the discount
+    // again has to be authorised again.
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const signed = await setOrderDiscount(tokens.cashierD1, order.id, {
+      type: 'PERCENT', value: 30,
+      approval: { approverEmail: 'mgr.d1@test.local', password: PW, reason: 'Long wait' },
+    });
+    expect(signed.status, JSON.stringify(signed.body)).toBe(200);
+    expect((await prisma.order.findUnique({ where: { id: order.id } })).discountApprovedById)
+      .toBe(users.mgrD1.id);
+
+    const raised = await setOrderDiscount(tokens.cashierD1, order.id, { type: 'PERCENT', value: 40 });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(403);
+    expect(raised.body.error.code).toBe('POS_DISCOUNT_NOT_PERMITTED');
+    // And the discount that WAS signed for is still exactly what was signed.
+    expect((await getOrder(tokens.cashierD1, order.id)).discountAmount).toBe(300);
+  });
+
+  it('is not a password — naming the approver who already signed proves nothing', async () => {
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const signed = await setOrderDiscount(tokens.cashierD1, order.id, {
+      type: 'PERCENT', value: 30,
+      approval: { approverEmail: 'mgr.d1@test.local', password: PW, reason: 'Long wait' },
+    });
+    expect(signed.status, JSON.stringify(signed.body)).toBe(200);
+
+    const replayed = await setOrderDiscount(tokens.cashierD1, order.id, {
+      type: 'PERCENT', value: 40,
+      approval: { approverEmail: 'mgr.d1@test.local', password: 'not-the-password', reason: 'Again' },
+    });
+    expect(replayed.status).toBe(403);
+    expect(replayed.body.error.details.refusal).toBe('BAD_PASSWORD');
+    expect((await getOrder(tokens.cashierD1, order.id)).discountAmount).toBe(300);
+    resetApprovalThrottle();
+  });
+});
+
+// --- the same request twice --------------------------------------------------
+
+describe('the same discount asked for twice', () => {
+  it('sets the discount, it does not add it up', async () => {
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    for (let i = 0; i < 3; i += 1) {
+      const res = await setOrderDiscount(tokens.cashierD1, order.id, { type: 'PERCENT', value: 10 });
+      expect(res.status, `attempt ${i}: ${JSON.stringify(res.body)}`).toBe(200);
+      expect(res.body.order.discountAmount).toBe(100);
+    }
+    const after = await getOrder(tokens.cashierD1, order.id);
+    expect(after.discountAmount).toBe(100);
+    expect(after.total).toBe(945);
+  });
+
+  it('survives the till double-firing an approved discount at the same instant', async () => {
+    // A stuck key, a double tap, a retry after a slow response. Whatever
+    // happened, ten concurrent requests must leave one discount on the bill.
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const body = {
+      type: 'PERCENT', value: 30,
+      approval: { approverEmail: 'mgr.d1@test.local', password: PW, reason: 'Double tap' },
+    };
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => setOrderDiscount(tokens.cashierD1, order.id, body)),
+    );
+    // Every one that answered at all answered with the same bill.
+    const ok = results.filter((r) => r.status === 200);
+    expect(ok.length).toBeGreaterThan(0);
+    for (const r of ok) expect(r.body.order.discountAmount).toBe(300);
+
+    const after = await getOrder(tokens.cashierD1, order.id);
+    expect(after.discountAmount).toBe(300);
+    expect(after.total).toBe(735);
+
+    // One discount on the order, and one approver against it — not ten.
+    const row = await prisma.order.findUnique({ where: { id: order.id } });
+    expect(Number(row.discountValue)).toBe(30);
+    expect(row.discountApprovedById).toBe(users.mgrD1.id);
+    resetApprovalThrottle();
+  });
+});
+
+// --- the gate is the server --------------------------------------------------
+
+describe('a request the screen would never have sent', () => {
+  it('is refused at the line-item endpoint, which no UI control points at', async () => {
+    // The Sell screen hides the discount field from a cashier who has no
+    // ceiling. Hiding is not the control: the same request typed by hand at
+    // the endpoint behind it has to meet the same answer.
+    const order = await orderFor('cashierE1', e1.id, 'echo');
+    const denied = await setLineDiscount(tokens.cashierE1, order, 100);
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    expect(denied.body.error.code).toBe('POS_DISCOUNT_NOT_PERMITTED');
+    expect(denied.body.error.details.breach.kind).toBe('LINE_NOT_ALLOWED');
+    expect((await getOrder(tokens.cashierE1, order.id)).subtotal).toBe(1000);
+  });
+
+  it('cannot raise its own ceiling first and then discount', async () => {
+    // The obvious bypass: write yourself a policy row, then spend it. The
+    // settings endpoint is the customer admin's, and a cashier's token does
+    // not reach it — so the ceiling the till is measured against is still
+    // the one the admin typed.
+    const wrote = await request(app)
+      .put('/api/discount-policies')
+      .set(auth(tokens.cashierD1))
+      .send({
+        level: 'USER', userId: users.cashierD1.id,
+        allowLineDiscount: true, allowOrderDiscount: true,
+        maxPercent: 90, maxFlatPaise: null,
+        canApprove: null, maxApprovalPercent: null, maxApprovalFlatPaise: null,
+      });
+    expect(wrote.status, JSON.stringify(wrote.body)).toBe(403);
+
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const denied = await setOrderDiscount(tokens.cashierD1, order.id, { type: 'PERCENT', value: 90 });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error.details.yourLimit.maxPctMilli).toBe(10000);
+  });
+
+  it('is refused the same way when it carries no session at all', async () => {
+    const order = await newOrder(tokens.cashierD1, d1.id);
+    const anon = await request(app)
+      .post(`/api/orders/${order.id}/discount`)
+      .send({ type: 'PERCENT', value: 10 });
+    expect(anon.status).toBe(401);
+    expect((await getOrder(tokens.cashierD1, order.id)).discountAmount).toBe(0);
   });
 });
 
