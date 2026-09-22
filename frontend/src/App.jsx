@@ -14,6 +14,7 @@ import Orders from './pages/Orders.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
+import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
 import NotFound from './pages/NotFound.jsx';
@@ -77,6 +78,14 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <SalesReport />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="reports/activity"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <ActivityReport />
                   </RequireRoles>
                 }
               />

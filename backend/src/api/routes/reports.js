@@ -882,4 +882,215 @@ router.get(
   }),
 );
 
+// Activity — who discounted, voided and refunded, and when.
+//
+// Everything below already existed in "PosAuditLog"; until this route there was
+// simply nothing that read it. That gap was worse than an absent feature: the
+// handover pack could truthfully say discounts are recorded against the person
+// who applied them, which sounds like a control an owner can check, and no
+// owner could check it. The only way to look was for ATC to run
+// deploy/audit-queries.sql by hand.
+//
+// Scope is the money that moves without a sale behind it. Ordinary edits are
+// left out deliberately — ORDER_ITEM_REMOVE can only touch a line that has not
+// reached the kitchen, so nothing was cooked and nothing left the building.
+const DISCOUNT_ACTIONS = ['ORDER_DISCOUNT_SET', 'ORDER_DISCOUNT_CLEAR', 'ORDER_ITEM_UPDATE'];
+const VOID_ACTIONS = ['ORDER_VOID', 'ORDER_ITEM_VOID'];
+
+// Refunds match on a PREFIX, never a list. One refund emits a different action
+// per channel and per stage — ORDER_REFUND when it is manual, then
+// ORDER_REFUND_REQUESTED / _SETTLED / _FAILED / _RECONCILED as a gateway refund
+// progresses. deploy/audit-queries.sql enumerated them once and silently missed
+// every gateway refund as a result. A prefix also picks up the next stage
+// somebody adds without this file having to know about it.
+const REFUND_PREFIX = 'ORDER_REFUND';
+
+// Removing a discount is not giving one. Folding the two together inflates the
+// single figure an owner acts on — the person who set one discount and undid it
+// would read as having given two. deploy/audit-queries.sql keeps `cleared` in
+// its own column for the same reason; this matches that shape rather than
+// inventing a second one.
+const kindOf = (row) => {
+  if (row.action.startsWith(REFUND_PREFIX)) return 'refund';
+  if (VOID_ACTIONS.includes(row.action)) return 'void';
+  if (row.action === 'ORDER_DISCOUNT_CLEAR') return 'cleared';
+  return 'discount';
+};
+
+// One declaration of the per-person counters, so a new kind cannot be added to
+// kindOf without a field to land in. Named here rather than built as
+// `${kind}s`, which would have turned 'cleared' into 'cleareds'.
+const KIND_FIELD = {
+  discount: 'discounts',
+  cleared: 'cleared',
+  void: 'voids',
+  refund: 'refunds',
+};
+
+// Only ever the fields named here. `meta` is written by six different call
+// sites and passing it through whole would ship whatever a future one happens
+// to put in it to a customer's browser.
+const detailOf = (row) => {
+  const m = row.meta ?? {};
+  switch (true) {
+    case row.action === 'ORDER_DISCOUNT_SET':
+      return { discountType: m.type ?? null, value: m.value ?? null };
+    case row.action === 'ORDER_ITEM_UPDATE':
+      return { lineDiscount: m.lineDiscount ?? null };
+    case row.action === 'ORDER_VOID':
+      return { reason: m.reason ?? null, invoiceNumber: m.invoiceNumber ?? null };
+    case row.action === 'ORDER_ITEM_VOID':
+      return { item: m.name ?? null, reason: m.reason ?? null };
+    case row.action.startsWith(REFUND_PREFIX):
+      return {
+        amount: m.amount ?? null,
+        reason: m.reason ?? null,
+        status: m.status ?? null,
+        channel: m.channel ?? null,
+        // Kept distinct on purpose: a refund a person asserted is not the same
+        // fact as one a provider confirmed, and §10 of the owner guide turns on
+        // that difference.
+        providerConfirmed: m.providerConfirmed ?? null,
+      };
+    default:
+      return {};
+  }
+};
+
+// Above a café's plausible month. Hitting it is reported rather than hidden,
+// because a silently shortened list is how an owner concludes a cashier did
+// nothing unusual.
+const ACTIVITY_CAP = 1000;
+
+router.get(
+  '/activity',
+  requireRole('POS_SUPER_ADMIN', 'CUSTOMER_OWNER', 'BRANCH_MANAGER'),
+  asyncHandler(async (req, res) => {
+    const query = z
+      .object({ from: dateSchema, to: dateSchema, branchId: z.string().optional() })
+      .parse(req.query);
+    if (query.from > query.to) throw badRequest('from must be on or before to', 'from');
+
+    const fromUtc = istDayStartUtc(query.from);
+    const toExcl = new Date(istDayStartUtc(query.to).getTime() + 86400e3);
+
+    let branchId = null;
+    if (isBranchPinned(req.user)) {
+      branchId = req.user.branchId;
+    } else if (query.branchId) {
+      const branch = await prisma.branch.findFirst({
+        where: { id: query.branchId, companyId: req.companyScope.id },
+      });
+      if (!branch) throw notFound('Branch not found');
+      branchId = branch.id;
+    }
+
+    const rows = await prisma.posAuditLog.findMany({
+      where: {
+        companyId: req.companyScope.id,
+        at: { gte: fromUtc, lt: toExcl },
+        OR: [
+          { action: { in: [...DISCOUNT_ACTIONS, ...VOID_ACTIONS] } },
+          { action: { startsWith: REFUND_PREFIX } },
+        ],
+      },
+      orderBy: { at: 'desc' },
+      take: ACTIVITY_CAP,
+    });
+
+    // ORDER_ITEM_UPDATE is also emitted for a plain quantity change, which is
+    // not a discount and must not be counted as one. The two are told apart by
+    // the key present in meta, because the route accepts exactly one of them.
+    const relevant = rows.filter(
+      (r) => r.action !== 'ORDER_ITEM_UPDATE' || r.meta?.lineDiscount !== undefined,
+    );
+
+    // "PosAuditLog" carries no branchId, so a branch is reached through the
+    // order the row points at. This is the reason a BRANCH_MANAGER can be given
+    // this screen at all; without it the only honest options were showing them
+    // the whole company or refusing them outright.
+    const orderIds = [...new Set(relevant.map((r) => r.entityId).filter(Boolean))];
+    const orders = orderIds.length
+      ? await prisma.order.findMany({
+          where: { id: { in: orderIds }, companyId: req.companyScope.id },
+          select: { id: true, branchId: true, invoiceNumber: true },
+        })
+      : [];
+    const orderById = new Map(orders.map((o) => [o.id, o]));
+
+    // A row whose order cannot be resolved is dropped under a branch filter
+    // rather than shown. Unresolvable means unattributable, and an event that
+    // might belong to another branch is not one to put in front of a manager.
+    const scoped = branchId
+      ? relevant.filter((r) => orderById.get(r.entityId)?.branchId === branchId)
+      : relevant;
+
+    const actorIds = [...new Set(scoped.map((r) => r.actorId).filter(Boolean))];
+    const users = actorIds.length
+      ? await prisma.posUser.findMany({
+          where: { id: { in: actorIds }, companyId: req.companyScope.id },
+          select: { id: true, fullName: true, email: true, role: true, status: true },
+        })
+      : [];
+    const userById = new Map(users.map((u) => [u.id, u]));
+
+    const byActorMap = new Map();
+    for (const r of scoped) {
+      // Key on actorId, falling back to the email recorded at the time. A
+      // deleted or renamed user must still be attributable — the audit row is
+      // the record, not the current user table.
+      const key = r.actorId ?? r.actorEmail ?? 'unknown';
+      if (!byActorMap.has(key)) {
+        const u = r.actorId ? userById.get(r.actorId) : null;
+        byActorMap.set(key, {
+          actorId: r.actorId ?? null,
+          actorEmail: r.actorEmail ?? null,
+          name: u?.fullName ?? null,
+          role: u?.role ?? null,
+          // The person may have left since. Saying so beside their name stops
+          // an owner going to look for somebody who no longer works there.
+          stillActive: u ? u.status === 'ACTIVE' : null,
+          discounts: 0,
+          cleared: 0,
+          voids: 0,
+          refunds: 0,
+          total: 0,
+        });
+      }
+      const agg = byActorMap.get(key);
+      agg[KIND_FIELD[kindOf(r)]] += 1;
+      agg.total += 1;
+    }
+
+    const byActor = [...byActorMap.values()].sort((a, b) => b.total - a.total);
+
+    res.json({
+      range: { from: query.from, to: query.to, branchId },
+      byActor,
+      events: scoped.map((r) => {
+        const o = orderById.get(r.entityId);
+        return {
+          id: r.id,
+          at: r.at,
+          actorEmail: r.actorEmail,
+          actorName: r.actorId ? (userById.get(r.actorId)?.fullName ?? null) : null,
+          action: r.action,
+          kind: kindOf(r),
+          orderId: r.entityId,
+          invoiceNumber: o?.invoiceNumber ?? null,
+          detail: detailOf(r),
+        };
+      }),
+      // Two separate honesty flags, because they mislead in different
+      // directions. `truncated` says the window held more than was read.
+      // `bestEffort` is permanent: audit() swallows its own write failures so a
+      // customer's bill can never fail because of logging, which makes every
+      // count here a floor and never a total.
+      truncated: rows.length === ACTIVITY_CAP,
+      cap: ACTIVITY_CAP,
+      bestEffort: true,
+    });
+  }),
+);
+
 export default router;

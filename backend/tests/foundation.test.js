@@ -333,6 +333,45 @@ describe('ATC console lifecycle', () => {
     expect(branches.body.branches).toEqual([]);
   });
 
+  it('audits what ATC changes, and records nothing when ATC only looks', async () => {
+    const co = await request(app)
+      .post('/api/atc/companies')
+      .set(auth(tokens.atc))
+      .send({ name: 'Echo Foods', slug: 'echo-foods' });
+    expect(co.status).toBe(201);
+    const companyId = co.body.company.id;
+
+    await request(app)
+      .post(`/api/atc/companies/${companyId}/licenses`)
+      .set(auth(tokens.atc))
+      .send({ plan: 'SINGLE_STORE', expiresAt: new Date(Date.now() + 7 * 86400e3).toISOString() });
+
+    const written = await prisma.posAuditLog.findMany({
+      where: { companyId, action: { in: ['COMPANY_CREATE', 'LICENSE_ISSUE'] } },
+      select: { action: true, actorEmail: true },
+    });
+    // Both actions, each naming the human who took it. Until this existed the
+    // ATC audit path was code nobody had watched run: production holds zero
+    // rows for any ATC action, because its one tenant was seeded straight into
+    // the database rather than created through this route.
+    expect(written.map((r) => r.action).sort()).toEqual(['COMPANY_CREATE', 'LICENSE_ISSUE']);
+    expect(new Set(written.map((r) => r.actorEmail))).toEqual(new Set(['atc@test.local']));
+
+    // The other half, and the reason HANDOVER.md no longer says "every ATC
+    // access is logged": reads are not. This GET returns the tenant's staff
+    // emails, roles and last-login times and leaves no trace.
+    const before = await prisma.posAuditLog.count({ where: { companyId } });
+    const look = await request(app)
+      .get(`/api/atc/companies/${companyId}`)
+      .set(auth(tokens.atc));
+    expect(look.status).toBe(200);
+    expect(look.body.users).toBeDefined();
+    expect(await prisma.posAuditLog.count({ where: { companyId } })).toBe(before);
+    // This pins a documented gap (§9), not a desired behaviour. If read
+    // auditing is added, this assertion is what tells you to go correct the
+    // doc — delete it, do not weaken it.
+  });
+
   it('suspending a company revokes its sessions and blocks sign-in', async () => {
     const t = await login('owner.b@test.local');
     const sus = await request(app)

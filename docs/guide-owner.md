@@ -37,7 +37,15 @@ URL is not a way around this.
 
 **VEXO can read, not act.** VEXO support can see your figures to help you, and is
 refused the daily closing outright — a count of your drawer is not VEXO's to
-file. Everything VEXO does is written to an audit log you can be shown.
+file.
+
+**What is and is not recorded about VEXO, stated plainly.** When VEXO *changes*
+something on your account — sets up your company, issues or changes your
+licence, adds a branch allowance, creates a user — that is written down with the
+name of the person at VEXO who did it, and you can ask for it. When VEXO only
+*looks* at your data, that is **not** recorded. So nobody can tell you afterwards
+who at VEXO read your sales figures or your staff list, and you should not be
+told otherwise. If that matters to you, say so and it can be added.
 
 A manager sees their own branch. An owner sees every branch.
 
@@ -55,7 +63,10 @@ the licence (§6).
 **Team** — add each person with their real email, and choose the lowest role
 that lets them do their job. The system generates a password, and forces them to
 change it the first time they sign in. **Do not create one shared "cashier"
-login**: the whole point of the audit trail is knowing who voided the bill.
+login.** Every discount, void and refund is stored against the person who did
+it, and a shared login throws that away permanently — it cannot be reconstructed
+later. Read §5 for what you can see on screen today and what has to be asked
+for.
 
 **Catalog** — categories first, then products.
 
@@ -139,6 +150,38 @@ accountant.
 Days run on **IST**, midnight to midnight, not on a 24-hour clock from when you
 opened. A sale at 00:30 belongs to the new day.
 
+**Where the sales report stops.** It gives you the *total* discount for the
+period and the *count* of voided orders — neither has a card of its own, so you
+have to know where to look: the discount total is the small grey line *inside*
+the **Tax** card, under the big number, and `voided` is the last item in the
+Orders strip beneath the cards. What it does not tell you is **who**.
+
+**Reports → Discounts & voids** answers that. A total is the wrong shape for the
+question you will actually want to ask: "₹4,200 of discounts this week" is not
+something you can act on; "one cashier gave 40 of the 46" is. So this screen
+leads with counts per person, busiest first, with a bar beside each name — you
+are meant to see the odd one out without reading the numbers. Underneath is
+every individual event: when, who, which bill, and the detail (the discount
+given, the reason for a void, the amount refunded).
+
+Four things on that screen are worth knowing:
+
+- **Discounts counts discounts given.** If someone applied a discount and then
+  took it off, the removal is counted separately and named beside the number —
+  "45 · 1 later removed" — never added into it. A correction is not a discount.
+- **Refunds shows every stage**, manual and gateway. A gateway refund is tagged
+  `provider confirmed` or `not confirmed`. That distinction is the subject of
+  §10 and it is not cosmetic.
+- **A manager sees their own branch only.** You see all of them, or one at a
+  time from the Branch box.
+- **The counts are a minimum, not a guaranteed total.** Recording is deliberately
+  best-effort — a logging fault can never block a customer's bill, which is the
+  right trade, but it means a number here can in principle be short. It will
+  never be inflated.
+
+Worth opening the first time a discount or void total looks higher than you
+expected, rather than waiting for a pattern to become obvious.
+
 ---
 
 ## 6. Licence
@@ -186,7 +229,7 @@ do together before the café opens, not on the first busy morning.
 | When | What |
 |---|---|
 | Every day | File the daily closing. Investigate any variance the same day. |
-| Every week | Read the sales report. Check voids and refunds — a rising count is worth a question. |
+| Every week | Read the sales report. Check voids, refunds and the discount total — a rising number is worth a question, and VEXO can tell you which person it is (§5). |
 | Every month | Review who has a login. Remove people who have left. |
 | Before expiry | Renew the licence with VEXO. |
 
@@ -208,6 +251,12 @@ Stated plainly so nobody discovers it mid-service:
 - **No cap on how large a discount a cashier may give.** Any cashier can discount
   up to 100 %. If you want a ceiling above which a manager must approve, ask VEXO
   — it is a small change, but VEXO needs *you* to choose the number.
+- **Discount and void history goes back only as far as this system does.** Who
+  discounted and who voided *is* now a screen you can open — **Reports →
+  Discounts & voids** (§5) — but it reads the log this system has kept since it
+  went live. It cannot tell you about anything that happened before that. The
+  screen also reads at most 1,000 events per range and says so on screen when it
+  hits that; narrow the dates if you see the warning.
 - **No phone-sized screen.** Use a tablet, laptop or till monitor. Below about
   768 pixels wide — which is every phone held upright — the menu down the left
   disappears and there is nothing to replace it, so staff can see the page they
