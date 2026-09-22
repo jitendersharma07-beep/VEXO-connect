@@ -841,6 +841,12 @@ router.post(
 // amount, order-state and amount-due checks, that the webhook uses. There is
 // exactly one place in this codebase where a GATEWAY payment row is written,
 // and this route did not become a second one.
+
+// Said once because it is returned from two different places, and the caller
+// must not be able to tell them apart. Which of the two the reconcile hit is
+// a detail of transaction timing; the fact reported is the same fact.
+const ALREADY_RECORDED = 'this payment was already recorded — the provider’s webhook arrived first';
+
 router.post(
   '/:id/payment-intents/:intentId/reconcile',
   ...managerUp,
@@ -1015,7 +1021,7 @@ router.post(
           settled: true,
           recorded: false,
           alreadyRecorded: true,
-          reason: 'this payment was already recorded — the provider’s webhook arrived first',
+          reason: ALREADY_RECORDED,
           order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
         });
       }
@@ -1026,10 +1032,25 @@ router.post(
       // Verified, fetched, and still deliberately not applied — the amount
       // disagreed, or the order moved on. Recorded on the event row and
       // surfaced by the reconciliation report for a human to judge.
+      //
+      // One arrival here is NOT a discrepancy, and it is the likeliest of all:
+      // the webhook won the race outright, committing before this transaction
+      // read the intent. applyGatewayEvent then found it already SUCCEEDED and
+      // skipped, so no unique index was ever touched and nothing threw — the
+      // catch above never ran. The money is recorded exactly once either way,
+      // but a caller cannot infer that from a reason string, and a manager
+      // being told "not applied" about a bill the customer has paid will go
+      // looking to pay it again. The payment row settles it: if this intent has
+      // one, this attempt is recorded, whichever side of the read it landed.
+      const recorded = await prisma.payment.findUnique({
+        where: { intentId: intent.id },
+        select: { id: true },
+      });
       return res.status(200).json({
         settled: true,
         recorded: false,
-        reason: outcome.skippedReason ?? 'the payment was not applied',
+        ...(recorded ? { alreadyRecorded: true } : {}),
+        reason: recorded ? ALREADY_RECORDED : (outcome.skippedReason ?? 'the payment was not applied'),
         order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
       });
     }
