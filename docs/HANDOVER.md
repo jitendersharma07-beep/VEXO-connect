@@ -445,10 +445,18 @@ production, which publishes no host port at all.
 smaller pass count instead of an error.
 
 Unmerged branches carry their own counts, and mixing them with the release's
-is how this number goes stale. `phase2-reconcile-tests` is **253 / 253** (
-gateway 55 → 73: reconciliation, the webhook race, and delivery-versus-replay).
-That is a statement about **that branch**, not about `f014ab5`, which remains
-235 until the branch merges. Two of those 18 were failing when written, and are
+is how this number goes stale. `phase2-reconcile-tests` is no longer one of
+them: its five reconciliation commits were integrated into `phase2-integration`,
+which measures **253 / 253**, 7 files, re-measured at `d1bb888` against its own
+database. The whole rise from 235 is gateway 55 → 73 — recovery, the webhook
+race, and delivery-versus-replay — and the other six files still sum to 180,
+which is the check worth doing: reconciliation that moved a count it has no
+business moving would have touched something it should not have.
+
+That is a statement about **that branch**, and about nothing else. It is not a
+statement about production, which is an earlier build, has no gateway provider
+configured at all, and is untouched by this work — the webhook routes are not
+even mounted there. Two of those 18 were failing when written, and are
 what found the two gateway defects written up in `docs/RAZORPAY-SANDBOX.md` —
 one of which, a capture settled in a foreign currency closing an INR bill at
 face value, was on the **webhook** path, not only on the new route.
