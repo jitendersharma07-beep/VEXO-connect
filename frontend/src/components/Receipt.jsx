@@ -5,9 +5,19 @@ import { fmtINR, fmtDateTime } from '../lib/pos.js';
 import { ErrorNote } from './ui.jsx';
 
 // Receipt + KOT print views (contract §9).
-// 80 mm thermal layout (~302 px). `.print-area` + `@media print` rules in
-// index.css hide all app chrome when printing. Every rupee figure on the
-// receipt is a server-sent value rendered verbatim — no client math.
+//
+// 80 mm thermal layout. The box is the 72 mm PRINTABLE width (272 px at 96 dpi),
+// not the 80 mm paper width — see the @media print block in index.css for why
+// those are different and what it cost. The on-screen preview uses the same
+// 272 px so the modal shows what the paper will actually carry; a preview wider
+// than the printable area is how the clipping went unnoticed.
+//
+// `.print-area` + `@media print` rules in index.css hide all app chrome when
+// printing. Every rupee figure on the receipt is a server-sent value rendered
+// verbatim — no client math.
+
+// 72 mm printable width at 96 dpi. Keep in step with .print-area in index.css.
+const PAPER_W = 'w-[272px]';
 
 const Line = () => <div className="my-1 border-t border-dashed border-black" />;
 
@@ -18,8 +28,11 @@ function Row({ left, right, bold = false, big = false }) {
         big ? 'text-[13px]' : ''
       }`}
     >
+      {/* A 55-character product name has to wrap inside ~68 mm; the amount
+          must never be the thing that wraps, so it keeps its own line box and
+          tabular digits keep the column straight. */}
       <span className="min-w-0 break-words">{left}</span>
-      <span className="shrink-0 text-right">{right}</span>
+      <span className="shrink-0 whitespace-nowrap text-right tabular-nums">{right}</span>
     </div>
   );
 }
@@ -28,7 +41,7 @@ export function ReceiptView({ receipt }) {
   if (!receipt) return null;
   const r = receipt;
   return (
-    <div className="print-area mx-auto w-[302px] bg-white p-3 font-mono text-[11px] leading-snug text-black">
+    <div className={`print-area mx-auto ${PAPER_W} bg-white px-2 py-3 font-mono text-[11px] leading-snug text-black`}>
       {r.isDemo ? (
         <div className="mb-2 border-2 border-dashed border-black px-2 py-1 text-center text-[12px] font-bold">
           DEMO — sample data, not a real sale
@@ -146,15 +159,20 @@ export function ReceiptModal({ receipt, onClose }) {
 export function KotView({ kot }) {
   if (!kot) return null;
   return (
-    <div className="print-area mx-auto w-[302px] bg-white p-3 font-mono text-[12px] leading-snug text-black">
-      <div className="text-center text-[15px] font-bold">KOT #{kot.seq}</div>
-      <div className="text-center">
+    <div className={`print-area mx-auto ${PAPER_W} bg-white px-2 py-3 font-mono text-[12px] leading-snug text-black`}>
+      <div className="text-center text-[16px] font-bold">KOT #{kot.seq}</div>
+      <div className="text-center text-[13px] font-bold">
         {kot.type === 'DINE_IN' ? `Dine-in · ${kot.tableName || ''}` : 'Takeaway'}
       </div>
       <div className="text-center text-[10px]">{fmtDateTime(kot.createdAt)}</div>
       <Line />
+      {/* Kitchen copy is read at arm's length across a pass, often in steam —
+          bigger than the receipt body, and the quantity is what the line cook
+          scans for, so it stays hard against the right edge. */}
       {(kot.items || []).map((it, i) => (
-        <Row key={i} left={it.name} right={`× ${it.qty}`} bold />
+        <div key={i} className="mb-1.5">
+          <Row left={it.name} right={`× ${it.qty}`} bold big />
+        </div>
       ))}
       <Line />
     </div>

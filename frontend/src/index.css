@@ -40,10 +40,23 @@
 }
 
 /* Receipt / KOT printing (contract §9): 80 mm thermal layout. Everything but
-   the mounted .print-area is hidden so no app chrome reaches the printer. */
+   the mounted .print-area is hidden so no app chrome reaches the printer.
+
+   PAPER vs PRINTABLE WIDTH — the distinction this block exists to hold.
+   An "80 mm" roll is 80 mm of paper but only ~72 mm of imageable width
+   (576 dots at 203 dpi on an EPSON TM-T82/T88-class head); the rest is dead
+   margin under the head's edges. The previous rules set the content box to
+   the full 80 mm AND asked for a 4 mm @page margin, so the content was
+   80 mm wide inside a 72 mm window: everything right-aligned — every rupee
+   amount, the invoice number, the total — was cut off the right edge.
+
+   So: @page carries no margin (the printer's own dead zone is the margin),
+   the content box is the 72 mm printable width, and the breathing space is
+   padding INSIDE that box where it cannot push anything off the paper. */
 @media print {
   @page {
-    margin: 4mm;
+    size: 80mm auto;
+    margin: 0;
   }
   body {
     background: #fff;
@@ -59,11 +72,16 @@
     position: absolute;
     left: 0;
     top: 0;
-    width: 80mm;
-    max-width: 80mm;
+    /* 72 mm printable, not 80 mm paper. */
+    width: 72mm;
+    max-width: 72mm;
     margin: 0;
+    padding: 0 2mm;
     box-shadow: none;
     border: none;
+    /* Thermal heads render hairlines unevenly; keep contrast absolute. */
+    color: #000;
+    background: #fff;
   }
   .no-print {
     display: none !important;
