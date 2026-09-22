@@ -316,6 +316,11 @@ Walk this with the client. Every line is a thing to *do*, not to be told.
 - [ ] Manager refunds part of a payment; balance updates
 - [ ] Voiding an order with collected money is **refused** until refunded
 - [ ] Cashier cannot see or reach any of the three
+- [ ] Every correction above appears in **Reports → Discounts & voids** against
+      the name that made it — this is the check that closes the loop, because
+      until it is done "it is all recorded" is an untested claim
+- [ ] Apply a discount and remove it: the person shows **1 discount, 1 removed**,
+      not 2 discounts
 
 **Separation**
 - [ ] A second company's user cannot see the first's orders, menu or staff
@@ -522,31 +527,35 @@ survive a restore. Full detail and caveats: `docs/BACKUP-RESTORE.md` §6.
 
 Written down so they are disclosed rather than discovered.
 
-1. **No cap on cashier discounts, and no screen that shows them.** Any cashier
-   can discount up to 100 % of a bill without approval. For a café this is a
-   cash-shrinkage hole. The fix is small but ATC cannot pick the threshold —
-   ask the owner for a number and a rule ("above 10 %, manager approves").
+1. **No cap on cashier discounts.** Any cashier can discount up to 100 % of a
+   bill without approval. For a café this is a cash-shrinkage hole. The fix is
+   small but ATC cannot pick the threshold — ask the owner for a number and a
+   rule ("above 10 %, manager approves").
 
-   Two things soften it and one thing does not, and the difference matters if
-   the owner is deciding how urgent this is:
+   What softens it, and what does not:
 
    - Every discount **is** recorded, with who applied it, what they applied,
      to which order, and from where — `ORDER_DISCOUNT_SET` for a whole bill,
      `ORDER_ITEM_UPDATE` carrying `lineDiscount` for a single line. So the
      history exists from day one, and whenever the threshold is chosen there
      is something to check it against.
-   - **No screen in the product reads that table.** Not the owner's, not
-     ATC's. The record is real and unreachable, which is worse than an
-     obvious gap because "discounts are audited" sounds like a control anyone
-     can check. Until a screen exists, `deploy/audit-queries.sql` is how you
-     look — discounts per cashier, refunds and voids, failed sign-ins per
-     account. Every query in it was run against production before it was
-     committed.
+   - **The owner can now read that record**, at **Reports → Discounts & voids**
+     (`ad7a1e2` + `ed6226e`, frontend + backend). This was the sharpest item on
+     this list until it shipped, because "discounts are audited" sounds like a
+     control anyone can check and for months nobody could — the table was
+     written since day one and read by nothing. `deploy/audit-queries.sql` is
+     still there for questions the screen does not answer (failed sign-ins per
+     account, for one).
    - The recording is **best effort, not transactional.** `audit()` wraps its
      insert in try/catch so an audit failure can never fail a customer's
      bill, which is the right trade. It does mean a missing row is not proof
      an action did not happen — a failed write leaves only a `pos audit write
-     failed` warning in the backend log. Read those results as a lower bound.
+     failed` warning in the backend log. The screen says this in a footnote
+     and the API returns `bestEffort: true` beside every answer. Read those
+     results as a lower bound.
+   - It reads **at most 1,000 events** per range and reports `truncated` rather
+     than quietly shortening the list — a silently trimmed list is how an owner
+     concludes a cashier did nothing unusual.
 2. **Daily closing deliberately does not lock the day** — but it now says when
    it has stopped being true. `817b438` + `0084936`, **deployed** at 15:03 UTC
    and verified afterwards against the running build, not the working tree.
@@ -809,10 +818,13 @@ Only if online payment is wanted:
   tenant's branches and its staff emails, roles and last-login times. So an ATC
   admin can read a customer's staff list and leave no trace. Tell a client that
   plainly; do not tell them every access is logged.
-- Showing that record to a client means running `deploy/audit-queries.sql`
-  (below) — **no screen in the product reads the audit table** (§6.1,
-  limitation 1). Query 5 lists every action present, which is where the ATC
-  ones appear.
+- Showing *these* rows to a client still means running
+  `deploy/audit-queries.sql` (below). **Reports → Discounts & voids** reads the
+  same table but deliberately only the money that moves without a sale behind
+  it — discounts, voids, refunds. ATC actions are not in it and should not be:
+  it is a tenant's screen, and `COMPANY_STATUS_CHANGE` is not a tenant's
+  business. Query 5 lists every action present, which is where the ATC ones
+  appear.
 - In production that table holds **zero** ATC rows today, which is expected
   rather than alarming: the single tenant was seeded straight into the database
   instead of being created through the console. The consequence is that the ATC
