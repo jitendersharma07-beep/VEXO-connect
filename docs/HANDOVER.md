@@ -371,12 +371,17 @@ Separated by kind of evidence, because they are not equally strong.
 
 ### Automated tests — mocked, not a real provider
 
-Backend suite: **235 passed / 235**, 7 files, re-measured at 16:34 UTC against
-`f014ab5` — up from 227 because the activity report arrived with its own tests
-(phase2 and foundation grew; the other five files are unchanged). Money
-arithmetic, order lifecycle, RBAC, tenant scoping, licence gating, refund
-states, log redaction, and the gateway adapter **against a mock**. Re-measure rather than
-quoting this number — it has been stale in this document three times, and was
+Backend suite: **235 passed / 235**, 7 files (foundation 22, money 13,
+logRedaction 7, phase2 53, razorpay 53, razorpayFlow 32, gateway 55), run
+against the dev test database and re-measured at 16:45 UTC **from the merged
+tree at `f014ab5`** — not from the lane branch, because the runbook's
+precondition is that the tree being built is the tree that went green. The
+rise from 227 is one file: `phase2` 45 → 53, the activity report arriving with
+its own tests. The other six are unchanged, which is the point — a feature
+that moves counts it has no business moving is a feature that touched
+something it should not have. Money arithmetic, order lifecycle, RBAC, tenant
+scoping, licence gating, refund states, log redaction, and the gateway adapter
+**against a mock**. Re-measure rather than quoting this number — it has been stale in this document three times, and was
 stale again by two within the hour this line was last corrected:
 
 ```sh
@@ -511,6 +516,30 @@ as `index.html` because the deployed build is served under `/pos` and the
 harness was rooted at `/`. Worth recording: the page still returned 200 and
 still painted a shell, so a check that looked only at status codes would have
 called a completely dead app healthy.
+
+**Reports → Discounts & voids**, the same way, after the 16:37 UTC deploy of
+`f014ab5`. The bundle was fetched from `https://atcworkspace.com/pos/` and
+render-checked at `sha256 c1d15e81…45ef63` — 25 of 25, including the
+discount-versus-removal distinction, both viewport sizes, the truncation
+warning, the empty range, and no console errors. Then the bundle file was
+moved aside and the run repeated: **2 of 19**, aborting at the first filter
+click. The checks depend on that file rather than passing off the SPA
+fallback.
+
+Two traps found doing it, both of which produce a confident false green:
+
+- **A local `frontend/dist` is not the deployed bundle, even at the same
+  commit.** The two differ: the Docker build injects `baseURL:"/pos/api"` and
+  a local `npm run build` leaves `"/api"`. Identical source, different bytes,
+  different content hash. A render check against `frontend/dist` therefore
+  proves nothing about production. Fetch the bundle from the live URL and
+  render *that*.
+- **An anonymous request cannot tell you whether a route is mounted.** Auth
+  middleware runs before routing, so `GET /pos/api/reports/activity` returns
+  401 — and so does `GET /pos/api/reports/nosuchthing`. The 401 that looks
+  like "mounted and correctly gated" is identical to the 404 case. Prove a
+  mount by reading the route table in the running image, or with a
+  credentialed call; never by the status code of an unauthenticated one.
 
 ### Rate limiting, measured against production rather than read off the config
 
@@ -756,10 +785,25 @@ Written down so they are disclosed rather than discovered.
     than assumed to carry forward: `index-BKEWKpgq.js` contains "VEXO Connect"
     once and "ATC POS" zero times. The two client documents were rewritten to
     match: re-counted 2026-09-22, `guide-owner.md` and `guide-cashier.md`
-    carry 26 occurrences of "VEXO" between them and "ATC POS" zero times. The
-    metric is named here on purpose — the previous figure was a bare "24"
-    against no stated basis, and a number nobody can reproduce cannot be
-    checked when it drifts.
+    carry **31** occurrences of "VEXO" between them (27 + 4) and "ATC POS"
+    zero times. The metric is named here on purpose — the previous figure was
+    a bare "24" against no stated basis, and a number nobody can reproduce
+    cannot be checked when it drifts. It has now drifted, which is the
+    argument for naming it: it read 26 until the audit-reader lane merged,
+    which added six mentions to `guide-owner.md` (§1 and §8) and deleted one —
+    the sentence "Everything VEXO does is written to an audit log you can be
+    shown", which was not true — §9 below is the corrected version, and
+    `guide-owner.md` §1 now says plainly that a VEXO *read* leaves no trace.
+    Net +5. Re-take the count from the repo root with:
+
+    ```sh
+    cat docs/guide-owner.md docs/guide-cashier.md | grep -o 'VEXO'    | wc -l
+    cat docs/guide-owner.md docs/guide-cashier.md | grep -o 'ATC POS' | wc -l
+    ```
+
+    The second number is the one that matters, and it must stay zero. The
+    first will move every time the guides are edited, and that is fine — it
+    is a checksum on the rebrand, not a target.
 
     Two things this did **not** change, deliberately: the URL is still
     `atcworkspace.com/pos`, and the footer still credits ATC Infocom Solutions
