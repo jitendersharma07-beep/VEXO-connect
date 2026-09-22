@@ -112,7 +112,8 @@ function DiscountModal({ open, order, onClose, onOrder }) {
           <input
             id="disc-value"
             type="number"
-            className="input"
+            inputMode="decimal"
+            className="input text-lg tabular-nums"
             min="0"
             max={type === 'PERCENT' ? 100 : undefined}
             step={type === 'FLAT' ? '0.01' : '0.001'}
@@ -287,10 +288,14 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
             <div>
               <label className="label" htmlFor="pay-tendered">Cash tendered (₹)</label>
               <div className="flex gap-2">
+                {/* Cash is counted at the counter with a queue behind it:
+                    big type, numeric keypad, tabular digits so a mistyped
+                    figure is visible at a glance before it is submitted. */}
                 <input
                   id="pay-tendered"
                   type="number"
-                  className="input"
+                  inputMode="decimal"
+                  className="input h-14 text-2xl font-bold tabular-nums"
                   min="0"
                   step="0.01"
                   value={tendered}
@@ -298,7 +303,7 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
                   required
                   autoFocus
                 />
-                <button type="button" className="btn-ghost shrink-0" onClick={() => setTendered(String(due))}>
+                <button type="button" className="btn-ghost h-14 shrink-0 px-5" onClick={() => setTendered(String(due))}>
                   Exact
                 </button>
               </div>
@@ -311,7 +316,8 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
                 <input
                   id="pay-amount"
                   type="number"
-                  className="input"
+                  inputMode="decimal"
+                  className="input h-14 text-2xl font-bold tabular-nums"
                   min="0"
                   step="0.01"
                   value={amount}
@@ -866,7 +872,14 @@ export default function Sell() {
   const freeTables = (tables || []).filter((t) => !t.currentOrder);
 
   return (
-    <div className="flex flex-col gap-4 xl:flex-row">
+    // Two columns from 1024 px, not 1280 px. A 1024×768 terminal is the
+    // smallest screen this POS is sold against, and at the old xl: breakpoint
+    // it fell back to stacked — which put the order panel underneath the whole
+    // product grid, so "Bill" sat ~400 px below the fold and the cashier had
+    // to scroll to take money. Below 1024 px (tablet portrait) stacking is
+    // right, and the sticky bar at the foot of this file keeps the total and
+    // the primary action on screen there.
+    <div className="flex flex-col gap-4 lg:flex-row">
       {/* ---------------- left: catalog ---------------- */}
       <div className="min-w-0 flex-1">
         {licenseBlocked || licMsg ? (
@@ -936,7 +949,12 @@ export default function Sell() {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 2xl:grid-cols-4">
+          // Column count follows the CATALOG's width, not the window's. From
+          // lg the order panel takes ~380 px out of the row, so a 1024 px
+          // terminal leaves ~356 px here — three columns made 105 px tiles
+          // that no thumb can hit accurately. Drop back to two there and
+          // climb again once the window can actually afford it.
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {products.map((p) => {
               const hasVariants = (p.variants || []).some((v) => v.status === 'ACTIVE');
               return (
@@ -945,13 +963,23 @@ export default function Sell() {
                   type="button"
                   disabled={busy || licenseBlocked}
                   onClick={() => (hasVariants ? setVariantFor(p) : addItem(p, null))}
-                  className="card flex min-h-[92px] flex-col items-start justify-between p-3 text-left transition-colors hover:border-pos-royal hover:bg-pos-royal/5 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="card flex min-h-[104px] flex-col items-start justify-between gap-2 p-3 text-left transition-colors hover:border-pos-royal hover:bg-pos-royal/5 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <div className="text-sm font-bold leading-tight text-pos-ink">{p.name}</div>
-                  <div className="mt-2 flex w-full items-center justify-between">
-                    <span className="text-sm font-semibold text-pos-royal">{fmtINR(p.basePrice)}</span>
+                  {/* Clamped to three lines. A real café catalog carries names
+                      like "Double Chocolate Fudge Brownie with Vanilla Bean
+                      Ice Cream", and unclamped it stretched its whole grid row
+                      to six lines, pushing the rest of the menu off screen.
+                      The full name stays available via title= and on the
+                      cart line, which is not width-constrained. */}
+                  <div className="line-clamp-3 w-full text-sm font-bold leading-tight text-pos-ink" title={p.name}>
+                    {p.name}
+                  </div>
+                  <div className="flex w-full items-center justify-between gap-1">
+                    <span className="text-sm font-semibold tabular-nums text-pos-royal">{fmtINR(p.basePrice)}</span>
                     {hasVariants ? (
-                      <span className="badge bg-pos-orange/10 text-pos-ember">variants</span>
+                      /* Abbreviated: at 1024 px the tile is ~190 px wide and
+                         the full word pushed past the tile's right edge. */
+                      <span className="badge shrink-0 bg-pos-orange/10 px-1.5 text-[10px] text-pos-ember">opt</span>
                     ) : null}
                   </div>
                 </button>
@@ -962,8 +990,13 @@ export default function Sell() {
       </div>
 
       {/* ---------------- right: order panel ---------------- */}
-      <div className="w-full shrink-0 xl:w-[400px]">
-        <div className="card flex min-h-[420px] flex-col">
+      {/* Pinned to the top of the viewport on two-column screens so the
+          catalog can be scrolled the length of a long menu without carrying
+          the totals and the payment button off screen with it. self-start is
+          required: a stretched flex child is full-height and sticky has
+          nothing left to travel against. */}
+      <div className="w-full shrink-0 lg:sticky lg:top-6 lg:w-[380px] lg:self-start 2xl:w-[400px]">
+        <div className="card flex min-h-[420px] flex-col lg:max-h-[calc(100vh-3rem)]">
           {!order ? (
             <div className="flex flex-1 flex-col p-4">
               <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">New order</h2>
@@ -1101,7 +1134,7 @@ export default function Sell() {
             </div>
           ) : (
             <>
-              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+              <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-pos-ink">
@@ -1122,7 +1155,10 @@ export default function Sell() {
                 </button>
               </div>
 
-              <div className="max-h-[46vh] flex-1 overflow-y-auto px-4 py-2">
+              {/* min-h-0 lets this shrink inside the capped card; without it a
+                  flex child refuses to go below its content height and the
+                  totals get pushed out of the pinned panel instead. */}
+              <div className="max-h-[46vh] min-h-0 flex-1 overflow-y-auto px-4 py-2 lg:max-h-none">
                 {order.items.length === 0 ? (
                   <div className="py-8 text-center text-sm text-slate-400">No items on this order.</div>
                 ) : (
@@ -1158,33 +1194,37 @@ export default function Sell() {
                           <div className="mt-1.5 flex items-center gap-1.5">
                             {it.kotSeq === null || it.kotSeq === undefined ? (
                               <>
+                                {/* Quantity is the control a cashier hits most
+                                    and it used to be a 22 px box — under half
+                                    the 44 px touch floor, and a mis-hit here
+                                    changes what the customer is charged. */}
                                 <button
                                   type="button"
-                                  className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                  className="btn-touch border-slate-200 text-slate-600 hover:bg-slate-50"
                                   disabled={busy || it.qty <= 1}
                                   onClick={() => patchItem(it, { qty: it.qty - 1 }, 'Could not change quantity')}
                                   aria-label="Decrease quantity"
                                 >
-                                  <Minus className="h-3.5 w-3.5" />
+                                  <Minus className="h-5 w-5" />
                                 </button>
-                                <span className="w-6 text-center text-sm font-bold">{it.qty}</span>
+                                <span className="w-8 text-center text-base font-bold tabular-nums">{it.qty}</span>
                                 <button
                                   type="button"
-                                  className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                  className="btn-touch border-slate-200 text-slate-600 hover:bg-slate-50"
                                   disabled={busy}
                                   onClick={() => patchItem(it, { qty: it.qty + 1 }, 'Could not change quantity')}
                                   aria-label="Increase quantity"
                                 >
-                                  <Plus className="h-3.5 w-3.5" />
+                                  <Plus className="h-5 w-5" />
                                 </button>
                                 <button
                                   type="button"
-                                  className="ml-1 rounded-md border border-slate-200 p-1 text-red-500 hover:bg-red-50 disabled:opacity-40"
+                                  className="btn-touch ml-1 border-slate-200 text-red-500 hover:bg-red-50"
                                   disabled={busy}
                                   onClick={() => deleteItem(it)}
                                   aria-label="Remove line"
                                 >
-                                  <Trash2 className="h-3.5 w-3.5" />
+                                  <Trash2 className="h-5 w-5" />
                                 </button>
                               </>
                             ) : (
@@ -1194,9 +1234,10 @@ export default function Sell() {
                               <span className="ml-auto flex items-center gap-1">
                                 <input
                                   type="number"
+                                  inputMode="decimal"
                                   min="0"
                                   step="0.01"
-                                  className="input w-24 px-2 py-1 text-xs"
+                                  className="input w-24 px-2 py-1 text-sm tabular-nums"
                                   value={editLineValue}
                                   onChange={(e) => setEditLineValue(e.target.value)}
                                   aria-label="Line discount in rupees"
@@ -1212,22 +1253,22 @@ export default function Sell() {
                             ) : (
                               <button
                                 type="button"
-                                className="ml-auto flex items-center gap-1 text-[11px] font-semibold text-pos-royal hover:underline"
+                                className="link-touch ml-auto text-[11px] text-pos-royal"
                                 onClick={() => {
                                   setEditLineId(it.id);
                                   setEditLineValue(Number(it.lineDiscount) > 0 ? String(it.lineDiscount) : '');
                                 }}
                               >
-                                <Pencil className="h-3 w-3" /> line disc
+                                <Pencil className="h-4 w-4" /> line disc
                               </button>
                             )}
                             {managerUp && (it.kotSeq !== null && it.kotSeq !== undefined) ? (
                               <button
                                 type="button"
-                                className="flex items-center gap-1 text-[11px] font-semibold text-red-600 hover:underline"
+                                className="link-touch text-[11px] text-red-600"
                                 onClick={() => setVoidItemTarget(it)}
                               >
-                                <Ban className="h-3 w-3" /> void
+                                <Ban className="h-4 w-4" /> void
                               </button>
                             ) : null}
                           </div>
@@ -1239,7 +1280,7 @@ export default function Sell() {
               </div>
 
               {/* totals — server values only */}
-              <div className="border-t border-slate-100 px-4 py-3 text-sm">
+              <div className="shrink-0 border-t border-slate-100 px-4 py-3 text-sm">
                 <div className="flex justify-between text-slate-600">
                   <span>Subtotal</span>
                   <span>{fmtINR(order.subtotal)}</span>
@@ -1255,11 +1296,11 @@ export default function Sell() {
                     {orderOpen ? (
                       <button
                         type="button"
-                        className="text-pos-royal hover:underline"
+                        className="link-touch text-pos-royal"
                         onClick={() => setDiscountOpen(true)}
                         aria-label="Edit order discount"
                       >
-                        <Tags className="h-3.5 w-3.5" />
+                        <Tags className="h-4 w-4" />
                       </button>
                     ) : null}
                   </span>
@@ -1307,7 +1348,7 @@ export default function Sell() {
               </div>
 
               {/* actions */}
-              <div className="space-y-2 border-t border-slate-100 px-4 py-3">
+              <div className="shrink-0 space-y-2 border-t border-slate-100 px-4 py-3">
                 {orderOpen ? (
                   <>
                     <div className="grid grid-cols-2 gap-2">
@@ -1352,7 +1393,7 @@ export default function Sell() {
                 ) : null}
                 <div className="flex items-center justify-between text-xs">
                   {anyKot ? (
-                    <button type="button" className="font-semibold text-pos-royal hover:underline" onClick={() => setKotListFor(order.id)}>
+                    <button type="button" className="link-touch text-pos-royal" onClick={() => setKotListFor(order.id)}>
                       Reprint KOTs
                     </button>
                   ) : (
@@ -1361,7 +1402,7 @@ export default function Sell() {
                   {managerUp && ['OPEN', 'BILLED'].includes(order.status) ? (
                     <button
                       type="button"
-                      className="font-semibold text-red-600 hover:underline disabled:opacity-40"
+                      className="link-touch text-red-600"
                       disabled={!netCollected}
                       title={netCollected ? 'Void this order' : 'Refund collected payments before voiding'}
                       onClick={() => setVoidOrderOpen(true)}
@@ -1375,6 +1416,62 @@ export default function Sell() {
           )}
         </div>
       </div>
+
+      {/* ---------------- stacked-layout action bar ----------------
+          Below 1024 px the order panel sits under the full product grid, so
+          the total and the primary action are off screen for as long as the
+          cashier is tapping products — on a 768×1024 tablet that measured
+          ~470 px below the fold. This bar keeps both on screen. It is not a
+          second source of truth: the figures are the same server-sent
+          order.total / order.amountDue the panel renders, and the buttons
+          call the same handlers with the same guards, so it cannot offer an
+          action the panel would refuse. Hidden at lg+, where the pinned
+          panel already does this job. */}
+      {order && (orderOpen || order.status === 'BILLED') ? (
+        <div className="sticky bottom-0 z-30 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 shadow-[0_-4px_16px_rgba(10,20,36,0.08)] backdrop-blur lg:hidden">
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {order.status === 'BILLED' && Number(order.amountDue) > 0 ? 'Balance due' : 'Total'}
+              </div>
+              <div className="truncate text-xl font-extrabold text-pos-ink">
+                {order.status === 'BILLED' && Number(order.amountDue) > 0
+                  ? fmtINR(order.amountDue)
+                  : fmtINR(order.total)}
+              </div>
+            </div>
+            {orderOpen ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-ghost shrink-0"
+                  disabled={busy || !hasUnsentKotLines || licenseBlocked}
+                  onClick={sendKot}
+                >
+                  <Send className="h-4 w-4" /> KOT
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary shrink-0"
+                  disabled={busy || !canBill || licenseBlocked}
+                  onClick={billOrder}
+                >
+                  <IndianRupee className="h-4 w-4" /> Bill
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn-orange shrink-0"
+                disabled={busy || licenseBlocked}
+                onClick={() => setPayOpen(true)}
+              >
+                <IndianRupee className="h-4 w-4" /> Record payment
+              </button>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {/* ---------------- modals ---------------- */}
       <VariantModal

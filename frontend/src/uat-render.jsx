@@ -81,8 +81,45 @@ const kot = {
   items: [
     { name: 'Cappuccino', qty: 2 },
     { name: 'Veg Club Sandwich', qty: 1 },
-    { name: 'Masala Fries', qty: 1 },
+    // A real café catalog carries names this long; the kitchen copy has to
+    // wrap them without pushing the quantity off the paper.
+    { name: 'Double Chocolate Fudge Brownie with Vanilla Bean Ice Cream', qty: 1 },
+    { name: 'Masala Fries — extra peri peri, no coriander', qty: 3 },
+    { name: 'Espresso', qty: 12 },
   ],
+};
+
+// A long, multi-item bill: the case that shows whether the 72 mm column holds
+// when names wrap, quantities reach two digits and the paper runs on.
+const receiptLong = {
+  invoiceNumber: 'BSC-CP/2026/000483',
+  isDemo: false,
+  company: { name: 'Brew Street Café' },
+  branch: { name: 'Connaught Place', code: 'BSC-CP', addressLine: 'N-12, Connaught Place', city: 'New Delhi' },
+  order: { id: 'fix-3', type: 'DINE_IN', tableName: 'T-11', billedAt: '2026-09-22T20:15:00.000+05:30', cashier: 'Demo Cashier' },
+  items: [
+    { name: 'Double Chocolate Fudge Brownie with Vanilla Bean Ice Cream', qty: 2, unitPrice: 320, lineDiscount: 0, amount: 640 },
+    { name: 'Masala Fries — extra peri peri, no coriander', qty: 3, unitPrice: 140, lineDiscount: 20, amount: 400 },
+    { name: 'Cappuccino', qty: 12, unitPrice: 180, lineDiscount: 0, amount: 2160 },
+    { name: 'Veg Club Sandwich', qty: 4, unitPrice: 240, lineDiscount: 0, amount: 960 },
+    { name: 'Fresh Lime Soda (Sweet & Salted, no ice)', qty: 6, unitPrice: 110, lineDiscount: 0, amount: 660 },
+    { name: 'Paneer Tikka Wrap', qty: 2, unitPrice: 260, lineDiscount: 0, amount: 520 },
+    { name: 'Blueberry Cheesecake', qty: 1, unitPrice: 280, lineDiscount: 0, amount: 280 },
+    { name: 'Espresso', qty: 8, unitPrice: 120, lineDiscount: 0, amount: 960 },
+  ],
+  subtotal: 6580,
+  discountAmount: 0,
+  taxBreakup: [
+    { name: 'CGST 2.5%', percent: 2.5, taxable: '6580.00', tax: '164.50' },
+    { name: 'SGST 2.5%', percent: 2.5, taxable: '6580.00', tax: '164.50' },
+  ],
+  total: 6909,
+  payments: [
+    { method: 'CARD', channel: 'MANUAL', amount: 6909, tendered: null, changeDue: null, label: LABEL_MANUAL },
+  ],
+  amountPaid: '6909.00',
+  amountDue: '0.00',
+  refunds: [],
 };
 
 const view = new URLSearchParams(window.location.search).get('view') || 'all';
@@ -100,6 +137,9 @@ createRoot(document.getElementById('root')).render(
     )}
     {(view === 'all' || view === 'receipt-due') && (
       <Block title="receipt-due"><ReceiptView receipt={receiptDue} /></Block>
+    )}
+    {(view === 'all' || view === 'receipt-long') && (
+      <Block title="receipt-long"><ReceiptView receipt={receiptLong} /></Block>
     )}
     {(view === 'all' || view === 'kot') && (
       <Block title="kot"><KotView kot={kot} /></Block>
