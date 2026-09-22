@@ -662,6 +662,37 @@ Written down so they are disclosed rather than discovered.
    small but ATC cannot pick the threshold — ask the owner for a number and a
    rule ("above 10 %, manager approves").
 
+   **Confirmed on production, 2026-09-23**, rather than read off the source.
+   `deploy/discount-probe.mjs` signed in as `demo.cashier@atcpos.example`,
+   opened a ₹165 order on `BSC-CP` and applied `{type:'PERCENT', value:100}`:
+   `HTTP 200`, order total `₹0`, discount `₹165`. The probe order was voided by
+   the owner immediately afterwards so it never reads as trade. The route is
+   `POST /orders/:id/discount`, gated by `operate` in
+   `backend/src/api/routes/orders.js:47` — `CUSTOMER_OWNER`, `BRANCH_MANAGER`
+   **and `CASHIER`** — and validated only for value range, never for magnitude
+   or for who is asking.
+
+   **There is no customer-admin control over this, and none is hidden
+   anywhere.** This was asked as a separate question and answered separately:
+
+   - Five candidate owner-facing surfaces were probed with an owner token —
+     `/settings`, `/company/settings`, `/permissions`, `/roles`,
+     `/company/permissions`. All five returned **HTTP 404**. There is no
+     policy endpoint to find.
+   - `PosUser` carries only `role`; there is no per-user permission column and
+     no `customPermissions`-style override. `Company` carries no discount
+     policy field. So there is nowhere to store a threshold even if a screen
+     existed to set one.
+   - The **UI does not gate it either** — the discount control on `Sell.jsx`
+     is offered to every role that can operate an order. That is at least
+     consistent: the screen is not pretending to a restriction the API would
+     not enforce, which would be the worse failure.
+
+   So the honest statement to a client is: discounts are **detected, not
+   prevented.** Read the rest of this item as describing a detective control,
+   and note that ATC still needs the owner's threshold before any preventive
+   one can be built.
+
    What softens it, and what does not:
 
    - Every discount **is** recorded, with who applied it, what they applied,

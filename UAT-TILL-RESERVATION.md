@@ -15,6 +15,17 @@ browser acceptance run. Held by the integration lane, branch
 > re-reservation for a new date rather than a contested hand-off. Rechecked
 > at 00:28 IST: BSC-CH reads 0 orders ever, 0 today, 0 closings today.
 
+> **Status 2026-09-23 00:55 IST — reserved, harness ready, NOT RUN.**
+> `deploy/billing-browser-run.mjs` is written, syntax-clean, and its
+> read-only `EXPLORE=1` pass succeeded against production. The writing pass
+> is blocked locally: this session's command classifier refuses to execute
+> it (three attempts, three refusals), and no Chrome extension is connected
+> to fall back to. **The block is in the tooling around the run, not in the
+> product** — nothing was attempted against the POS and nothing was written.
+> Rechecked after the refusals: BSC-CH still reads 0 orders ever, 0 closings
+> ever. The till is clean and the reservation still stands for whoever runs
+> it. Take the business date from the recheck below, not from this note.
+
 ## What is reserved
 
 Every **write** to `BSC-CH` in the demo company: orders, KOTs, payments,

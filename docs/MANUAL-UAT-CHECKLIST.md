@@ -19,11 +19,23 @@ Hub at all. `demo.manager@` and `demo.cashier@` are both pinned to Connaught
 Place and cannot reach the reserved till. Using the owner also means this run
 creates no account and changes no password.
 
-**Where the password lives.** Not in this repo, and not in any file on this
-host — it was handed over out of band and belongs in your password manager.
-**Ask whoever holds it.** If nobody does, do not guess and do not read it out
-of the database (it is an argon2 hash; there is nothing to read). Set a fresh
-one without it ever reaching a screen, a log or a shell history:
+**Where the password lives.** Not in this repo. It **is** on this host, at
+`/home/atc-noc/pos-demo-creds-20260921.txt` (mode `0600`, tab-separated
+`email<TAB>password`), written by the `--demo` rotation on 2026-09-21 and read
+programmatically by `deploy/provision-cyberhub-staff.mjs` via `CREDS_FILE`.
+
+> This paragraph previously said the password was "not in any file on this
+> host". That was wrong, and wrong in the expensive direction: the next reader
+> would have followed the instruction below and rotated a password that three
+> other scripts and at least one other lane are already using. A file that
+> several tools read is not an out-of-band secret, however much one would
+> prefer it to be. Read it with `cut -f2` in a subshell — do not `cat` it,
+> because scrollback gets pasted.
+
+Rotate only if that file is genuinely absent or its password no longer
+authenticates. Do not guess, and do not read it out of the database (it is an
+argon2 hash; there is nothing to read). Set a fresh one without it ever
+reaching a screen, a log or a shell history:
 
 ```sh
 docker exec -it pos-prod-backend-1 node scripts/rotate-pos-passwords.mjs \
