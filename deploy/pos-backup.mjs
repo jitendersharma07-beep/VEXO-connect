@@ -55,7 +55,11 @@
 //     mechanism wearing a hygiene costume.
 //
 //   * --drill restores into a THROWAWAY database and compares row counts and
-//     the payment total against the live source. This is the only step that
+//     the payment total against THE BACKUP'S OWN MANIFEST — not against live.
+//     Live is that database plus everything written since, so measuring a
+//     backup against it fails every backup for the crime of being older than
+//     now. Live is reported as a drift figure, which is the data-loss window,
+//     and never asserted on. This is the only step that
 //     distinguishes "we have files" from "we have backups". It is separate
 //     from the nightly run because it is the expensive one, and because a
 //     drill that fails should page a human rather than fail a cron job nobody
@@ -183,6 +187,35 @@ if (MODE === 'drill') {
   const src = join(DEST, newest.f);
   note(`drilling ${newest.f} into ${DRILL_CONTAINER}:${DRILL_DB}`);
 
+  // THE BASELINE IS THE MANIFEST, NOT THE LIVE DATABASE.
+  //
+  // A drill asks exactly one question: did this archive restore to the
+  // database it was taken from? Live is a different database — it is that one
+  // plus every sale, login and audit row written since. Comparing against it
+  // means the drill starts failing the moment the cafe sells anything, which
+  // is precisely when backups begin to matter.
+  //
+  // Measured on 2026-09-22, before this was fixed: a byte-perfect restore
+  // reported PosUser 10 vs 4, PosAuditLog 59 vs 69 and PosSession 20 vs 14,
+  // and the run concluded "this backup is NOT proven restorable". Nothing was
+  // wrong with the backup. A check that cries wolf every night is a check
+  // nobody reads, and it fails silently on the one night it was right.
+  //
+  // Live is still read — but only to report how far the database has moved on
+  // since this backup, which is the data-loss window and worth knowing.
+  const manifestPath = join(DEST, newest.f.replace(/\.dump$/, '.manifest'));
+  let mf = null;
+  try { mf = JSON.parse(await readFile(manifestPath, 'utf8')); } catch { /* reported below */ }
+
+  const expected = mf?.rows ?? null;
+  // pg_dump snapshots at the instant it starts, so counts taken either side of
+  // it bracket what the archive can legitimately hold. When nothing moved the
+  // bracket collapses to a single number and the comparison is exact.
+  const expectedAfter = mf?.rowsAfter ?? expected;
+  if (!expected) {
+    fail(`${newest.f} has no manifest recording what it contained — the restore can be exercised but its fidelity cannot be verified, and "cannot tell" must not read as a pass`);
+  }
+
   const alive = await run(['inspect', '-f', '{{.State.Running}}', DRILL_CONTAINER]);
   if (alive.out !== 'true') die(`drill container ${DRILL_CONTAINER} is not running`);
   if (DRILL_CONTAINER === CONTAINER) die('refusing to drill inside the production container');
@@ -208,28 +241,70 @@ if (MODE === 'drill') {
     if (rest.code !== 0) { fail(`pg_restore failed: ${rest.err.split('\n')[0]}`); ok = false; }
     else pass('pg_restore completed with no errors');
 
-    if (ok) {
+    if (ok && expected) {
       const drillPsql = (sql) => run(['exec', DRILL_CONTAINER, 'psql', '-U', drillUser,
         '-d', DRILL_DB, '-tA', '-v', 'ON_ERROR_STOP=1', '-c', sql]);
-      let mismatches = 0;
-      for (const t of tableRows) {
+
+      // Iterating the MANIFEST's tables, not live's. A migration applied since
+      // the backup adds a table to live that the archive cannot contain, and
+      // walking live's list would report that new table as "missing from the
+      // restore" — a second way to fail a backup for being correctly old.
+      const names = Object.keys(expected);
+      let mismatches = 0, moved = 0;
+      for (const t of names) {
+        const a = expected[t], b = expectedAfter?.[t] ?? expected[t];
+        const lo = Math.min(a, b), hi = Math.max(a, b);
         const r = await drillPsql(`select count(*) from "${t}"`);
         const got = r.code === 0 ? Number(r.out) : NaN;
-        if (got !== counts[t]) { fail(`${t}: live ${counts[t]}, restored ${Number.isNaN(got) ? 'missing' : got}`); mismatches += 1; }
+        if (Number.isNaN(got)) {
+          fail(`${t}: missing from the restore — the backup recorded ${lo}`);
+          mismatches += 1;
+        } else if (got < lo || got > hi) {
+          fail(`${t}: the backup recorded ${lo === hi ? lo : `${lo}-${hi}`}, the restore has ${got}`);
+          mismatches += 1;
+        } else if (lo !== hi) moved += 1;
       }
-      if (mismatches === 0) pass(`all ${tableRows.length} tables restored with identical row counts`);
+      if (mismatches === 0) {
+        pass(`all ${names.length} tables restored to the counts this backup recorded`
+          + (moved ? ` (${moved} table(s) were being written while the dump ran; each restored inside its recorded range)` : ''));
+      }
 
-      if (paymentSum !== null) {
+      if (mf.paymentAmountSum != null) {
         const r = await drillPsql('select coalesce(sum(amount),0)::text from "Payment"');
-        if (r.code === 0 && r.out === paymentSum) pass(`payment total matches (${paymentSum})`);
-        else fail(`payment total: live ${paymentSum}, restored ${r.out}`);
+        const want = [mf.paymentAmountSum, mf.paymentAmountSumAfter].filter((v) => v != null).map(Number);
+        const got = r.code === 0 ? Number(r.out) : NaN;
+        if (!Number.isNaN(got) && want.some((w) => w === got)) {
+          pass(`payment total matches the backup (${got})`);
+          // Said out loud, because a green tick against zero is the easiest
+          // false comfort in this whole file.
+          if (got === 0) note('that total is 0 — the money comparison proves nothing until there are real sales to compare');
+        } else {
+          fail(`payment total: the backup recorded ${mf.paymentAmountSum}, the restore has ${r.out}`);
+        }
       }
+
       // Row counts can match while the rows are wrong. One content check on
       // the table a restore must get right: who can log in.
       const users = await drillPsql('select count(*) from "PosUser" where "passwordHash" is not null and length("passwordHash") > 20');
-      const liveUsers = await psql('select count(*) from "PosUser" where "passwordHash" is not null and length("passwordHash") > 20');
-      if (users.code === 0 && users.out === liveUsers) pass(`${liveUsers} staff logins survived the restore with their password hashes intact`);
-      else fail(`staff password hashes: live ${liveUsers}, restored ${users.out}`);
+      if (mf.staffLoginsWithHash == null) {
+        note(`${users.out} staff login(s) restored with usable password hashes — this backup recorded no figure to check that against`);
+      } else if (users.code === 0 && Number(users.out) === Number(mf.staffLoginsWithHash)) {
+        pass(`${mf.staffLoginsWithHash} staff login(s) survived the restore with their password hashes intact`);
+      } else {
+        fail(`staff logins: the backup recorded ${mf.staffLoginsWithHash}, the restore has ${users.out}`);
+      }
+
+      // Live, reported and never asserted on. This is the answer to "how much
+      // would I lose if I restored this right now", which is the number an
+      // operator actually wants and the one the old comparison destroyed by
+      // turning it into a failure.
+      const drifted = names.filter((t) => counts[t] !== undefined && counts[t] !== expected[t]);
+      if (!drifted.length) note('live is unchanged since this backup was taken');
+      else {
+        const shown = drifted.slice(0, 6).map((t) => `${t} ${expected[t]}→${counts[t]}`).join(', ');
+        note(`live has moved on in ${drifted.length} table(s): ${shown}${drifted.length > 6 ? ' …' : ''}`);
+        note('that gap is the data-loss window if you restored this backup now — it is not a restore fault');
+      }
     }
   } finally {
     // Always, including on failure: a drill that leaves a copy of production
@@ -240,7 +315,12 @@ if (MODE === 'drill') {
     await run(['exec', DRILL_CONTAINER, 'rm', '-f', inTmp]);
     pass('drill copy dropped and the temporary dump removed');
   }
-  console.log(failures ? `\nFAIL: ${failures} problem(s) — this backup is NOT proven restorable` : '\nPASS: the newest backup restores to an exact copy of production');
+  // "a copy of production" was the wording that encouraged the bug: it invites
+  // a comparison against production as it is now. A backup restores to the
+  // database as it WAS. That distinction is the whole of this fix.
+  console.log(failures
+    ? `\nFAIL: ${failures} problem(s) — this backup is NOT proven restorable`
+    : '\nPASS: the newest backup restores to an exact copy of the database as it stood when the backup was taken');
   process.exit(failures ? 1 : 0);
 }
 
@@ -281,6 +361,27 @@ const missing = tableRows.filter((t) => !toc.out.includes(`TABLE public ${t} `))
 if (missing.length) { await rm(part, { force: true }); die(`the archive is missing tables the live database has: ${missing.join(' ')}`); }
 pass(`archive lists all ${tableRows.length} tables (${(size / 1024).toFixed(0)} KiB)`);
 
+// Count again, on the far side of the dump.
+//
+// The first reading was taken before pg_dump started, so by the time the
+// manifest is written it describes a moment that has already passed. On a busy
+// evening that single stale number is enough to fail a perfect drill. These two
+// readings bracket the snapshot instead: --drill accepts any count inside the
+// range, which is exact when the database was quiet and honest when it was not.
+const countsAfter = {};
+for (const t of tableRows) countsAfter[t] = Number(await psql(`select count(*) from "${t}"`));
+const paymentSumAfter = counts.Payment !== undefined
+  ? await psql('select coalesce(sum(amount),0)::text from "Payment"') : null;
+// Recorded so the drill can check WHO CAN LOG IN against this backup rather
+// than against live, where staff are hired and removed between backups.
+const staffLogins = counts.PosUser !== undefined
+  ? Number(await psql('select count(*) from "PosUser" where "passwordHash" is not null and length("passwordHash") > 20'))
+  : null;
+const movedDuringDump = tableRows.filter((t) => counts[t] !== countsAfter[t]);
+if (movedDuringDump.length) {
+  note(`${movedDuringDump.length} table(s) were written while the dump ran: ${movedDuringDump.join(' ')} — recorded as a range, not an error`);
+}
+
 const dumpSha = await sha256File(part);
 let envSha = 'absent';
 try { envSha = await sha256File(ENV_FILE); } catch { /* recorded as absent */ }
@@ -297,8 +398,15 @@ await writeFile(manifest, `${JSON.stringify({
   dumpSha256: dumpSha,
   envSha256: envSha,
   paymentAmountSum: paymentSum,
+  paymentAmountSumAfter: paymentSumAfter,
   migrationsApplied: migrations,
+  staffLoginsWithHash: staffLogins,
+  // rows/rowsAfter bracket the pg_dump snapshot. --drill compares the restored
+  // database against THESE, never against live: live is this database plus
+  // everything that happened since, so measuring a backup against it fails
+  // every backup that is correctly old.
   rows: counts,
+  rowsAfter: countsAfter,
 }, null, 2)}\n`, { mode: 0o600 });
 pass('backup written and manifested');
 
