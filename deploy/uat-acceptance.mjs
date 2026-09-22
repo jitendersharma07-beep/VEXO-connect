@@ -10,8 +10,11 @@
 //   * the target company must have isDemo = true — it refuses to run against
 //     a real tenant
 //   * it never touches pos.admin or any pre-existing account's password
-//   * the two accounts it signs in with are created for this run and deleted
-//     at the end, including on failure
+//   * the three accounts it signs in with are created for this run and
+//     neutralised at the end, including on failure — deleted if the database
+//     allows it, otherwise sessions revoked and the account DISABLED, because
+//     a user who has opened an order or issued a refund is ON DELETE RESTRICT
+//     by design. The script prints which of the two it managed.
 //
 // It prints PASS / FAIL / NOT TESTED lines. No password, token or cookie is
 // ever printed, including on error.
@@ -84,8 +87,45 @@ const CASHIER_A = `uat.cashier.a.${RUN}@atcpos.example`;
 const CASHIER_B = `uat.cashier.b.${RUN}@atcpos.example`;
 const SECRET = randomBytes(24).toString('base64url'); // in-process only, never printed
 
+// Deleting these accounts outright is impossible for any run that gets as far
+// as billing, and that is the database being right rather than wrong:
+// Order.openedById, Refund.byId, PaymentIntent.createdById and
+// DayClose.closedById are ON DELETE RESTRICT, so whoever took the money cannot
+// be erased from the record. PosSession.userId is RESTRICT too, so even a run
+// that only signs in is undeletable until its sessions go.
+//
+// The previous version was `delete ... .catch(() => {})` followed by an
+// unconditional "temporary UAT accounts deleted". It therefore announced a
+// cleanup that had not happened: run 3f4301 left three ACTIVE accounts in the
+// production demo tenant, found only because the claim was checked against the
+// table afterwards. A cleanup that cannot fail visibly is not a cleanup.
+//
+// So: revoke the sessions, try the delete, and fall back to DISABLED when
+// RESTRICT blocks it — DISABLED is refused at login (auth route) and on every
+// authenticated request (auth middleware), so the account is inert either way.
+// Returns what actually happened so the caller can print the truth.
 const cleanup = async () => {
-  await psql(`delete from "PosUser" where email in ('${OWNER_EMAIL}','${CASHIER_A}','${CASHIER_B}');`).catch(() => {});
+  const emails = `'${OWNER_EMAIL}','${CASHIER_A}','${CASHIER_B}'`;
+  try {
+    await psql(`delete from "PosSession" where "userId" in (select id from "PosUser" where email in (${emails}));`);
+  } catch (e) {
+    return `FAILED to revoke sessions — disable these by hand: ${e.message}`;
+  }
+  try {
+    await psql(`delete from "PosUser" where email in (${emails});`);
+    return 'temporary UAT accounts deleted';
+  } catch {
+    try {
+      const n = await psql(
+        `with u as (update "PosUser" set status = 'DISABLED', "updatedAt" = now()
+                    where email in (${emails}) and status <> 'DISABLED' returning 1)
+         select count(*) from u;`,
+      );
+      return `temporary UAT accounts kept for attribution and DISABLED (${n} changed); sessions revoked`;
+    } catch (e2) {
+      return `FAILED to neutralise temporary UAT accounts — disable these by hand: ${e2.message}`;
+    }
+  }
 };
 
 let exitCode = 0;
@@ -226,7 +266,11 @@ try {
   const dbTotal = Number(await psql(
     `select coalesce(sum(p.amount),0) from "Payment" p join "Order" o on o.id = p."orderId" where o."companyId" = '${companyId}' and p."createdAt" >= date_trunc('day', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata';`,
   ));
-  const repTotal = money(repAll.body?.summary?.collected ?? repAll.body?.summary?.total ?? repAll.body?.totals?.collected ?? NaN);
+  // report.sales.collected is the shape this deployment actually returns; the
+  // three older spellings are kept behind it so the script stays usable against
+  // an older build rather than reporting a false FAIL on a response it simply
+  // does not recognise.
+  const repTotal = money(repAll.body?.report?.sales?.collected ?? repAll.body?.summary?.collected ?? repAll.body?.summary?.total ?? repAll.body?.totals?.collected ?? NaN);
 
   if (repAll.status !== 200) {
     fail('4.1', 'owner can read the sales report', `HTTP ${repAll.status}`);
@@ -295,15 +339,24 @@ try {
     : fail('5.3', 'owner can issue a partial refund', `HTTP ${ownerRefund.status} ${JSON.stringify(ownerRefund.body).slice(0, 140)}`);
 
   if (refundOk) {
-    const refundRows = Number(await psql(`select count(*) from "Refund" r join "Order" o on o.id = r."orderId" where o.id = '${orderId}';`));
+    // A manual refund is recorded as SUCCEEDED the moment the cash is handed
+    // back, which is what puts it inside the report's figure.
+    const refundRows = Number(await psql(`select count(*) from "Refund" where "orderId" = '${orderId}' and status = 'SUCCEEDED';`));
     const repAfter = await call('GET', `/reports/sales?from=${today}&to=${today}`, { token: owner });
-    const refundedInReport = money(repAfter.body?.summary?.refunded ?? repAfter.body?.totals?.refunded ?? NaN);
+    const refundedInReport = money(repAfter.body?.report?.sales?.refunds ?? repAfter.body?.summary?.refunded ?? repAfter.body?.totals?.refunded ?? NaN);
     if (Number.isNaN(refundedInReport)) {
       fail('5.4', 'the refund appears in the sales report', 'report exposes no refunded figure');
     } else {
-      (refundRows === 1 && near(refundedInReport, 10))
-        ? pass('5.4', 'the refund appears in the sales report', `₹${refundedInReport} refunded`)
-        : fail('5.4', 'the refund appears in the sales report', `${refundRows} refund row(s), report says ₹${refundedInReport}`);
+      // The report's refund figure is company-wide for the IST day (SUCCEEDED
+      // only), so compare it to the database at the same scope — demo refunds
+      // left by earlier runs today are legitimately in both sides. Asserting
+      // "== 10" instead would pass only on the first run of any given day.
+      const dbRefunds = Number(await psql(
+        `select coalesce(sum(r.amount),0) from "Refund" r join "Order" o on o.id = r."orderId" where o."companyId" = '${companyId}' and r.status = 'SUCCEEDED' and r."createdAt" >= date_trunc('day', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata';`,
+      ));
+      (refundRows === 1 && near(refundedInReport, dbRefunds) && dbRefunds >= 10)
+        ? pass('5.4', 'the refund appears in the sales report', `report ₹${refundedInReport} = database ₹${dbRefunds}, including this run's ₹10`)
+        : fail('5.4', 'the refund appears in the sales report', `${refundRows} SUCCEEDED refund row(s) on the order, report ₹${refundedInReport} vs database ₹${dbRefunds}`);
     }
   } else skip('5.4', 'the refund appears in the sales report', 'no refund was created');
 
@@ -336,8 +389,7 @@ try {
   fail('run', 'acceptance run completed', err?.message || String(err));
   exitCode = 1;
 } finally {
-  await cleanup();
-  console.log('temporary UAT accounts deleted');
+  console.log(await cleanup());
 }
 
 const f = results.filter((r) => r.state === 'FAIL').length;

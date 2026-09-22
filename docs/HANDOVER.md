@@ -19,11 +19,12 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Backend commit | **`9b85da3`**. Proven by digest, not by tag: `/app/src` in the running container and `backend/src` in the working tree agree on both the file listing (`f8e33f7f…`) and the set of content hashes (`1434a3d1…`). Image `pos-prod-backend:20260922-proxy-hops` (`96a494e650b3`), container created 15:42 UTC |
-| Frontend commit | **`0084936`**, image `39205084de0e`, container created 15:41 UTC by another session |
-| Frontend bundle | `assets/index-BKEWKpgq.js`, sha256 `6989289f…`, 420234 bytes. Unchanged by that 15:41 rebuild — re-hashed off the public URL at 15:46 UTC and identical to the byte-for-byte reproduction from `0084936` |
-| Rollback tags | `pos-prod-backend:rollback-20260922-1543` (`b4de17df52df`, the backend live before 15:42), `pos-prod-frontend:rollback-20260922-1501` (`173962d8e5f1`) |
-| Database migrations applied | 8, unchanged. This deploy carried no migration and the boot log says so: `8 migrations found` then `No pending migrations to apply.` |
+| Release | **`f014ab5`** — the merge of `phase2-gateway` `1849711` (activity report) into `main`. Both halves built from a detached worktree pinned at that commit, never from a shared tree |
+| Backend | Image `pos-prod-backend:20260922-merge-f014ab5` (`055f9ae7f23f`), container created 16:37 UTC. The `/activity` route is present in `/app/src/api/routes/reports.js` inside the image |
+| Frontend | Image `pos-prod-frontend:20260922-merge-f014ab5` (`0db76709b98b`), container created 16:37 UTC |
+| Frontend bundle | `assets/index--BprIdMf.js`, sha256 `c1d15e81…`, **430357 bytes** — hashed off the public URL, which is what the client actually receives. Carries `reports/activity` and the string `Discounts, voids and refunds` |
+| Rollback tags | `pos-prod-backend:rollback-20260922-preactivity` (`96a494e650b3`) and `pos-prod-frontend:rollback-20260922-preactivity` (`39205084de0e`) — the pair live before 16:37 |
+| Database migrations applied | 8, unchanged. The merge carried no migration: `git diff cdd6c20 f014ab5 -- backend/prisma/` is empty, and `_prisma_migrations` still reports 8 finished |
 
 **This table went stale four times in one afternoon** — twice while this very
 section was being edited. At 14:49 UTC another session deployed `1ca40bc` +
@@ -45,9 +46,19 @@ are the two cases a commit-based check cannot see:
   hashes to `6989289f…`. A rebuild yields fresh layer digests whether or not a
   byte of output differs, so **an image ID is not evidence that anything
   shipped.** Hash the artefact.
+- **16:37 — a seventh time, and the reason the table above was rewritten.**
+  `f014ab5` merged the activity report and was built and deployed from a pinned
+  worktree. Every row of the old table — both commits, both image IDs, the
+  bundle name, its hash and its size — became wrong at once. This is the
+  ordinary case, not an exotic one: a normal release invalidates the whole
+  table, which is why the rows are now written as *evidence* (how each was
+  measured) rather than as bare values.
+
+**The release is now frozen at `f014ab5`** for client UAT. See §9 for who may
+deploy during the freeze.
 
 One number in that row invites a wrong conclusion, so it is written out:
-`deploy/prod-verify.mjs` reports the bundle as 419854 while the file is 420234
+`deploy/prod-verify.mjs` reports the bundle as 429947 while the file is 430357
 bytes. Nothing is truncated — the script measures a decoded JavaScript string,
 whose length counts UTF-16 units, and the difference is the multi-byte
 characters in it (₹ and the é in café among them). Compare hashes, not sizes.
@@ -339,9 +350,18 @@ Walk this with the client. Every line is a thing to *do*, not to be told.
 - [ ] With an expired licence: sign-in and reading still work, billing is
       refused with a clear message (test on a scratch tenant, not the client's)
 
-**Devices**
+**Devices — tablet or larger only**
 - [ ] Cashier screen usable at the till's actual resolution
-- [ ] Owner dashboard readable on the owner's laptop and phone
+- [ ] Owner dashboard readable on the owner's laptop or tablet
+
+> This line used to read "laptop **and phone**", which contradicted
+> `guide-owner.md` §9 and limitation 12 in this document — both of which say
+> plainly that the POS needs a tablet or larger. It was the only place in the
+> pack that invited the client to test on a phone, and a checklist that asks
+> for something the product does not do produces a failed acceptance against a
+> build that is behaving exactly as designed. Below 768 px the sidebar is
+> `hidden … md:flex` and only the logo replaces it, so there is no navigation
+> at all. **Do not hand the client a phone as part of UAT.**
 
 ---
 
@@ -351,11 +371,11 @@ Separated by kind of evidence, because they are not equally strong.
 
 ### Automated tests — mocked, not a real provider
 
-Backend suite: **227 passed / 227**, 7 files (foundation 22, money 13,
-logRedaction 7, phase2 45, razorpay 53, razorpayFlow 32, gateway 55), run
-against the dev test database and re-measured at 15:52 UTC. Money arithmetic,
-order lifecycle, RBAC, tenant scoping, licence gating, refund states, log
-redaction, and the gateway adapter **against a mock**. Re-measure rather than
+Backend suite: **235 passed / 235**, 7 files, re-measured at 16:34 UTC against
+`f014ab5` — up from 227 because the activity report arrived with its own tests
+(phase2 and foundation grew; the other five files are unchanged). Money
+arithmetic, order lifecycle, RBAC, tenant scoping, licence gating, refund
+states, log redaction, and the gateway adapter **against a mock**. Re-measure rather than
 quoting this number — it has been stale in this document three times, and was
 stale again by two within the hour this line was last corrected:
 
@@ -405,14 +425,50 @@ containers; left alone deliberately, because another session may own it.
 ### Against the running production server
 
 An acceptance run drives the deployed server over HTTP — real router, real
-middleware, real RBAC, real Postgres at its real isolation level
-(`deploy/uat-acceptance-container.mjs`). It refuses to run unless the target
-company is `isDemo = true`, never touches `pos.admin`, creates its own accounts
-with a password that is never printed, and removes everything it wrote
-including on failure.
+middleware, real RBAC, real Postgres at its real isolation level. It refuses to
+run unless the target company is `isDemo = true`, never touches `pos.admin`, and
+creates its own accounts with a password that is never printed.
 
-That run is owned by a parallel work stream and its results should be read from
-its own output, not inferred from this document.
+**Run 2026-09-22 16:44 UTC, `deploy/uat-acceptance.mjs` against
+`https://atcworkspace.com/pos` on `f014ab5`: 24 PASS · 0 FAIL · 2 NOT TESTED.**
+Authenticated throughout — every check below is a signed-in HTTP call, not a
+health probe.
+
+| Area | Checks | Result |
+|---|---|---|
+| Sign-in, three roles | 1.1 | PASS |
+| Permission boundaries | 1.2, 1.3, 4.3, 4.5, 5.1, 5.2 | PASS — console, user list, sales reports, day-close commit, refunds and voids all 403 to the wrong role |
+| Branch isolation | 1.4, 1.5, 4.2 | PASS — cashier B gets 403 on branch A's order and 0 rows in its list |
+| Billing arithmetic | 2.4, 3.1 | PASS — 2 × ₹100 + 5% GST = ₹210, invoice `BSC-CP/26-27/00004` |
+| Duplicate payment | 3.2 | PASS — double-clicked payment accepted once, 1 row, ₹210 |
+| Durability | 3.3 | PASS — billed order unchanged on re-read |
+| Receipt / KOT | 2.3, 2.5, 7.1, 7.2 | PASS — KOT created and retrievable, receipt carries lines, totals, payment and the DEMO flag |
+| Day close | 4.4 | PASS — expected ₹210 = cash ₹210 − refunds ₹0 |
+| Sales reconciliation | 4.1 | PASS — report ₹210 = database ₹210 |
+| Refund reconciliation | 5.3, 5.4 | PASS — partial refund issued; report ₹10 = database ₹10 |
+| Razorpay gateway | 6.1 | **NOT TESTED** — route not mounted (HTTP 404). Correct: the gateway is deliberately off |
+| Thermal printer layout | 7.3 | **NOT TESTED** — no printer attached to this deployment |
+
+Neither NOT TESTED is a defect. 6.1 is the gateway being off *by design* and is
+re-asserted as a negative control on every run; 7.3 needs hardware nobody here
+has.
+
+**A defect in the harness was found by checking its own claim.** The script
+printed `temporary UAT accounts deleted`; the table said otherwise — three
+accounts were still present and **ACTIVE**. The cleanup was
+`delete … .catch(() => {})` followed by an unconditional success message, and
+the delete can never succeed for a run that reaches billing: `Order.openedById`,
+`Refund.byId`, `PaymentIntent.createdById`, `DayClose.closedById` and
+`PosSession.userId` are all `ON DELETE RESTRICT`. That constraint is right —
+whoever took the money must not be erasable — so the fix went into the script:
+revoke sessions, attempt the delete, fall back to `DISABLED`, and **report which
+of the two actually happened**. The three accounts from run `3f4301` were
+neutralised by hand the same way; `DISABLED` is refused at login
+(`auth.js`) and on every authenticated request (`middleware/auth.js`), both
+confirmed in the deployed source.
+
+The lesson generalises past this script: **a cleanup path that cannot fail
+visibly is not a cleanup path.** Check the table, not the log line.
 
 ### Browser-rendered, not merely built
 
@@ -806,6 +862,61 @@ Only if online payment is wanted:
 ---
 
 ## 9. ATC operational controls
+
+### Release freeze and the single deployment owner
+
+**Production is frozen at `f014ab5` for the duration of client UAT.** The
+build that the client is being asked to accept is the build that was measured
+in §5, and anything deployed on top of it invalidates that measurement.
+
+The rule, in one sentence: **one person deploys, and during the freeze that
+person deploys nothing.**
+
+What the freeze covers, and what it does not:
+
+| Action | During the freeze |
+|---|---|
+| `docker compose -f docker-compose.prod.yml build` / `up -d` against `pos-prod` | **Deployment owner only**, and only to roll back |
+| Merging to `main` | Allowed — merging is not deploying |
+| Committing, branching, working in a lane | Allowed |
+| Editing `/home/atc-noc/atc-pos` (the shared tree) | Allowed by its owner; it is **not** what production runs |
+| `docker volume rm` / `docker volume prune` | **Forbidden.** Dangling POS volumes are an owner decision, not a cleanup |
+| Enabling the gateway | **Forbidden.** See "Live payments cannot happen" below |
+| nginx, certbot, DNS for `atcworkspace.com` | **Forbidden** — that is the vexoconnect.com release, deliberately separate |
+
+Why a single owner rather than a convention. The frontend service builds from
+`context: ./frontend`, which is the **working tree**, not a git ref. Two people
+deploying from two trees produce two different bundles from the same commit
+hash and neither can prove which one is serving. The counter-measure is
+procedural, not technical: deploy from a pinned worktree, and have exactly one
+person doing it.
+
+Ending the freeze takes three things, in order:
+
+1. The client returns a GO on the UAT in §4.
+2. The deployment owner re-reads §1 for the current bundle hash and byte size,
+   so the *next* release has a stated predecessor rather than a remembered one.
+3. Rollback anchors are re-pinned before the new build, because the old ones
+   point at `f014ab5` and will be wrong the moment it is superseded.
+
+Two sets of tags matter, and they point in opposite directions:
+
+```
+# roll BACK off f014ab5 — the build that preceded it
+pos-prod-frontend:rollback-20260922-preactivity   39205084de0e
+pos-prod-backend:rollback-20260922-preactivity    96a494e650b3
+
+# roll back TO f014ab5 — what the next release must be able to return to
+pos-prod-frontend:20260922-merge-f014ab5          0db76709b98b
+pos-prod-backend:20260922-merge-f014ab5           055f9ae7f23f
+```
+
+The second pair is the one people forget. `latest` moves with every build, so
+a release that only tags `latest` leaves the build it replaced reachable by
+image ID alone — and an untagged image is eligible for `docker image prune`,
+which has already happened once on this host, leaving production running an
+image the daemon no longer held and nothing to roll back to. Pin a dated tag
+**before** `compose build`, not after.
 
 - **VEXO Console → Companies** — every tenant, its licence, branch count and
   staff. That is the label on the screen; the role badge reads "VEXO Admin".
