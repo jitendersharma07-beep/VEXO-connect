@@ -1,0 +1,26 @@
+-- Record the role an actor held at the moment they acted.
+--
+-- PosAuditLog already stored who (actorId, actorEmail) but never what they
+-- were. Reading a discount trail therefore meant joining PosUser to find out
+-- whether the person who took 40% off a bill was a cashier or the owner — and
+-- that join answers with TODAY's role. A cashier promoted to manager since,
+-- or demoted, or deleted, silently rewrites the meaning of every action they
+-- ever took. The role belongs on the row, beside the email, for the same
+-- reason the email is on the row rather than joined.
+--
+-- Additive and nullable, so it changes nothing that already exists:
+--
+--   * No DEFAULT. A default would stamp a role onto historic rows that this
+--     database cannot know, which is worse than admitting it does not know.
+--     Existing rows keep NULL and read as "not recorded", which is true.
+--   * No backfill, for the reason above.
+--   * Every existing query keeps working — nothing selects * into a fixed
+--     shape, and an added nullable column breaks no INSERT that omits it.
+--
+-- Not indexed. Role is low-cardinality (four values) and every report that
+-- would filter on it already filters on companyId or action first, both of
+-- which are indexed. An index here would cost writes on the hottest audit
+-- path to serve a scan that is already narrow by the time it reaches this
+-- column.
+
+ALTER TABLE "PosAuditLog" ADD COLUMN "actorRole" TEXT;

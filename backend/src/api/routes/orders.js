@@ -21,7 +21,7 @@ import {
 import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
 import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
 import { guardDiscountChange } from '../../lib/discountGuard.js';
-import { combinedPctMilli, exposureOf } from '../../lib/discountPolicy.js';
+import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber } from '../../lib/invoice.js';
 import {
   ORDER_INCLUDE,
@@ -127,7 +127,13 @@ const approvalStamp = (approver, reason) =>
       }
     : { discountApprovedById: null, discountApprovedAt: null, discountReason: null };
 
-const discountAudit = (before, after, approver, reason) => ({
+// `policy` is the limit that was in force for this actor at this instant, and
+// it is written onto allowed discounts too — not just refused ones. Read back
+// months later, "cashier took 30% off" means nothing without it: the policy row
+// it was measured against is editable, so reconstructing the limit from today's
+// settings would judge a past action by a rule that did not exist yet.
+const discountAudit = (policy, before, after, approver, reason) => ({
+  actorLimit: limitForAudit(policy),
   before: {
     grossPaise: before.grossPaise,
     combinedDiscountPaise: before.combinedPaise,
@@ -294,7 +300,7 @@ router.post(
       [...lines, { id: '__new__', unitPrice: paiseOf(line.unitPrice), qty: line.qty, lineDiscount: 0 }],
       orderDiscount,
     );
-    const { approver, reason } = await guardDiscountChange(req, {
+    const { policy, approver, reason } = await guardDiscountChange(req, {
       order,
       before,
       after,
@@ -338,7 +344,7 @@ router.post(
         variantId: line.variantId,
         qty: line.qty,
         branchId: order.branchId,
-        ...discountAudit(before, after, approver, reason),
+        ...discountAudit(policy, before, after, approver, reason),
       },
     });
     res.json({ order: await fullOrder(order.id) });
@@ -400,7 +406,7 @@ router.patch(
       lines.map((l) => (l.id === item.id ? { ...l, qty, lineDiscount: newLineDiscount } : l)),
       orderDiscount,
     );
-    const { approver, reason } = await guardDiscountChange(req, {
+    const { policy, approver, reason } = await guardDiscountChange(req, {
       order,
       before,
       after,
@@ -440,7 +446,7 @@ router.patch(
         ...(body.qty !== undefined ? { qty: body.qty } : {}),
         ...(body.lineDiscount !== undefined ? { lineDiscount: body.lineDiscount } : {}),
         branchId: order.branchId,
-        ...discountAudit(before, after, approver, reason),
+        ...discountAudit(policy, before, after, approver, reason),
       },
     });
     res.json({ order: await fullOrder(order.id) });
@@ -468,7 +474,7 @@ router.delete(
       lines.filter((l) => l.id !== item.id),
       orderDiscount,
     );
-    const { approver, reason } = await guardDiscountChange(req, {
+    const { policy, approver, reason } = await guardDiscountChange(req, {
       order,
       before,
       after,
@@ -494,7 +500,7 @@ router.delete(
         itemId: item.id,
         name: item.name,
         branchId: order.branchId,
-        ...discountAudit(before, after, approver, reason),
+        ...discountAudit(policy, before, after, approver, reason),
       },
     });
     res.json({ order: await fullOrder(order.id) });
@@ -520,7 +526,7 @@ router.post(
       lines.filter((l) => l.id !== item.id),
       orderDiscount,
     );
-    const { approver, reason: approvalReason } = await guardDiscountChange(req, {
+    const { policy, approver, reason: approvalReason } = await guardDiscountChange(req, {
       order,
       before,
       after,
@@ -553,7 +559,7 @@ router.post(
         name: item.name,
         reason: body.reason,
         branchId: order.branchId,
-        ...discountAudit(before, after, approver, approvalReason),
+        ...discountAudit(policy, before, after, approver, approvalReason),
       },
     });
     res.json({ order: await fullOrder(order.id) });
@@ -642,7 +648,7 @@ router.post(
       type: body.type,
       value: body.type === 'FLAT' ? toPaise(body.value) : pctToMilli(body.value),
     });
-    const { approver, reason } = await guardDiscountChange(req, {
+    const { policy, approver, reason } = await guardDiscountChange(req, {
       order,
       before,
       after,
@@ -675,7 +681,7 @@ router.post(
         type: body.type,
         value: body.value,
         branchId: order.branchId,
-        ...discountAudit(before, after, approver, reason),
+        ...discountAudit(policy, before, after, approver, reason),
       },
     });
     res.json({ order: await fullOrder(order.id) });
@@ -695,7 +701,7 @@ router.delete(
     const lines = activeLines(order.items);
     const before = exposureOf(lines, orderDiscountOf(order));
     const after = exposureOf(lines, null);
-    await guardDiscountChange(req, {
+    const { policy } = await guardDiscountChange(req, {
       order,
       before,
       after,
@@ -716,7 +722,7 @@ router.delete(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { branchId: order.branchId, ...discountAudit(before, after, null, null) },
+      meta: { branchId: order.branchId, ...discountAudit(policy, before, after, null, null) },
     });
     res.json({ order: await fullOrder(order.id) });
   }),

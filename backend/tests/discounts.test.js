@@ -331,7 +331,20 @@ describe('an above-limit discount and the approver who signs for it', () => {
       orderBy: { at: 'desc' },
     });
     expect(log.actorId).toBe(users.cashierD1.id);
+    expect(log.actorEmail).toBe('cashier.d1@test.local');
+    // The role is on the row, not fetched from PosUser. If this cashier is
+    // promoted next month, this line must still read CASHIER.
+    expect(log.actorRole).toBe('CASHIER');
     expect(log.meta.branchId).toBe(d1.id);
+    // The ceiling this was measured against, as it stood at this instant.
+    // Without it, "30% off" cannot be judged later — the policy row is
+    // editable and today's copy of it may describe a different company.
+    expect(log.meta.actorLimit).toMatchObject({
+      allowOrderDiscount: true, maxPctMilli: 10000, maxFlatPaise: null,
+    });
+    // The discount that was asked for, in the terms it was asked in.
+    expect(log.meta.type).toBe('PERCENT');
+    expect(log.meta.value).toBe(30);
     expect(log.meta.approvedBy).toMatchObject({
       id: users.mgrD1.id, email: 'mgr.d1@test.local', role: 'BRANCH_MANAGER', selfApproved: false,
     });

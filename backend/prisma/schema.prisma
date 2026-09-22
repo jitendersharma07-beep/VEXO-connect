@@ -267,6 +267,11 @@ model PosAuditLog {
   at         DateTime @default(now())
   actorId    String?
   actorEmail String?
+  // The role the actor held when they did it, not the role they hold now.
+  // Nullable because every row written before this column existed genuinely
+  // does not know, and deriving one by joining PosUser today would backdate a
+  // promotion onto an action taken before it.
+  actorRole  String?
   companyId  String?
   action     String
   entity     String?
