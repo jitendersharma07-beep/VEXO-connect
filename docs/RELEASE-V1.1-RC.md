@@ -28,6 +28,7 @@ handover to session `7565dff8`, which owns production (`DEPLOY-OWNER.md`).
 | `ae98beb` | docs(display): two-display edge and RC verification (cherry-picked from `cc09efb`) | Window 3 |
 | `a899f46` | test(release): rollback proof, v1.0.1 ⇄ RC | Window 1 |
 | `a1e5228` | test(e2e): skip and report the display checks when VC-101 is not built in | Window 1 |
+| `ce88a40`, `9274ebf` | docs: the owner guide's two by-design discount behaviours; `RELEASE-HANDOVER-CHECKLIST.md` go/no-go sheet (cherry-picked from `fb40fed`, `1d5407b`) | Window 3 |
 
 ### What changes for people using it
 
@@ -60,6 +61,9 @@ The procedure that shipped v1.0.1 applies unchanged. Only its inputs move.
 
 **§0 — Preconditions, additionally:**
 - The owner approved RC-1, and decided whether VC-101 ships (to drop it, see §6).
+- The owner confirmed who deploys it. `DEPLOY-OWNER.md` grants `7565dff8`
+  the v1.0.1 post-deploy verification only; that grant does not by itself
+  cover a v1.1 deploy.
 - `.env` still holds `VITE_BASE_PATH=/pos/` and **no** `POS_GATEWAY_PROVIDER`.
 
 **§1 — Rollback anchors and backup.** Tag the images running now **before**
@@ -171,7 +175,8 @@ on `vexo-lab` against fresh databases on 2026-09-23.
 | Rollback RC → v1.0.1 → RC | **8/8** | `deploy/rc-rollback-proof.mjs` |
 | Production images build from RC-1 | **both built**; backend has 13 migrations, frontend base `/pos/` | `docker build`, lab (§4) |
 | RC-1 with VC-101 dropped (§6 executed) | **371/371** suite, **43/43** end-to-end, display checks skipped and reported | worktree `~/atc-pos-drop`, branch `drop-vc101-proof` |
-| VC-101 browser walkthrough (till + display, Chromium) | 8/8 — **Window 3's run**, not repeated on the lab | `tests/e2e/walk-display.cjs`; screenshots on the original box |
+| VC-101 browser walkthrough (till + display, Chromium) | **8/8** — Window 3's run on the original box's dev stack, on display code **byte-identical to RC-1**: all 8 files sha256-match, and the other build-input differences are the Core fixes only. A lab-tunnel retry went 0/8 because of the lab's CORS origin pin (environment, not product). | `tests/e2e/walk-display.cjs`; screenshots on the original box |
+| Discount-policy test files, focused | **98/98** (discounts 50, discountSettings 31, discountConcurrency 5, approvalSecrecy 12) — Window 3's run | lab RC @ `5659243`, `atc_pos_test` |
 | Physical receipt / KOT on paper | **PENDING** — 2026-09-24 | `docs/PRINTER-UAT-RUNBOOK.md` |
 | Production §4 verification | **to be run by `7565dff8` at deploy** | §2 above |
 
