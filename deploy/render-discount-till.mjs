@@ -191,6 +191,10 @@ const closeModal = async () => {
     await page.mouse.click(5, 5);
     await page.waitForTimeout(400);
   }
+  // Say so rather than carrying on. Giving up quietly is what turned a modal
+  // that would not close into a later, unrelated-looking failure on a control
+  // the overlay was covering — the step reported was not the step that broke.
+  throw new Error(`closeModal: ${await modalCount()} modal(s) still open after 4 attempts`);
 };
 const cancelPrompt = closeModal;
 const closeAnyModal = closeModal;
@@ -236,6 +240,30 @@ const openDiscount = async () => {
   await page.waitForTimeout(600);
 };
 
+// Waits for a submit button to stop saying it is working, rather than for a
+// number of milliseconds somebody guessed. Both buttons below swap their label
+// while their POST is in flight — "Applying…" and "Checking…" — so the label
+// going away IS the request settling, whatever the box is doing at the time.
+//
+// This is the same defect startOrder carries a note about, in a second place.
+// The guesses were 1600ms and 1800ms; a loaded machine answered one discount
+// POST in 2384ms, so the modal was still submitting when the next step tried
+// to reopen it, and R4 failed on a control it could not reach rather than on a
+// wrong answer — with the database plainly showing the right one. Approval is
+// worse exposed than apply, because it verifies a password and is the slowest
+// request the till makes.
+//
+// Settled means one of three things and this covers all of them: the modal
+// closed (allowed), the approval prompt is now stacked on top (refused), or
+// the button came back with an error beside it (refused, modal still up).
+const settle = async (label) => {
+  await page
+    .locator(`button[type="submit"]:has-text("${label}")`)
+    .waitFor({ state: 'detached', timeout: 25000 })
+    .catch(() => {});
+  await page.waitForTimeout(500);
+};
+
 // type: 'PERCENT' | 'FLAT'
 const applyDiscount = async (type, value) => {
   await openDiscount();
@@ -243,7 +271,7 @@ const applyDiscount = async (type, value) => {
   await page.waitForTimeout(200);
   await page.fill('#disc-value', String(value));
   await page.click('button[type="submit"]:has-text("Apply discount")');
-  await page.waitForTimeout(1600);
+  await settle('Applying…');
 };
 
 const approveAs = async (email, reason) => {
@@ -251,7 +279,7 @@ const approveAs = async (email, reason) => {
   await page.fill('#approver-password', PW);
   await page.fill('#approver-reason', reason);
   await page.click('button[type="submit"]:has-text("Approve")');
-  await page.waitForTimeout(1800);
+  await settle('Checking…');
 };
 
 const latestOrder = async (branchId) =>
