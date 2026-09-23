@@ -13,36 +13,66 @@ Prepared 2026-09-23 on `phase2-integration`.
 
 | | |
 |---|---|
-| Candidate commit | `317449d` |
+| Candidate commit | `e0258d7` — reconciled, see below |
 | Branch | `phase2-integration` |
 | Application code actually deployed | `847423d` |
 | Running images | `pos-prod-backend:core-v1.0-rc-847423d` → `3a994795fbf1`, `pos-prod-frontend:core-v1.0-rc-847423d` → `44f405c5d6e1` |
 | Proposed tag (NOT created) | `vexo-connect-core-v1.0` |
 
-The candidate advanced from `510cb42` to `317449d` during the closing sweep:
+The candidate advanced from `510cb42` to `e0258d7` during the closing sweep:
 `6dcf20c` added this pack, `7838805` added the discount-approval browser
 harness, `18ff43f` bounded the container logs, `0c13497` closed the backup and
 rotation gates, `317449d` replaced the argued restart-persistence claim with an
-observed one. The equivalence argument below was re-checked against `317449d`
-and still holds.
+observed one, `c793fe3` recorded the final integrity sweep, and `e0258d7`
+merged the peer lane. The equivalence argument below was re-checked against
+`e0258d7` and still holds.
 
 ### Why two hashes, and why that is not a discrepancy
 
 Production was built at 02:22:35Z, between `847423d` (02:13:11Z) and `40c4e91`
 (02:33:49Z), so the running image was built from `847423d`. The candidate is
-the later `317449d`.
+the later `e0258d7`.
 
-`git diff --stat 847423d..317449d` touches eight files and **none of them ship
-inside the image**: the four `deploy/` harnesses, two `docs/`, one root
+`git diff 847423d..e0258d7` touches only `deploy/` harnesses, `docs/`, one root
 markdown, and `docker-compose.prod.yml` — which is orchestration read by the
-daemon at container-create time, not application code baked into a layer. It is
-already applied to the running stack, so production and the candidate agree on
-it too.
+daemon at container-create time, not application code baked into a layer, and
+which is already applied to the running stack.
 
-Re-measured at freeze time, not quoted from the earlier run:
-`git diff --name-only 847423d..317449d -- 'backend/src/**' 'frontend/src/**'
-'src/**' 'prisma/**' 'backend/prisma/**'` returns **0 files**. The running
-image is the candidate's application code, and no rebuild is owed.
+#### Equivalence proved over the inputs the Dockerfiles actually read
+
+The earlier version of this argument listed paths from memory. It has been
+redone from the build files themselves, because two inputs were missing from
+that list and either could have invalidated it.
+
+`backend/Dockerfile` copies `package.json`, `package-lock.json*`, `prisma`,
+`src` and `scripts`, under a `.dockerignore` of `node_modules`, `tests`, `*.md`,
+`.env*`. **`frontend/Dockerfile.prod` — not `Dockerfile` — does `COPY . .` with
+no `.dockerignore` at all**, so the *entire* `frontend/` tree is a build input:
+`vite.config.js`, `tsconfig`, `index.html`, `nginx.conf`, `public/`, both
+manifests. It also takes a build **arg**, `VITE_BASE_PATH`, which Vite inlines
+into the bundle — a value (`/pos/`) that lives in `.env` and never appears in
+any source file.
+
+Compared by git tree hash, which covers full recursive content:
+
+| Input | `847423d` | `e0258d7` |
+|---|---|---|
+| `frontend` (whole tree — `COPY . .`) | `1b075b8fe2b2` | `1b075b8fe2b2` |
+| `backend/package.json` | `7d0a19b4f0f9` | `7d0a19b4f0f9` |
+| `backend/package-lock.json` | `22f28b6d6a4f` | `22f28b6d6a4f` |
+| `backend/prisma` | `0e925b9e5488` | `0e925b9e5488` |
+| `backend/src` | `ad8d2da409f8` | `ad8d2da409f8` |
+| `backend/scripts` | `d31967f64513` | `d31967f64513` |
+| `backend/Dockerfile` | `2b1c4afa4872` | `2b1c4afa4872` |
+| `backend/.dockerignore` | `98c1fcdac608` | `98c1fcdac608` |
+
+Every pair matches. The compose `build:` stanzas — context, dockerfile name and
+`args` — are unchanged too: the **only** difference in
+`docker-compose.prod.yml` between the two commits is the `x-logging` anchor and
+its three `logging:` references, which are runtime options, not build inputs.
+
+So a rebuild at `e0258d7` would produce the same image. The running containers
+are the candidate's code and **no rebuild is owed**.
 
 Zero changes under `backend/src`, `backend/prisma`, `backend/scripts`,
 `backend/package.json` or `frontend/`.
@@ -72,21 +102,23 @@ note here — that `deploy/discount-approval-run.mjs` was an untracked concurren
 harness — is now obsolete: it was committed as `7838805` and is part of the
 candidate.
 
-### One bookkeeping gap the tagger must settle first
+### The branch divergence — RECONCILED 2026-09-23
 
-The deployed checkout `~/atc-pos` is **not** on this branch. It sits on
-`phase2-gateway` at `76d8062` ("ops(prod): bound the container logs before the
-disk decides for us" — a peer session's own commit of the same rotation block),
-with `deploy/uat-acceptance.mjs` modified and uncommitted.
+It is settled, and the detail is kept because the shape of it explains the
+commit graph. Two branches had each committed the *same* log-rotation change:
+mine as `18ff43f`, the peer session's as `76d8062`. Identical `git patch-id`
+(`46dc726c…`), so the compose file merged with no conflict and no content
+change. The deployed checkout `~/atc-pos` also held one uncommitted file,
+`deploy/uat-acceptance.mjs`, last touched fourteen hours earlier.
 
-This is not a runtime risk: the running containers were started from the
-`core-v1.0-rc-847423d` images, not from that working tree, and the compose file
-is byte-identical across both branches (sha256
-`45a8bccf7b8b2711a06a7b87c263e0b5a2738d52c2d2d450f60ea5c4077fcbb2`). But two
-branches now each carry a copy of the rotation change, and the tag must be cut
-on **one** of them. Reconcile `phase2-gateway` and `phase2-integration` before
-creating `vexo-connect-core-v1.0`, and do not tag the deployed tree while it
-holds uncommitted edits.
+Both were preserved rather than discarded. The loose file was committed on its
+own branch as `d899cc6`, attributed to its author; then `phase2-gateway` was
+merged into `phase2-integration` as `e0258d7`, resolving two documentation
+conflicts hunk by hunk on merit — including one where the peer was right and
+this lane was wrong, and their correction was kept in full.
+
+`git log phase2-integration..phase2-gateway` is now **empty**: the release
+branch is a strict superset and there is exactly one branch to tag.
 
 ---
 
@@ -310,9 +342,32 @@ Honest list. None of these is a defect; each is a boundary.
    Two dumps taken a minute apart, restored by different methods into different
    isolated clusters, agreeing exactly, is materially better evidence than
    either run alone — and it cost nothing but the second session's time.
-4. **No off-host backup copy.** Every dump lives on the same disk as the
-   database it protects. This is the single largest operational risk in the
-   product and it is not a code problem.
+4. **No off-host backup copy — status: PENDING, and it stays PENDING.**
+   Every dump lives on the same disk as the database it protects: the freeze
+   dump `pos-prod-core-v1.0-freeze-20260923-0357.dump` is on the same
+   `ubuntu--vg-ubuntu--lv` volume as `/var/lib/docker` and the Postgres data
+   directory. One disk loss takes the database and every backup of it together.
+   This is the single largest operational risk in the product and it is not a
+   code problem.
+
+   **What was done for the freeze does not close this.** The restore
+   verification used a throwaway container on `--network none` — an *isolated*
+   destination, not a *separate* one; it lived and died on the same host and
+   the same disk. Isolation proved the dump restores; it proves nothing about
+   surviving the loss of this machine.
+
+   `docs/BACKUP-RESTORE.md` already carries the procedure and a hash-verified
+   `scp` script. **Writing a procedure is not evidence of a copy.** This item
+   closes only when both of these exist and are recorded:
+
+   - a backup present on a destination that does not share this host's disk,
+     power or landlord, with its hash matched against the local original; and
+   - a **restore performed from that off-host copy** into a scratch database,
+     verified the way the local one was — `pg_restore --exit-on-error`, FK
+     validation, and representative counts matched against production.
+
+   Until both are on the record, quote this as **PENDING**, not as "documented"
+   or "scripted". Neither of those is a backup.
 5. ~~**Container logs are unbounded.**~~ **CLOSED 2026-09-23 04:01Z** by
    `18ff43f`. All three `pos-prod` services now carry `json-file` with
    `max-size=10m`, `max-file=5` — a hard 50 MB per container, 150 MB for the
@@ -356,9 +411,50 @@ Honest list. None of these is a defect; each is a boundary.
 This is the only thing standing between the candidate and the tag. Run it on the
 real counter, with the real devices, on the deployed build.
 
-### Thermal printer
+> **Corrected 2026-09-23.** The previous version of this section listed a cash
+> drawer group ("drawer opens on cash payment", "manual open drawer works for an
+> authorised role", "drawer opening is audited") and an app-triggered paper cut.
+> **None of those features exists in this build**, so they were not pending
+> hardware — they were pending *implementation*, and a checklist that asks an
+> operator to verify them sets them up to report a defect against something that
+> was never built. Read §8.0 before scheduling anything.
 
-1. Printer is connected, powered, loaded, and visible to the browser's print dialog.
+### 8.0 What this build can actually do at a printer
+
+Established from the source, not from a prior document: the whole print path is
+`window.print()` in `frontend/src/components/Receipt.jsx`, plus a `@page` size
+rule computed in `frontend/src/lib/printPageSize.js`. Neither the backend nor
+the frontend has any raw-device path — `grep` finds no ESC/POS byte sequence
+anywhere in `backend/src` or `frontend/src`, and no dependency that could open
+one: backend carries argon2, prisma, express, helmet, jsonwebtoken, pino and
+zod; frontend carries axios, lucide-react, react, react-router-dom and vite.
+No `escpos`, no `serialport`, no `node-thermal-printer`, no `usb`.
+
+| Capability | State | Why |
+|---|---|---|
+| Receipt + KOT rendered for an 80 mm roll | **Implemented** | 72 mm printable window (576 dots @ 203 dpi), `PAPER_MM = 80` |
+| Per-job page height | **Implemented** | Measured off a detached clone at print width; a KOT asks ~66 mm, a long bill ~155 mm, so the roll is not over-fed |
+| Chromium `@page` workaround | **Implemented** | Chromium silently rejects `size: 80mm auto` and falls back to US Letter; `beforeprint` rewrites it with a concrete height |
+| Ctrl+P as well as the app's Print button | **Implemented** | Both routes go through the same `beforeprint` hook |
+| **58 mm paper** | **NOT SUPPORTED** | Width is fixed at 80/72 mm in two places. A 58 mm roll needs a code change, not a setting |
+| **ESC/POS raw output** | **NOT IMPLEMENTED** | No code, no library, no device path |
+| **App-triggered paper cut** | **NOT IMPLEMENTED** | Would need ESC/POS `GS V` |
+| **Cash-drawer kick** | **NOT IMPLEMENTED** | Would need ESC/POS `ESC p` through the printer's drawer port. There is no drawer feature to audit or to permission |
+| **Silent printing** | **NOT IMPLEMENTED** | Every job raises the browser print dialog |
+| **Receipt-to-counter / KOT-to-kitchen routing** | **NOT IMPLEMENTED** | One print path; the operator picks the printer in the dialog, per job |
+
+The printer's **own** auto-cut may still fire at end of page — that is the
+driver cutting, not the application asking. It is worth observing (§8.1 item 9)
+precisely because it is the printer's behaviour and varies by model.
+
+If the customer needs silent print, auto-cut, drawer kick or two-printer
+routing, each is a **new integration** — a local print agent or an ESC/POS
+bridge — and must be scoped as new work. None is a configuration setting, and
+none should be described to the customer as included.
+
+### 8.1 Thermal printer — runnable against this build
+
+1. Printer is connected, powered, loaded, and visible in the browser's print dialog.
 2. Bill an order and print. The receipt physically emerges.
 3. Header: business name, branch, address, GSTIN — legible, not clipped.
 4. Every line item appears with quantity, unit price and line total.
@@ -366,27 +462,68 @@ real counter, with the real devices, on the deployed build.
 6. Tax breakup is correct and legible.
 7. Grand total matches the till screen to the paisa.
 8. Invoice number and timestamp print, and match the database row.
-9. Footer and cut: the paper cuts cleanly after the footer, nothing truncated.
-10. Reprint the same bill — identical output, **no new invoice number allocated**.
-11. Print a KOT to the kitchen printer, if a separate one is configured.
-12. Print with the printer offline — the UI reports the failure and does not
+9. **Observe** what the paper does after the footer: does the printer cut, and
+   does it cut after the last line rather than mid-receipt? Record the model's
+   behaviour — this is the driver's, not the app's.
+10. Measure the printed content width with a ruler — expect ~72 mm.
+11. Print a KOT and a long receipt back to back. The paper fed should differ
+    between them; a large constant feed on both means the driver is imposing a
+    fixed form instead of the requested height. Record the model.
+12. Each ticket emerges as **one** piece of paper — a receipt in two parts was
+    paginated, which on a roll means cut in half.
+13. Reprint the same bill — identical output, **no new invoice number allocated**.
+14. Print with the printer offline — the UI reports the failure and does not
     silently claim success, and the order is not corrupted.
-13. Print a wide item name and a 3-digit quantity — no wrap that loses characters.
+15. Print a wide item name and a 3-digit quantity — no wrap that loses characters.
+16. The five verbatim strings survive printing (`DEMO — sample data…`,
+    `MANUAL PAYMENT RECORD…`, `GATEWAY PAYMENT…`, `REFUND REQUESTED…`,
+    `REFUND HANDED BACK…`), and a *requested* refund does not read as returned.
 
-### Cash drawer
+### 8.2 End to end on hardware
 
-14. Drawer opens on cash payment.
-15. Drawer does **not** open on card or UPI payment.
-16. Manual "open drawer" works for an authorised role and is refused otherwise.
-17. Drawer opening is audited.
+17. Full counter run: order → KOT → bill → print → cash → refund → day close.
+    **No drawer step** — there is no drawer integration to exercise.
+18. Day close totals match the physical cash counted, the count being entered by
+    hand as the software expects.
+19. Pull the printer's power mid-print and recover — no duplicate invoice, no
+    lost order.
 
-### End to end on hardware
+### 8.2.1 Two demo discount policies are deliberately left in place
 
-18. Full counter run: order → KOT → bill → print → cash → drawer → refund → day close.
-19. Day close totals match the physical cash counted in the drawer.
-20. Pull the printer's power mid-print and recover — no duplicate invoice, no lost order.
+They were created through the owner UI for the Phase-3 acceptance run and are
+**kept, not cleaned up**, so that discount approval can be re-tested on the
+counter hardware without re-configuring anything. Read as exact production
+state, 2026-09-23:
 
-When every one of those passes, and only then, create the tag:
+| Level | Subject | Grants | Branch |
+|---|---|---|---|
+| `USER` | `demo.cashier@atcpos.example` | line + order discount, ceiling **10 %** | `BSC-CP` |
+| `USER` | `demo.manager@atcpos.example` | **may approve up to 20 %** | `BSC-CP` |
+
+Scope, stated so nobody widens it by accident:
+
+* Both rows are `level = USER`. They attach to **one named demo account each**
+  and nothing else. There is no `COMPANY` row and no `BRANCH` row, so no other
+  operator inherits anything from them.
+* They reach **only the `BSC-CP` branch**, through those users' own branch.
+  `BSC-CH` is untouched.
+* Every field they do not set reads `inherit`, which falls through to the code
+  floor in `discountPolicy.js` — and that floor is **DENY** for `CASHIER` and
+  `BRANCH_MANAGER`. Deleting these two rows therefore removes permission; it
+  cannot accidentally grant any.
+* They govern demo accounts in the demo tenant. No real customer operator is
+  affected by either row.
+
+Reversal is a UI action, not a SQL one: the owner's discount-policy screen has
+a **Clear** control per subject. Do not delete the rows by hand — the screen
+writes the audit row that records who removed the permission.
+
+Cash drawer opening, its role permission and its audit row; app-triggered cut;
+silent print; automatic printer routing; 58 mm paper. Each is new work. They are
+named here so that their absence from §8.1/§8.2 reads as deliberate rather than
+as an oversight.
+
+When every check in §8.1 and §8.2 passes, and only then, create the tag:
 
 ```
 git tag -a vexo-connect-core-v1.0 <candidate> -m "VEXO Connect Core v1.0"
