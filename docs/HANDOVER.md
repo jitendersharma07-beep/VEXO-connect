@@ -1202,6 +1202,46 @@ Only if online payment is wanted:
 
 ### Release freeze and the single deployment owner
 
+> **SUPERSEDED 2026-09-23 — read this box before the section below it.**
+>
+> The `f014ab5` freeze described here is no longer the state of anything, in two
+> separate ways, and the text underneath predates both.
+>
+> 1. **Production has not been `f014ab5` since 02:22Z.** `847423d` was built and
+>    deployed on top of it (§7 records this; the freeze text was never
+>    reconciled). Any rollback anchor quoted below is the anchor for the wrong
+>    build — the live pair is recorded in `DEPLOY-OWNER.md` §"State at time of
+>    claim".
+> 2. **Two release-blocking defects were found *on* the frozen build**, which is
+>    the substantive reason this freeze cannot simply be extended:
+>    - **Receipts and KOTs print multiple times.** On the deployed CSS a receipt
+>      emits **3 pages** and a KOT **15** — the page behind the modal keeps its
+>      full height while the modal is `position: fixed`, so Chromium repaints the
+>      modal once per background page. Fixed by `7cc7896`.
+>    - **A retried partial payment collects the bill twice.** Proven on the
+>      deployed build against `BSC-CP/26-27/00011`: one ₹47.25 tender, response
+>      lost after commit, operator retries, ₹94.50 bill comes out `PAID` on two
+>      ₹47.25 rows. The existing guards hide half of it — they refuse a second
+>      payment once the order is `PAID`, which happens to cover a retried *full*
+>      tender, so the hole looked closed. Fixed by `3ecfa29`.
+>
+> A freeze protects a measurement; it does not make the measured build correct.
+> Both defects are cashier-visible on ordinary café behaviour — split tenders and
+> printing a bill — so the freeze ends by **shipping v1.0.1**, not by waiting.
+>
+> **Candidate:** `phase2-release-v1.0.1` @ `bf802af`. Evidence pack, including a
+> verified backup, a migration rehearsed on a copy of production and an *executed*
+> rollback proof: `docs/DEPLOY-V1.0.1-EVIDENCE.md`.
+>
+> **Deployment owner: session `896234f0`** (`DEPLOY-OWNER.md`, 06:20Z). The
+> single-owner rule below is unchanged and still binding — only the build and the
+> anchors it names are stale.
+>
+> **Physical printer acceptance remains NOT TESTED**, before and after v1.0.1.
+> The single-page result is Chromium's PDF page geometry at 80.1 mm, driven
+> through the real till dialog. No receipt or KOT from any build has reached a
+> thermal printer. This is not a PASS and must not be handed over as one.
+
 **Production is frozen at `f014ab5` for the duration of client UAT.** The
 build that the client is being asked to accept is the build that was measured
 in §5, and anything deployed on top of it invalidates that measurement.
