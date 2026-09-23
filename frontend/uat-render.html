@@ -9,6 +9,14 @@
     <title>UAT render harness</title>
   </head>
   <body class="bg-white">
+    <!-- `data-print-root` marks what index.css spares when it takes every other
+         body child out of the printed flow. It is set from uat-render.jsx, per
+         view, and deliberately NOT hard-coded here: the modal views must NOT
+         have it, because there the survivor is the portalled dialog and #root
+         is the application that has to disappear. Pinning it in the HTML made
+         the negative control below print one clean page with the pre-fix CSS
+         forced back on — a fixture that cannot reproduce the defect, which is
+         precisely how the triple receipt shipped. -->
     <div id="root"></div>
     <script type="module" src="/src/uat-render.jsx"></script>
   </body>

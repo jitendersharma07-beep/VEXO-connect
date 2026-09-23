@@ -3,9 +3,10 @@
 // 80 mm print layout can be screenshot-verified without a live sale. Fixture
 // shapes mirror backend buildReceipt (backend/src/lib/orders.js) exactly,
 // including the verbatim payment/refund label strings.
+import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
-import { ReceiptView, KotView } from './components/Receipt.jsx';
+import { ReceiptView, KotView, ReceiptModal, KotModal } from './components/Receipt.jsx';
 import { installPrintPageSize } from './lib/printPageSize.js';
 
 // Mirrors main.jsx. This harness is a second Vite entry, so nothing in
@@ -131,29 +132,102 @@ const receiptLong = {
 };
 
 const view = new URLSearchParams(window.location.search).get('view') || 'all';
+
+// The `print:` variants are not cosmetic. `.print-area` used to be
+// `position: absolute; left: 0; top: 0` when printing, which yanked it out of
+// this page's padded, captioned layout and onto the page origin for free. It is
+// in normal flow now (see index.css), so this wrapper's own padding and the
+// caption gaps would be printed as roll — ~21 mm of it, enough to spill a
+// second page and put the cut in the wrong place. Zeroed here instead.
 const Block = ({ title, children }) => (
-  <section data-shot={title} className="mb-8">
+  <section data-shot={title} className="mb-8 print:mb-0">
     <h2 className="no-print mb-2 text-sm font-bold text-slate-500">{title}</h2>
     {children}
   </section>
 );
 
+// THE VIEW THAT WOULD HAVE CAUGHT THE TRIPLE RECEIPT.
+//
+// Every view above renders a bare ReceiptView on a short page. That is not how
+// a till prints: the operator prints from a MODAL, stacked on top of a full
+// application screen that is several pages tall. Those two differences are
+// exactly what the defect needed — `visibility:hidden` left the app occupying
+// all of that height, and the modal is `position:fixed`, which paged media
+// repaints on every page. So the fixture printed one clean receipt while
+// production printed three, and the fixture was believed.
+//
+// This view reproduces the production conditions instead of avoiding them: a
+// deliberately tall page behind, and the REAL ReceiptModal/KotModal on top. The
+// page-count assertion in deploy/render-uat-screens.mjs is what makes it a
+// guard rather than a picture — a regression here shows up as `3 pages`, not as
+// a subtly wrong screenshot nobody counts.
+const isModalView = view === 'receipt-modal' || view === 'kot-modal';
+
+// NOT `no-print`, and that is the whole design of this control. Marking the
+// filler `no-print` would `display:none` it under BOTH the old rules and the
+// new ones, so the page behind the dialog would be short either way and the
+// defect could not reproduce. It has to be an ordinary element that the old
+// `visibility:hidden` rule would hide the ink of while leaving it occupying
+// 3000 px of printed flow — which is what became the extra receipts.
+const TallApp = () => (
+  <div style={{ height: '3000px' }} aria-hidden="true">
+    <p className="p-6 text-sm text-slate-400">
+      Stand-in for the application behind the print dialog. Its height is the
+      point: three pages of it is what used to become three receipts.
+    </p>
+  </div>
+);
+
+// On the flat views #root is the thing being printed, so it claims the marker.
+// On the modal views it is the application — the thing that must leave the
+// printed flow — and the portalled dialog is the survivor instead.
+if (!isModalView) document.getElementById('root').setAttribute('data-print-root', '');
+
+// `onClose` has to really close, which a no-op cannot demonstrate.
+//
+// The portal is the reason this matters. Moving the dialog out of #root means
+// its click handlers are no longer under the React root that installed the
+// listeners, and if React had not also registered on the portal container the
+// backdrop would simply stop working — leaving a cashier with a receipt dialog
+// covering the till and no way to dismiss it, because these dialogs have no
+// Escape handler either. A fixture wired with `() => {}` stays mounted whether
+// the handler fired or not, so it would pass identically in both worlds. Real
+// state here means the screen harness can assert the dialog is GONE, not just
+// that the event reached something.
+const ModalView = () => {
+  const [open, setOpen] = useState(true);
+  return (
+    <div data-shot={view}>
+      <TallApp />
+      {open && view === 'receipt-modal' ? (
+        <ReceiptModal receipt={receiptLong} onClose={() => setOpen(false)} />
+      ) : null}
+      {open && view === 'kot-modal' ? <KotModal kot={kot} onClose={() => setOpen(false)} /> : null}
+      {!open ? <div data-closed="1" className="no-print p-6 text-sm">dialog closed</div> : null}
+    </div>
+  );
+};
+
 createRoot(document.getElementById('root')).render(
-  <main className="mx-auto max-w-md p-6">
-    {/* `receipt-demo` matches the data-shot name so a caller can request one
-        view by the same string it uses to name the artefact; `receipt` is kept
-        as an alias because it is the older spelling. */}
-    {(view === 'all' || view === 'receipt' || view === 'receipt-demo') && (
-      <Block title="receipt-demo"><ReceiptView receipt={receiptDemo} /></Block>
-    )}
-    {(view === 'all' || view === 'receipt-due') && (
-      <Block title="receipt-due"><ReceiptView receipt={receiptDue} /></Block>
-    )}
-    {(view === 'all' || view === 'receipt-long') && (
-      <Block title="receipt-long"><ReceiptView receipt={receiptLong} /></Block>
-    )}
-    {(view === 'all' || view === 'kot') && (
-      <Block title="kot"><KotView kot={kot} /></Block>
-    )}
-  </main>,
+  isModalView ? (
+    <ModalView />
+  ) : (
+    <main className="mx-auto max-w-md p-6 print:max-w-none print:p-0">
+      {/* `receipt-demo` matches the data-shot name so a caller can request one
+          view by the same string it uses to name the artefact; `receipt` is kept
+          as an alias because it is the older spelling. */}
+      {(view === 'all' || view === 'receipt' || view === 'receipt-demo') && (
+        <Block title="receipt-demo"><ReceiptView receipt={receiptDemo} /></Block>
+      )}
+      {(view === 'all' || view === 'receipt-due') && (
+        <Block title="receipt-due"><ReceiptView receipt={receiptDue} /></Block>
+      )}
+      {(view === 'all' || view === 'receipt-long') && (
+        <Block title="receipt-long"><ReceiptView receipt={receiptLong} /></Block>
+      )}
+      {(view === 'all' || view === 'kot') && (
+        <Block title="kot"><KotView kot={kot} /></Block>
+      )}
+    </main>
+  ),
 );
