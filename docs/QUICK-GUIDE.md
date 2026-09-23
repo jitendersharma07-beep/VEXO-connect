@@ -47,6 +47,11 @@ figure and the variance is recorded, not judged.
 3. **Discount policy** (`/discounts`): shipped default is **deny** — a
    cashier cannot discount until you grant a ceiling. Grants are per
    level; approvals above a ceiling need the approver's own password.
+   Two behaviours that are by design, not faults: a company-wide staff
+   default also narrows you, the owner — above it you approve your own
+   discount with your password; and a grant whose ceiling is zero on
+   either side ("up to 0%", or "₹0") is refused outright at save,
+   because it would deny every discount while reading as granted.
 4. **Reports** (`/reports`): sales, activity, day-close with variances.
    Every discount shows who allowed it; every void carries its reason.
 5. **Licence** (`/licence`): plan, branch limit, expiry. The demo licence
