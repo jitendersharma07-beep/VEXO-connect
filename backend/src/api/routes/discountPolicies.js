@@ -189,21 +189,27 @@ const isEmpty = (body) => FIELDS.every((f) => body[f] === null);
 // of zero, which refuses everything. That is a permission that looks granted
 // on this screen and denies at the till, so it is refused at the point the
 // owner would have created it rather than discovered at the counter.
+//
+// Either ceiling at zero is enough. The two apply together ("whichever is
+// lower"), so "10% or ₹0" and "0% with no cash cap" refuse every discount just
+// as surely as "0% and ₹0" — and a typed 0 beside a ticked permission is the
+// same contradiction as an empty chain, arrived at by a different route.
+const zeroCeiling = (pctMilli, flatPaise) => pctMilli === 0 || flatPaise === 0;
+
 const assertGrantIsUsable = (merged, subjectRole) => {
   const floor = ROLE_FLOOR[subjectRole] ?? ROLE_FLOOR.CASHIER;
   const unbounded = floor.maxPctMilli === null && floor.maxFlatPaise === null;
   if (
     (merged.allowLineDiscount || merged.allowOrderDiscount) &&
     !unbounded &&
-    merged.maxPctMilli === 0 &&
-    merged.maxFlatPaise === 0
+    zeroCeiling(merged.maxPctMilli, merged.maxFlatPaise)
   ) {
     throw badRequest(
       'Set a maximum percentage or a maximum amount. A permission with no limit set refuses every discount — enter 100% if you mean no limit.',
       'maxPercent',
     );
   }
-  if (merged.canApprove && !unbounded && merged.maxApprovalPctMilli === 0 && merged.maxApprovalFlatPaise === 0) {
+  if (merged.canApprove && !unbounded && zeroCeiling(merged.maxApprovalPctMilli, merged.maxApprovalFlatPaise)) {
     throw badRequest(
       'Set a maximum this person may approve. Approval with no limit set refuses every request — enter 100% if you mean no limit.',
       'maxApprovalPercent',

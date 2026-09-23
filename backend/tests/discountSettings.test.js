@@ -334,6 +334,31 @@ describe('a grant that would refuse every discount', () => {
     expect(await prisma.discountPolicy.count({ where: { companyId: golf.id } })).toBe(0);
   });
 
+  // The chain above was empty. Here the owner TYPED the zero — and one zero is
+  // enough, because the two ceilings apply together: "0% with no cash cap"
+  // and "10% or ₹0" both refuse every discount at the counter.
+  it('refuses a grant whose typed ceiling is zero on either side', async () => {
+    const pctZero = await putPolicy(tokens.ownerG, {
+      level: 'BRANCH', branchId: g1.id, allowOrderDiscount: true, maxPercent: 0,
+    });
+    expect(pctZero.status, JSON.stringify(pctZero.body)).toBe(400);
+    expect(pctZero.body.error.message).toMatch(/refuses every discount/);
+
+    const flatZero = await putPolicy(tokens.ownerG, {
+      level: 'BRANCH', branchId: g1.id, allowOrderDiscount: true, maxPercent: 10, maxFlatPaise: 0,
+    });
+    expect(flatZero.status, JSON.stringify(flatZero.body)).toBe(400);
+
+    const approveZero = await putPolicy(tokens.ownerG, {
+      level: 'BRANCH', branchId: g1.id, allowOrderDiscount: true, maxPercent: 10,
+      canApprove: true, maxApprovalPercent: 0,
+    });
+    expect(approveZero.status, JSON.stringify(approveZero.body)).toBe(400);
+    expect(approveZero.body.error.field).toBe('maxApprovalPercent');
+
+    expect(await prisma.discountPolicy.count({ where: { companyId: golf.id } })).toBe(0);
+  });
+
   it('accepts the same grant once a ceiling is typed beside it', async () => {
     // The negative control for the two refusals above: the only thing that
     // changed is the number, so the refusals were about the number.
