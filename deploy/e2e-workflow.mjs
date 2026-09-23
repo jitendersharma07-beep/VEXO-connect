@@ -286,6 +286,49 @@ check('PAY-4', 'payment', 'order A holds exactly two payment rows after four sen
   afterRetries.payments.length === 2 && paise(afterRetries.amountPaid) === half + 100,
   `${afterRetries.payments.length} rows, paid ${afterRetries.amountPaid}`);
 
+// --- 5b. customer display (VC-101) mirrors the part-paid bill ---------------
+//
+// Paired from a SEPARATE sign-in of the same cashier, so signing that one out
+// at the end proves revocation without breaking the session the rest of the
+// run uses. The station is the cashier, not the session, so the main
+// session's pushes still reach it.
+const displayCash = await login(cpCash.email, cpCash.password);
+const mint = await api(displayCash.token, 'POST', '/display/pair-code', {});
+check('DSP-1', 'customer display', 'a cashier mints a 6-digit pairing code',
+  mint.status === 201 && /^\d{6}$/.test(mint.body?.code ?? ''), say(mint));
+const paired = await api(null, 'POST', '/display/pair', { code: mint.body.code });
+const displayToken = paired.body?.displayToken;
+check('DSP-2', 'customer display', 'the display redeems it without any staff credential',
+  paired.status === 201 && Boolean(displayToken), say(paired));
+const replayCode = await api(null, 'POST', '/display/pair', { code: mint.body.code });
+check('DSP-3', 'customer display', 'a pairing code works once', replayCode.status === 400, say(replayCode));
+
+must(await api(cpCash.token, 'PUT', '/display/state', { orderId: A.id }), 'point display at A');
+const shown = await api(displayToken, 'GET', '/display/state');
+const ALLOWED = ['discountAmount', 'due', 'invoiceNumber', 'items', 'orderStatus', 'subtotal', 'taxAmount', 'total', 'view'];
+const shownKeys = Object.keys(shown.body ?? {}).sort();
+const itemKeys = [...new Set((shown.body?.items ?? []).flatMap((i) => Object.keys(i)))].sort();
+check('DSP-4', 'customer display', 'the display shows the part-paid bill: server total and amount still due',
+  shown.status === 200 && shown.body.view === 'ACTIVE' && paise(shown.body.total) === totalA
+    && paise(shown.body.due) === totalA - half - 100,
+  `total ${shown.body?.total}, due ${shown.body?.due}`);
+check('DSP-5', 'customer display', 'its payload is exactly the agreed allowlist (no approver, reason, staff or tender)',
+  JSON.stringify(shownKeys) === JSON.stringify(ALLOWED)
+    && JSON.stringify(itemKeys) === JSON.stringify(['lineDiscount', 'name', 'qty', 'unitPrice'])
+    && !JSON.stringify(shown.body).includes(cpMgr.email),
+  `keys ${shownKeys.join(',')} | item keys ${itemKeys.join(',')}`);
+
+const staffAsDisplay = await api(cpCash.token, 'GET', '/display/state');
+const displayAsStaff = await api(displayToken, 'GET', '/orders');
+check('DSP-6', 'customer display', 'a staff token cannot read as a display, and a display token cannot act as staff',
+  staffAsDisplay.status === 401 && displayAsStaff.status === 401,
+  `staff→display ${staffAsDisplay.status}, display→orders ${displayAsStaff.status}`);
+if (early.status === 201) {
+  const crossBranch = await api(cpCash.token, 'PUT', '/display/state', { orderId: early.body.order.id });
+  check('ISO-9', 'branch isolation', "a cashier cannot point their display at another branch's bill",
+    crossBranch.status === 403, say(crossBranch));
+}
+
 const reused = await pay(cpCash.token, { method: 'CARD', amount: rupees(half + 1), idempotencyKey: K1 });
 check('PAY-5', 'payment', 'a key reused for a different amount is refused, not replayed',
   reused.status === 409, say(reused));
@@ -299,6 +342,17 @@ const cash = await pay(cpCash.token, { method: 'CASH', tendered: rupees(tendered
 check('PAY-6', 'payment', `cash settles the ₹${rupees(dueA).toFixed(2)} still due, with correct change`,
   cash.status === 201 && cash.body.order.status === 'PAID' && paise(cash.body.changeDue) === tendered - dueA,
   `${say(cash)} change ${cash.body?.changeDue}`);
+
+const thanks = await api(displayToken, 'GET', '/display/state');
+const afterThanks = await api(displayToken, 'GET', '/display/state');
+check('DSP-7', 'customer display', 'once paid, the display thanks the customer with the total, then goes idle',
+  thanks.body?.view === 'THANKYOU' && paise(thanks.body.total) === totalA && afterThanks.body?.view === 'IDLE',
+  `${thanks.body?.view} ${thanks.body?.total} → ${afterThanks.body?.view}`);
+
+must(await api(displayCash.token, 'POST', '/auth/logout'), 'sign out the display session');
+const afterLogout = await api(displayToken, 'GET', '/display/state');
+check('DSP-8', 'customer display', "signing out the cashier who paired it ends the display",
+  afterLogout.status === 401, say(afterLogout));
 
 // The drawer, as a person standing at it would count it.
 let drawerPaise = dueA;
