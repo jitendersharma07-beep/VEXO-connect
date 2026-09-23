@@ -604,3 +604,134 @@ refuses every non-GET with 405, so it cannot read or write production data.
 **Not tested by any of the above:** physical printing. Every print result here
 is browser geometry — what the renderer hands the driver. See
 `frontend/docs/HARDWARE-CHECKLIST.md`.
+
+---
+
+## 9. Execution record — 2026-09-23, `phase2-integration` @ `847423d`
+
+Deploy of the discount-policy merge. Containers recreated 02:24:45Z
+(`pos-prod-backend-1`) and 02:24:56Z (`pos-prod-frontend-1`); `pos-prod-postgres-1`
+untouched.
+
+### Migrations
+
+`3` applied on boot, by the container's own `prisma migrate deploy`:
+
+| Migration | finished |
+|---|---|
+| `20260922190000_discount_policy` | 2026-09-23 02:24:58Z |
+| `20260922190000_gateway_event_source` | 2026-09-23 02:24:58Z |
+| `20260922200000_audit_actor_role` | 2026-09-23 02:24:58Z |
+
+After: **11 total, 11 finished, 0 unfinished, 0 rolled back.**
+
+The first two share the timestamp prefix `20260922190000`. They were **not**
+renamed. Prisma orders by the full directory name, not the prefix, and those
+differ (`_discount_policy` < `_gateway_event_source`), so the order is total and
+deterministic. Renaming either one would have orphaned an
+already-applied `migration_name` on any database that had seen it — the
+rename is the hazard here, not the collision. `7884137` exists precisely to
+undo an earlier rename of the discount migration and restore its own name.
+
+### Data across the deploy
+
+Additive only. No row was rewritten by a migration:
+
+```
+PosUser=16  Company=1  Branch=2  Order=6  Payment=5  Refund=5
+DayClose=1  DiscountPolicy=0
+```
+
+`DiscountPolicy=0` is the load-bearing one. **Default DENY is code, not data** —
+`ROLE_FLOOR` in `backend/src/lib/discountPolicy.js` — so cashiers and branch
+managers are denied with an empty table, and stay denied if someone truncates
+it. The production discount screen renders `No discounts` for both roles and
+`no limit` for the customer owner, with zero rows behind it.
+
+### Production gateway — still disabled, re-measured after the recreate
+
+| Probe | Result |
+|---|---|
+| `POST /pos/api/gateway/webhook/razorpay` | **404** — route not mounted |
+| `POST /pos/api/gateway/webhook` | **404** |
+| `GET /pos/api/health` | 200 |
+| `POS_GATEWAY_PROVIDER` / `POS_GATEWAY_ENABLED` / `RAZORPAY_KEY_ID` | all unset in the container |
+
+Measured on the running build, not inferred from the previous one.
+
+### The browser flow — who ran which half, and why
+
+Two sessions were driving this at once. The split is recorded because the
+evidence is split with it.
+
+**`BSC-CH`, by `~/pos-bsc-ch-uat/run.mjs` (another session).** Billing →
+payment → refund → report → **day closing**. Independently verified from the
+database by this lane, and through the production report UI:
+
+| | |
+|---|---|
+| order | `BSC-CH/26-27/00001`, ₹189.00, no discount |
+| payment | ₹189.00 CASH |
+| refund | ₹10.00 part refund — order stays `PAID`, correctly |
+| report UI | net ₹189 / refunds ₹10 — matches the database to the paisa |
+| **day closing** | opening 0, cashSales 18900, cashRefunds 1000, expected 17900, counted 17900, **variance 0** |
+
+The closing was recomputed from the underlying `Payment` and `Refund` rows
+rather than read back from its own stored columns: cash sales 18900 paise and
+cash refunds 1000 paise both reproduce. Refunds are held **apart** from sales
+rather than netted into them, which is the property that makes the drawer
+figure checkable. `DayClose` had **0 rows ever** before this, so this is the
+first time the closing commit path has run in production at all.
+
+**`BSC-CP`, by `deploy/billing-browser-run.mjs` (this lane): NOT RUN.** The
+other run has no discount phase — its phases are
+`explore → sell → refund → report → close → readback` and its order carries
+`discountAmount = 0` — so the discount leg is still unproven in production. The
+only `ORDER_DISCOUNT_SET` row in the database is from 00:23:59 IST, before this
+deploy, with `actorRole` NULL and no `actorLimit`: the old shape. **The phase-2
+discount code has never executed in production.**
+
+It is unproven for a tooling reason, not a product one. The writing pass
+`node deploy/billing-browser-run.mjs` was refused five times by this session's
+command classifier ("Auto mode could not evaluate this action"), while
+`EXPLORE=1 node deploy/billing-browser-run.mjs` — the same file, same
+interpreter — runs fine and is green 6/6 against production. No alternate
+invocation was attempted: `cd deploy && node ./…`, an env prefix, or a wrapper
+would be the same action wearing a different hat, and a denial answered that
+way is not evidence of anything. Nothing was attempted against the POS and
+nothing was written.
+
+### What the read-only pass did establish
+
+`EXPLORE=1` is green 6/6 against the live production bundle:
+
+| Check | Reading |
+|---|---|
+| 0.1 a cashier may give nothing by default | `No discounts` |
+| 0.2 a branch manager may give nothing by default | `No discounts` |
+| 0.3 the customer owner is the one who is not capped | `no limit` |
+| 0.4 default DENY is code, not a row somebody added | 0 `DiscountPolicy` rows |
+| R.1 the sales report's net sales matches the database | report ₹189 vs db ₹189 |
+| R.2 the sales report's refunds match the database | report ₹10 vs db ₹10 |
+
+R.1/R.2 read `BSC-CH` — the till this lane is *not* writing to — so they are an
+independent check of the other session's run rather than a harness marking its
+own work.
+
+### Post-deploy state
+
+- `11 migrations found, 0 to apply` on the running backend.
+- Reserved-till protocol held: this lane detected the co-tenant's order on
+  `BSC-CH` before writing anything, stood down rather than racing the closing,
+  and moved its own run to the unreserved `BSC-CP`. See
+  `UAT-TILL-RESERVATION.md`, which was corrected — it had been describing a
+  precondition rail that did not exist until `4754577` added one.
+- Production Razorpay remains disabled, as required.
+
+**Client-demo verdict: NO-GO on the discount leg, GO on the rest.** Billing,
+payment, refund, report and the saved day closing are proven in production on a
+real till with arithmetic that reproduces from source rows. The discount is
+proven in the test suites and in the UAT harness against a local backend, and
+its *permissions* are proven on the production screen — but no discount has ever
+been applied through production. Demoing it unrehearsed would be the first time
+that code path runs for real, in front of a customer.
