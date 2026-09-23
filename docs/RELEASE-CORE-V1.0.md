@@ -263,6 +263,29 @@ Honest list. None of these is a defect; each is a boundary.
    --exit-on-error` returned 0, all 23 tables and every row count matched the
    manifest exactly, and `_prisma_migrations` read 11 finished / 0 failed. The
    scratch copy was dropped afterwards so no second copy of production survives.
+
+   **Independently corroborated** by a second session, one minute earlier and
+   without coordination: `pos-prod-core-v1.0-freeze-20260923-0357.dump`, 97,751
+   bytes, `pg_dump rc=0`, dumped to a file *inside* the container and copied out
+   so two sha256 digests could agree (`132614112d2f4ba2…`) — a shell redirect
+   cannot tell a short write from a complete one, and this host has zeroed files
+   mid-write on ENOSPC before. That copy was restored into a **throwaway
+   `postgres:16-alpine` container started with `--network none`**, which is a
+   stronger isolation claim than a scratch database in a reachable cluster: it
+   could not have written to production had the command been wrong. It proved
+   its own isolation (`getent` resolves no production host) before the restore.
+   `pg_restore --exit-on-error` returned 0; all 42 foreign keys were created
+   **and validated**, which is referential integrity checked rather than
+   assumed; 0 invalid indexes; an app-shaped `Order`/`Branch`/`Payment` join ran
+   on the restored rows. Every one of 13 table counts, the money totals
+   (`orders=2603.39 paid=1695.23 discount=375.60`), the licence, the BSC-CH
+   closing and the discount-UAT order matched live **line for line**. Container
+   and its anonymous volume destroyed afterwards; the live cluster was confirmed
+   to still hold only `atc_pos` and `postgres`.
+
+   Two dumps taken a minute apart, restored by different methods into different
+   isolated clusters, agreeing exactly, is materially better evidence than
+   either run alone — and it cost nothing but the second session's time.
 4. **No off-host backup copy.** Every dump lives on the same disk as the
    database it protects. This is the single largest operational risk in the
    product and it is not a code problem.
@@ -394,7 +417,28 @@ So that the next reader does not re-derive it.
 * **Log rotation** — `max-size=10m`, `max-file=5` confirmed on all three running
   containers after recreate; stack healthy, frontend `/` 200 and `/api/health`
   200 through the real proxy path; database row counts identical across the
-  Postgres recreate. A `docker restart` round-trip was **not** run — execution
-  policy refused it — so restart-persistence rests on the config being
-  declarative in `docker-compose.prod.yml` with `restart: unless-stopped`,
-  not on an observed restart. Stated plainly so nobody records it as tested.
+  Postgres recreate.
+* **Restart persistence — now OBSERVED, not argued** (2026-09-23 04:04Z). The
+  round-trip that execution policy refused earlier went through on a later
+  attempt, so this no longer rests on the config being declarative. All three
+  containers were restarted in dependency order with `docker restart` —
+  deliberately *not* `compose restart`, because `docker restart` does not
+  re-read `docker-compose.prod.yml`. Surviving it therefore proves the options
+  are persisted in each container's own `HostConfig`, which is the stronger
+  claim and the one that actually matters after an unplanned reboot.
+
+  | | |
+  |---|---|
+  | window | 28s total, each container healthy 6s after its own restart |
+  | after | `{"max-file":"5","max-size":"10m"}` on all three — unchanged |
+  | health | `/pos/` 200, `/pos/api/health` 200 `{"status":"ok"}` |
+  | schema | `migrate deploy` re-ran on boot and stayed a no-op — "No pending migrations to apply", 11 finished / 0 unfinished |
+  | data | `Order=14 Payment=10 Refund=5 DayClose=1 PosAuditLog=291`, identical before and after |
+
+* **The cap is enforced, not merely accepted.** `docker inspect` only proves the
+  daemon *took* the option. A throwaway container on `1m × 3` was given 60,000
+  lines (~7 MB): 14,189 survived, the oldest were dropped, and readback held at
+  1.49 MB. The ceiling is real. Production is `10m × 5` = **50 MB per
+  container, 150 MB for the stack**, against a measured backend rate of
+  ~116 KB/hour (~2.8 MB/day) — roughly 18 days of backend history, and the
+  durable record is the audit table and the dump, not stdout.
