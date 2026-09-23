@@ -31,18 +31,37 @@ function StatusChip({ status }) {
   return <span className={`badge ${ORDER_STATUS_STYLES[status] || 'bg-slate-100 text-slate-600'}`}>{status}</span>;
 }
 
+const REFUND_METHOD_LABELS = {
+  CASH: 'Cash from the till',
+  CARD: 'Reversed on the card terminal',
+  UPI: 'UPI transfer',
+  OTHER: 'Other',
+};
+
+// Tenders the till itself took on this bill. Provider money is excluded: only
+// the provider can return it, so there is no choice to make about it here.
+const counterMethodsOf = (payments) => [
+  ...new Set(payments.filter((p) => p.channel !== 'GATEWAY' && Number(p.amount) > 0).map((p) => p.method)),
+];
+
 // Refund needs amount + mandatory reason (§5.3) — its own modal.
 function RefundModal({ open, order, onClose, onDone }) {
   const toast = useToast();
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
+  const [method, setMethod] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
+      const counter = counterMethodsOf(order?.payments || []);
       setAmount('');
       setReason('');
+      // One tender → that tender, still changeable (a card bill can be
+      // refunded in cash). Two → no default: which share goes back is the
+      // manager's decision, and the server refuses to guess it too.
+      setMethod(counter.length === 1 ? counter[0] : '');
       setError('');
       setBusy(false);
     }
@@ -56,6 +75,8 @@ function RefundModal({ open, order, onClose, onDone }) {
   const payments = order.payments || [];
   const viaProvider = payments.some((p) => p.channel === 'GATEWAY');
   const mixed = viaProvider && payments.some((p) => p.channel !== 'GATEWAY');
+  const counterMethods = counterMethodsOf(payments);
+  const needsMethod = counterMethods.length > 0;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -65,6 +86,7 @@ function RefundModal({ open, order, onClose, onDone }) {
       const { data } = await api.post(`/orders/${order.id}/refunds`, {
         amount: Number(amount),
         reason: reason.trim(),
+        ...(needsMethod ? { method } : {}),
       });
       // 202 — recorded and holding its money, but the provider never answered.
       // Closing silently here would hide the one state that must be
@@ -114,6 +136,28 @@ function RefundModal({ open, order, onClose, onDone }) {
             autoFocus
           />
         </div>
+        {needsMethod ? (
+          <div>
+            <label className="label" htmlFor="refund-method">Returned as</label>
+            <select
+              id="refund-method"
+              className="input"
+              value={method}
+              onChange={(e) => setMethod(e.target.value)}
+              required
+            >
+              {counterMethods.length > 1 ? <option value="">Choose how the money goes back…</option> : null}
+              {Object.entries(REFUND_METHOD_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-slate-500">
+              {counterMethods.length > 1
+                ? 'This bill was paid in more than one way. Only cash from the till is taken off the day-close drawer.'
+                : 'Only cash from the till is taken off the day-close drawer.'}
+            </p>
+          </div>
+        ) : null}
         <div>
           <label className="label" htmlFor="refund-reason">Reason (required)</label>
           <textarea
@@ -129,7 +173,9 @@ function RefundModal({ open, order, onClose, onDone }) {
         <button
           type="submit"
           className="btn-primary w-full"
-          disabled={busy || amount === '' || Number(amount) <= 0 || reason.trim().length < 3}
+          disabled={
+            busy || amount === '' || Number(amount) <= 0 || reason.trim().length < 3 || (needsMethod && !method)
+          }
         >
           {busy
             ? viaProvider

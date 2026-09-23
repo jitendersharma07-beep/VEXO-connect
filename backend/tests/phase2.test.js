@@ -1033,6 +1033,77 @@ describe('daily closing', () => {
     expect(after.expectedCash).toBeCloseTo(p.expectedCash, 2);
   });
 
+  const billedCappuccino = async () => {
+    const o = await request(app).post('/api/orders').set(auth(tokens.cashierA1))
+      .send({ type: 'TAKEAWAY', items: [{ productId: cat.cappuccino, qty: 1 }] });
+    const billed = await request(app).post(`/api/orders/${o.body.order.id}/bill`)
+      .set(auth(tokens.cashierA1)).send({}).expect(200);
+    return billed.body.order;
+  };
+  const payOn = (orderId, body) =>
+    request(app).post(`/api/orders/${orderId}/payments`).set(auth(tokens.cashierA1)).send(body);
+  const refundOn = (orderId, body) =>
+    request(app).post(`/api/orders/${orderId}/refunds`).set(auth(tokens.managerA1)).send(body);
+
+  it('a refund goes back the way the bill was paid, and a split bill has to say which way', async () => {
+    const card = await billedCappuccino();
+    await payOn(card.id, { method: 'CARD', amount: card.total }).expect(201);
+    const inferred = await refundOn(card.id, { amount: 10, reason: 'froth was cold' });
+    expect(inferred.status, JSON.stringify(inferred.body)).toBe(201);
+    expect(inferred.body.refund.method).toBe('CARD');
+    // A card bill can still be settled in notes when the terminal cannot
+    // reverse it; the manager says so and the record says what happened.
+    const overridden = await refundOn(card.id, { amount: 5, reason: 'terminal offline', method: 'CASH' });
+    expect(overridden.status, JSON.stringify(overridden.body)).toBe(201);
+    expect(overridden.body.refund.method).toBe('CASH');
+
+    const split = await billedCappuccino();
+    const part = await payOn(split.id, { method: 'CARD', amount: 50 });
+    expect(part.status, JSON.stringify(part.body)).toBe(201);
+    await payOn(split.id, { method: 'CASH', tendered: part.body.order.amountDue }).expect(201);
+    const unsaid = await refundOn(split.id, { amount: 10, reason: 'wrong milk' });
+    expect(unsaid.status, JSON.stringify(unsaid.body)).toBe(400);
+    expect(unsaid.body.error.field).toBe('method');
+    // Nothing was written on the refusal.
+    expect(await prisma.refund.count({ where: { orderId: split.id } })).toBe(0);
+    const said = await refundOn(split.id, { amount: 10, reason: 'wrong milk', method: 'CASH' });
+    expect(said.status, JSON.stringify(said.body)).toBe(201);
+    expect(said.body.refund.method).toBe('CASH');
+  });
+
+  // The drawer only loses what was handed back in notes. Before Refund.method,
+  // every manual refund was subtracted here, so reversing a card bill on the
+  // terminal made an honest count read "over" by the refunded amount.
+  it('only a refund handed back in cash comes out of the expected drawer', async () => {
+    const p = (await preview(tokens.managerA1)).body.preview;
+
+    const card = await billedCappuccino();
+    await payOn(card.id, { method: 'CARD', amount: card.total }).expect(201);
+    await refundOn(card.id, { amount: card.total, reason: 'reversed on the terminal' }).expect(201);
+    const afterCard = (await preview(tokens.managerA1)).body.preview;
+    expect(afterCard.cardSales).toBeCloseTo(p.cardSales + card.total, 2);
+    expect(afterCard.cashRefunds).toBeCloseTo(p.cashRefunds, 2);
+    expect(afterCard.expectedCash).toBeCloseTo(p.expectedCash, 2);
+
+    const cash = await billedCappuccino();
+    await payOn(cash.id, { method: 'CASH', tendered: cash.total }).expect(201);
+    await refundOn(cash.id, { amount: 40, reason: 'spilled the cup' }).expect(201);
+    const afterCash = (await preview(tokens.managerA1)).body.preview;
+    expect(afterCash.cashRefunds).toBeCloseTo(afterCard.cashRefunds + 40, 2);
+    expect(afterCash.expectedCash).toBeCloseTo(afterCard.expectedCash + cash.total - 40, 2);
+
+    // A manual refund written before the column existed has no method. It is
+    // read as cash — what every closing filed before this change assumed — so
+    // no past figure moves.
+    const mgr = await prisma.posUser.findFirst({ where: { branchId: branchA1.id, role: 'BRANCH_MANAGER' } });
+    await prisma.refund.create({
+      data: { orderId: cash.id, amount: '15.00', channel: 'MANUAL', status: 'SUCCEEDED', reason: 'legacy row', byId: mgr.id },
+    });
+    const afterLegacy = (await preview(tokens.managerA1)).body.preview;
+    expect(afterLegacy.cashRefunds).toBeCloseTo(afterCash.cashRefunds + 15, 2);
+    expect(afterLegacy.expectedCash).toBeCloseTo(afterCash.expectedCash - 15, 2);
+  });
+
   it('a variance must be explained before it can be filed', async () => {
     const p = (await preview(tokens.managerA1)).body.preview;
     const short = await request(app).post('/api/reports/day-close').set(auth(tokens.managerA1))

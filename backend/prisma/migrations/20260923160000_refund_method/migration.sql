@@ -1,0 +1,21 @@
+-- How a manual refund went back: CASH, CARD, UPI or OTHER.
+--
+-- The day close subtracted EVERY manual refund from the cash it expected in
+-- the drawer. A card bill refunded by reversing the charge on the terminal
+-- takes nothing out of the till, so an honest count then read "over" by the
+-- refunded amount and could only be filed with an explanation of money that
+-- never existed. Measured on the isolated lab: a ₹147.00 card refund turned an
+-- expected ₹179.82 into ₹32.82.
+--
+-- Nullable, with NO backfill, on purpose:
+--   * a refund row does not say which tender it reversed, and guessing one
+--     for history would rewrite past closings on the strength of a guess;
+--   * the application reads NULL on a manual row as cash — exactly what it
+--     did before — so every closing already filed, and every after-the-count
+--     figure, is unchanged;
+--   * the v1.0.1 image does not know this column, never selects it and never
+--     writes it, so rolling back to it against a migrated database works
+--     (its new manual refunds land NULL and are read as cash, as they are
+--     today).
+
+ALTER TABLE "Refund" ADD COLUMN "method" "PaymentMethod";

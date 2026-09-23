@@ -681,6 +681,16 @@ model Refund {
   // PENDING refund must never be shown, totalled or reported as money returned.
   channel        PaymentChannel @default(MANUAL)
   status         RefundStatus   @default(SUCCEEDED)
+  // How a MANUAL refund went back: notes out of the till, or a reversal on the
+  // card terminal, or a UPI transfer. Only CASH leaves the drawer, and the day
+  // close cannot tell the difference without it — every manual refund used to
+  // be counted as cash, so refunding a card bill made an honest count read
+  // "over" by exactly that amount.
+  //
+  // Null on GATEWAY rows (the provider returns it) and on every manual row
+  // written before this column existed. Those old rows are still read as cash,
+  // so no past closing, and no after-the-count figure, moves.
+  method         PaymentMethod?
   // The gateway payment being reversed, and the provider's own reference for
   // the reversal. providerRef is unique so a redelivered refund webhook lands
   // on exactly one row.

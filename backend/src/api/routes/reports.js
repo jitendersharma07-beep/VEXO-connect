@@ -11,7 +11,7 @@ import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../../l
 import { requirePosAuth, resolveCompanyScope, isBranchPinned } from '../../middleware/auth.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { toPaise, toRupees } from '../../lib/money.js';
-import { paiseOf, istDayStartUtc, istDateOf } from '../../lib/orders.js';
+import { paiseOf, istDayStartUtc, istDateOf, refundLeavesDrawer } from '../../lib/orders.js';
 import { gatewayAvailable } from '../../lib/gateway/index.js';
 import { audit } from '../../lib/audit.js';
 import { env } from '../../config/env.js';
@@ -478,7 +478,7 @@ const dayFigures = async (companyId, branchId, businessDate) => {
     // shortfall the cashier would then be asked to explain.
     prisma.refund.findMany({
       where: { createdAt: window, status: 'SUCCEEDED', order: orderScope },
-      select: { amount: true, channel: true },
+      select: { amount: true, channel: true, method: true },
     }),
     prisma.order.count({ where: { ...orderScope, billedAt: window } }),
     // Unbilled orders still on the floor. Not an error — a café can close its
@@ -504,10 +504,11 @@ const dayFigures = async (companyId, branchId, businessDate) => {
     else otherSales += amount;
   }
 
-  // Only a MANUAL refund comes out of the till. A gateway refund is returned
-  // by the provider from money it already holds.
+  // Only notes handed back come out of the till: not a gateway refund, which
+  // the provider returns from money it already holds, and not a manual refund
+  // reversed on the card terminal or sent back by UPI.
   let cashRefunds = 0;
-  for (const r of refunds) if (r.channel !== 'GATEWAY') cashRefunds += paiseOf(r.amount);
+  for (const r of refunds) if (refundLeavesDrawer(r)) cashRefunds += paiseOf(r.amount);
 
   return {
     cashSales,
@@ -559,7 +560,7 @@ const postCloseFor = async (companyId, closings) => {
     }),
     prisma.refund.findMany({
       where: { createdAt: window, status: 'SUCCEEDED', order: orderScope },
-      select: { createdAt: true, amount: true, channel: true, order: { select: { branchId: true } } },
+      select: { createdAt: true, amount: true, channel: true, method: true, order: { select: { branchId: true } } },
     }),
     prisma.order.findMany({
       where: { ...orderScope, billedAt: window },
@@ -604,7 +605,7 @@ const postCloseFor = async (companyId, closings) => {
     for (const r of b.refunds) {
       if (!after(r.createdAt)) continue;
       refundCount += 1;
-      if (r.channel !== 'GATEWAY') cashRefundsPaise += paiseOf(r.amount);
+      if (refundLeavesDrawer(r)) cashRefundsPaise += paiseOf(r.amount);
       if (!latest || r.createdAt > latest) latest = r.createdAt;
     }
 

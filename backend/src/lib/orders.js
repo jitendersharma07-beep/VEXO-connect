@@ -170,6 +170,7 @@ export const publicRefund = (r) => ({
   amount: num(r.amount),
   reason: r.reason,
   channel: r.channel,
+  method: r.method ?? null,
   status: r.status,
   failureReason: r.failureReason,
   // Whether the provider acknowledged the request at all. A PENDING refund
@@ -197,6 +198,26 @@ export const reservedRefundPaise = (refunds) =>
   refunds
     .filter((r) => r.status === 'SUCCEEDED' || r.status === 'PENDING')
     .reduce((a, r) => a + paiseOf(r.amount), 0);
+
+// Whether a settled refund came out of the till. A gateway refund is returned
+// by the provider from money it already holds; a manual one leaves the drawer
+// only when it went back as notes. NULL is a manual row from before
+// Refund.method existed and is read as cash, which is what every closing filed
+// before then assumed — so none of them moves.
+export const refundLeavesDrawer = (r) =>
+  r.channel !== 'GATEWAY' && (r.method === 'CASH' || r.method === null || r.method === undefined);
+
+// The tender a manual refund goes back on when the manager did not say. A bill
+// settled in one tender can only mean that tender. A bill settled in two
+// cannot be decided on the manager's behalf — which share goes back is their
+// call, the same rule the leg picker applies to gateway and till money — so
+// this returns null and the route refuses.
+export const inferRefundMethod = (payments) => {
+  const methods = new Set(
+    payments.filter((p) => p.channel !== 'GATEWAY' && paiseOf(p.amount) > 0).map((p) => p.method),
+  );
+  return methods.size === 1 ? [...methods][0] : null;
+};
 
 const holdsMoney = (r) => r.status === 'SUCCEEDED' || r.status === 'PENDING';
 

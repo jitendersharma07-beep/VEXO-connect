@@ -43,6 +43,7 @@ import {
   largestRefundablePaise,
   isUnconfirmedGatewayRefund,
   istDayStartUtc,
+  inferRefundMethod,
 } from '../../lib/orders.js';
 
 const router = Router();
@@ -1465,6 +1466,7 @@ const REFUND_PAYMENT_INCLUDE = {
   select: {
     amount: true,
     channel: true,
+    method: true,
     intentId: true,
     // The provider's id for the charge. Without it a gateway refund has no
     // route to post to, so it has to travel with the leg.
@@ -1549,7 +1551,16 @@ router.post(
   '/:id/refunds',
   ...managerUp,
   asyncHandler(async (req, res) => {
-    const body = z.object({ amount: money2, reason: reasonSchema }).parse(req.body);
+    const body = z
+      .object({
+        amount: money2,
+        reason: reasonSchema,
+        // How a manual refund goes back. Optional when the bill was settled in
+        // one tender, required when it was split. Ignored for money going back
+        // through the provider, which only the provider can return.
+        method: z.enum(['CASH', 'CARD', 'UPI', 'OTHER']).optional(),
+      })
+      .parse(req.body);
     const order = await loadOrder(req);
     const amount = toPaise(body.amount);
 
@@ -1612,11 +1623,20 @@ router.post(
       }
 
       const viaGateway = leg.channel === 'GATEWAY';
+      const method = viaGateway ? null : body.method ?? inferRefundMethod(cur.payments);
+      if (!viaGateway && !method) {
+        throw badRequest(
+          'This bill was paid by more than one method. Say how this refund goes back — cash from the till, ' +
+            'a reversal on the card terminal, or UPI — so the day close counts the drawer correctly.',
+          'method',
+        );
+      }
       const created = await tx.refund.create({
         data: {
           orderId: order.id,
           amount: rupees(amount),
           reason: body.reason,
+          method,
           byId: req.user.id,
           // PENDING is the whole point: nothing has been returned yet, and
           // only a signature-verified webhook may say otherwise.
@@ -1660,6 +1680,7 @@ router.post(
         amount: String(refund.amount),
         reason: body.reason,
         channel: refund.channel,
+        method: refund.method ?? null,
         status: refund.status,
         providerConfirmed: refund.channel === 'GATEWAY' ? answer.confirmed : null,
       },
