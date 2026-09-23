@@ -32,6 +32,29 @@ Scope it separately — do not let it be assumed as included.
 
 ---
 
+## 0. Recommended specification
+
+Added 2026-09-23. The owner asked for the best configuration rather than
+supplying one, so this is ATC's recommendation, and every line of it is chosen
+against what the build actually does — not against a generic "good POS printer"
+list. Buy to this and the UAT in §2 runs as written, with no code change.
+
+| | Recommended | Why this one |
+|---|---|---|
+| **Paper** | **80 mm roll, 72 mm printable** | The only width this build supports. It is fixed in two places (`PAPER_MM`/`PRINTABLE_MM` in `printPageSize.js`, `PAPER_W = w-[272px]` in `Receipt.jsx`). **58 mm is a code change, not a setting** — avoid it unless the site already owns 58 mm stock, and say so before quoting. |
+| **Printer** | **Epson TM-T82 / TM-T88** | The single biggest print risk here is a driver that imposes a *fixed form length* instead of the per-job page height the app asks for — that is what feeds a bill's worth of blank roll after a short KOT. Epson's drivers are the most consistent at honouring a requested page size. TVS RP 3200/3230 is the acceptable budget alternative; expect to check the feed behaviour (§2, "Page length and the cut") more carefully. |
+| **Connection** | **USB** for a single counter; **LAN with a reserved IP** only if a second (kitchen) printer is planned | USB has the fewest failure modes on a counter. Bluetooth is the least reliable and its pairing drops are a recurring go-live complaint. If LAN, reserve the address on the router — a DHCP lease change silently breaks printing. |
+| **Host OS** | **Windows 11** | The app is browser-based, so the OS barely matters *to the application* — it matters to the **driver**, and that is where every print risk lives. Windows has the widest thermal-driver support and is what this class of hardware is tested against by its vendors. macOS and Linux go through CUPS and will work, but generic thermal drivers there are thinner and page-size handling differs; if the site is on either, treat §2 as genuinely unverified rather than a formality. |
+| **Browser** | **Chrome/Edge at 100 % zoom** | Chromium is what the `@page` workaround was measured against. Firefox honours `size: 80mm auto` natively and is fine, but it is not what the fix was built for. |
+| **Screen** | **1366×768 or larger, landscape** | 1024×768 is the smallest measured; below it the sidebar disappears with no replacement navigation. |
+
+**Deliberately not recommended, because the build cannot use them:** a printer
+bought for its cash-drawer port, its auto-cutter, or its "silent print" driver
+feature. None of those is reachable from this application — see the NOT
+SUPPORTED rows below. A drawer-capable printer is not *wrong* to buy, it just
+buys nothing today, and it must not be quoted to the customer as a feature the
+POS drives.
+
 ## 1. Terminal
 
 - [ ] Device make/model: ______________________

@@ -213,14 +213,46 @@ Set up once per till:
 2. Set its paper size to **80 mm roll** in the printer's own settings.
 3. In the browser's print dialog: **Margins → None**, **Scale 100 %**,
    **Headers and footers → off**, **Background graphics → on**.
-4. Tick "do not ask again" if the browser offers it, so staff get one keypress.
 
-Kitchen tickets print the same way. If the kitchen printer is a different
-machine, set it as the default on the device that sends KOTs.
+### Kitchen tickets and the second printer
 
-**VEXO has not tested this against your printer.** The layout is correct at 80 mm
-and prints correctly to PDF at that width; the first real print is something to
-do together before the café opens, not on the first busy morning.
+Kitchen tickets are laid out separately — ticket number, table, time, item
+names and quantities, **no prices** — but read this before assuming they route
+themselves.
+
+**Automatic routing is not built.** VEXO Connect does not know your printers
+exist. Receipt and kitchen ticket both open the same browser print dialog, and
+neither carries any instruction about which machine should receive it. There is
+no screen for assigning a counter printer and a kitchen printer, and nothing
+stored against your branch that says which is which. If you were told the
+system sends KOTs to the kitchen on its own, that is not the case today.
+
+**Choosing a printer by hand does work**, and it is a different thing. The
+browser's dialog lists every printer installed on that device, so whoever is at
+the till can pick the kitchen printer for a KOT and the counter printer for a
+receipt, one print at a time. It is a real capability, not a placeholder — it
+is simply manual, and it depends on a person choosing correctly every time.
+
+Two consequences worth knowing before opening day:
+
+- **Do not tick "do not ask again"** on a till that prints both. That box
+  suppresses the dialog, and suppressing the dialog is exactly what removes the
+  choice — every job then silently goes to that device's default printer.
+  One keypress per print and one printer, or the dialog and both printers; you
+  cannot have both on the same device.
+- **The reliable arrangement is one device per printer.** If the kitchen has
+  its own tablet or terminal, set the kitchen printer as *that* device's
+  operating-system default and send KOTs from there. Then nobody has to choose,
+  because each device only has one answer. This is an arrangement of your
+  hardware, not a feature of the software — worth saying plainly, because it
+  produces the result people expect from "automatic routing" and it is easy to
+  mistake one for the other.
+
+**VEXO has not tested any of this against your printer.** The layout is correct
+at 80 mm and prints correctly to PDF at that width, but no physical printer has
+been attached, so paper behaviour, cutting and the driver's own margin
+handling are **untested**. The first real print is something to do together
+before the café opens, not on the first busy morning.
 
 ---
 
