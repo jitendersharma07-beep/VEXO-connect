@@ -7,18 +7,26 @@ a discount on screen is not proof of who allowed it.
 
 One person, one browser, about fifteen minutes.
 
-The automated harness covers exactly this sequence, step for step. If script
-execution is available, run that instead — it checks the database after every
-step, which by hand is the part most likely to get skipped.
+The automated harness covers this sequence step for step, and since the
+`phase2-integration` merge it goes further than this document does: the till in
+the un-configured state, the approval not carrying to the next customer, a
+manager's own delegated ceiling, a 100% discount, the rupee cap as a limit
+separate from the percentage, a line removal re-opening an already-allowed
+discount, and a sweep proving the typed password reached neither the audit
+trail nor the server log. If script execution is available, run that instead —
+it checks the database after every step, which by hand is the part most likely
+to get skipped.
 
 ---
 
 ## What this is testing, and what it is not
 
 `backend/tests/discountSettings.test.js` and `backend/tests/discounts.test.js`
-already prove the **rules**: 56 tests across the two files, covering allowed,
-denied, above-limit, cross-branch, cross-tenant, and the approval throttle.
-Those run on every suite and they do not need a browser.
+already prove the **rules**: 80 tests across the two files as measured on
+2026-09-23 (50 + 30), covering allowed, denied, above-limit, cross-branch,
+cross-tenant, and the approval throttle. Those run on every suite and they do
+not need a browser. Re-count before quoting this number rather than copying it
+forward — it was wrong by 24 the last time somebody did.
 
 What a browser adds, and the only reason this document exists, is the part a
 unit test cannot see:

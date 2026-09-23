@@ -1154,3 +1154,24 @@ describe('resolving company, branch and staff rows', () => {
     expect(merged.canApprove).toBe(false);
   });
 });
+
+// --- what the trail must never contain ----------------------------------------
+
+describe('the paper trail and the password', () => {
+  it('carries a password on no audit row anywhere, approved or refused', async () => {
+    // Everything above has been writing rows: approvals that went through,
+    // wrong passwords, accounts that do not exist, the wrong branch's manager,
+    // an evening of throttled guesses. This sweeps the WHOLE trail those tests
+    // left behind — not one hand-picked row — because the requirement is not
+    // "the success path omits the password", it is that no shape of refusal,
+    // however it grew, wrote down what was typed into the password box.
+    const rows = await prisma.posAuditLog.findMany({ select: { action: true, meta: true } });
+    // A sweep of an empty table proves nothing; the suite above leaves a dense
+    // trail or something upstream is broken.
+    expect(rows.length).toBeGreaterThan(30);
+    const everything = JSON.stringify(rows);
+    expect(everything).not.toContain(PW);
+    expect(everything).not.toContain('not-the-password');
+    expect(everything).not.toContain('guess-0');
+  });
+});

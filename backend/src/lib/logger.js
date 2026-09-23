@@ -18,6 +18,16 @@ export const REDACT = [
   '*.passwordHash',
   '*.token',
   '*.licenseKey',
+  // The discount-approval block is the one place a password legitimately
+  // rides inside a request BODY: { approval: { approverEmail, password,
+  // reason } }. No log path serialises bodies today — pino-http's default
+  // req serializer carries no body, and the error handler logs { err, url }
+  // only — but '*.password' reaches exactly one level deep, so the day a
+  // call site logs { body: req.body } the password would sit two levels down
+  // and sail straight through. These two paths make that future call site
+  // leak nothing on the day it is written.
+  '*.approval.password',
+  'req.body.approval.password',
 ];
 
 // A whitelist, where REDACT is a denylist: pino-http logs every response

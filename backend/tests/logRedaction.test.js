@@ -88,6 +88,26 @@ describe('request-log credential redaction', () => {
       expect(line.req.headers.authorization).toBe('[REDACTED]');
     });
 
+    // The discount-approval block is the one password that legitimately rides
+    // inside a request BODY rather than a header. Nothing serialises bodies
+    // into the log today; these pin the paths that keep it safe on the day
+    // something does.
+    it('censors an approval password logged beside its request', () => {
+      const line = emit({
+        req: { body: { approval: { approverEmail: 'mgr@shop.in', password: 'PLAINTEXT' } } },
+      });
+      expect(line.req.body.approval.password).toBe('[REDACTED]');
+      expect(JSON.stringify(line)).not.toContain('PLAINTEXT');
+    });
+
+    it('censors an approval block logged on its own, at either depth', () => {
+      const direct = emit({ approval: { approverEmail: 'mgr@shop.in', password: 'PLAINTEXT' } });
+      expect(direct.approval.password).toBe('[REDACTED]');
+      const nested = emit({ body: { approval: { password: 'PLAINTEXT' } } });
+      expect(nested.body.approval.password).toBe('[REDACTED]');
+      expect(JSON.stringify([direct, nested])).not.toContain('PLAINTEXT');
+    });
+
     // A censor broad enough to swallow the surrounding line would pass every
     // assertion above while making the log useless.
     it('leaves the rest of the request line intact', () => {

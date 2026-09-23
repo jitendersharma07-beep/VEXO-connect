@@ -10,13 +10,34 @@
 // and when the server refuses, does a prompt appear, does the wrong manager
 // get turned away, does the right one get through.
 //
+// Sections by what they answer, in the order a customer asks:
+//
+//   A   the settings screen on the day the product is handed over
+//   A′  and the till in that same state — deny by default, where it counts
+//   B–D company default, branch override, per-staff approval grant
+//   E–G the cashier's own ceiling, honoured and then exceeded
+//   H–I the wrong manager refused, the right one accepted and recorded
+//   J   the approval does not follow the cashier to the next customer
+//   K–L a manager may sign only up to what THEY were delegated
+//   M   100% is refused until a policy says otherwise — it is not hard-coded
+//   N   the rupee cap binds independently of the percentage cap
+//   O   shrinking the bill re-opens a discount that was already allowed
+//   P   pressing it twice, and reloading, does not discount twice
+//   Q   the password reached neither the audit trail nor the server log
+//
 //   cd deploy && node ./seed-discount-render.mjs \
-//     && BASE_URL=http://127.0.0.1:5182 node ./render-discount-screens.mjs
+//     && BASE_URL=http://127.0.0.1:5184 BACKEND_LOG=/tmp/uat-backend.log \
+//        node ./render-discount-screens.mjs
 //
 // Run it from deploy/, as above. An earlier note here claimed this environment
 // refuses to run the file at all; it refuses `node deploy/<script>` from the
 // repo root and accepts `./<script>` from inside deploy/, which is a different
-// thing. It has since been run: 39/39 green against backend :5011 + vite :5182.
+// thing. It has since been run: 81/81 green post-merge against backend :5012
+// + vite :5184 on phase2-integration.
+//
+// BACKEND_LOG is optional and names the API's log file; without it section Q
+// still sweeps the audit trail but prints a visible SKIP for the log, rather
+// than passing quietly on a check it never ran.
 //
 // DATABASE_URL and RENDER_PASSWORD come from the env file below, not the
 // command line. Expects deploy/seed-discount-render.mjs to have just run.
@@ -107,10 +128,30 @@ const setNum = async (id, v) => {
   if (v !== null) await page.fill(`#${id}`, String(v));
 };
 
-const saveModal = async () => {
-  await page.click('form button[type="submit"]:has-text("Save")');
-  await page.waitForTimeout(700);
+// Every wait in this file hangs off the request the click actually causes.
+//
+// Fixed sleeps were what made sections B, D and I go red on a loaded machine:
+// the policy row WAS written and the screen said so, but the assertion had
+// already read the database. A sleep long enough on a warm box is not long
+// enough on a busy one, and lengthening it only moves the threshold — it does
+// not make the run deterministic. Waiting for the response is also a STRONGER
+// check than sleeping, because a request that never fires now hangs here
+// instead of sailing past a sleep into a confusing assertion failure.
+const awaitCall = async (clickTarget, urlRe, methods = ['POST', 'PUT', 'PATCH', 'DELETE']) => {
+  const [res] = await Promise.all([
+    page.waitForResponse((r) => urlRe.test(r.url()) && methods.includes(r.request().method()), {
+      timeout: 25000,
+    }),
+    typeof clickTarget === 'function' ? clickTarget() : page.click(clickTarget),
+  ]);
+  // The response has landed, so the row and its audit entry are committed.
+  // What is left is only the React re-render.
+  await page.waitForTimeout(450);
+  return res;
 };
+
+const saveModal = () =>
+  awaitCall('form button[type="submit"]:has-text("Save")', /\/api\/discount-policies/);
 
 const fox = await prisma.company.findFirst({ where: { slug: 'foxtrot-foods' } });
 // The vitest suite wipes this same _test database, so a run that follows
@@ -135,6 +176,67 @@ const mgrF1 = await prisma.posUser.findFirst({ where: { email: 'mgr.f1@test.loca
 const mgrF2 = await prisma.posUser.findFirst({ where: { email: 'mgr.f2@test.local' } });
 const cashierF1 = await prisma.posUser.findFirst({ where: { email: 'cashier.f1@test.local' } });
 
+// --- till helpers -----------------------------------------------------------
+
+const latestOrder = () =>
+  prisma.order.findFirst({ where: { companyId: fox.id }, orderBy: { createdAt: 'desc' } });
+
+// The till keeps the open order in React state only — no localStorage, no
+// resume-on-load — so reloading /sell is a clean counter and a genuinely new
+// customer. Adding the first product is a POST /orders; each one after that is
+// a POST to that order's items.
+const startOrder = async (products = ['Filter Coffee']) => {
+  await page.goto(`${BASE}/sell`, { waitUntil: 'networkidle' });
+  await page.locator('button:has-text("Takeaway")').first().waitFor({ state: 'visible', timeout: 15000 });
+  await page.click('button:has-text("Takeaway")');
+  for (const [i, p] of products.entries()) {
+    // The catalog column renders before the order panel, so .first() is the
+    // catalog card and not the cart line of the same name.
+    const card = page.locator(`text=${p}`).first();
+    // eslint-disable-next-line no-await-in-loop
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    // eslint-disable-next-line no-await-in-loop
+    await awaitCall(() => card.click(), i === 0 ? /\/api\/orders$/ : /\/api\/orders\/[^/]+\/items$/);
+  }
+  return latestOrder();
+};
+
+// The approval prompt is a second modal ON TOP of the discount modal, and
+// cancelling it leaves the discount modal open underneath with the typed value
+// still in the box. Re-clicking the edit button in that state hits nothing.
+const openDiscountModal = async () => {
+  if (await page.locator('#disc-value').isVisible().catch(() => false)) return;
+  await page.click('[aria-label="Edit order discount"]');
+  await page.locator('#disc-value').waitFor({ state: 'visible', timeout: 10000 });
+};
+
+const applyDiscount = async (kind, value) => {
+  await openDiscountModal();
+  await page.click(kind === 'FLAT' ? 'button:has-text("₹ Flat")' : 'button:has-text("% Percent")');
+  await page.fill('#disc-value', '');
+  await page.fill('#disc-value', String(value));
+  return awaitCall('button[type="submit"]:has-text("Apply discount")', /\/api\/orders\/[^/]+\/discount$/);
+};
+
+// The password is typed into the form, as a person would. Section Q afterwards
+// proves it reached neither the audit trail nor the server log.
+const approveAs = async (email, reason) => {
+  await page.fill('#approver-email', email);
+  await page.fill('#approver-password', PW);
+  await page.fill('#approver-reason', reason);
+  // The retry is a fresh request to the same route with the approval block
+  // attached — including, in section O, a line DELETE that names no discount.
+  return awaitCall('button[type="submit"]:has-text("Approve")', /\/api\/orders\//);
+};
+
+const cancelPrompt = async () => {
+  const btn = page.locator('button:has-text("Cancel")').first();
+  if (await btn.isVisible().catch(() => false)) {
+    await btn.click();
+    await page.waitForTimeout(400);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // A. The owner opens a company that has configured nothing
 // ---------------------------------------------------------------------------
@@ -152,6 +254,59 @@ ok(
 ok('A3 both branches listed for override', bodyA.includes('Foxtrot One') && bodyA.includes('Foxtrot Two'));
 ok('A4 staff listed', bodyA.includes('Manager F1') && bodyA.includes('Cashier F1'));
 ok('A5 database still has no policy row', (await prisma.discountPolicy.count()) === 0);
+
+// ---------------------------------------------------------------------------
+// A′. DENY BY DEFAULT, AT THE TILL — the claim section A only makes on paper.
+//
+// A2 reads the sentence the settings screen prints and A5 counts rows. Neither
+// puts a cashier in front of a real bill, and "no row exists" is not the same
+// claim as "the till refuses". This section is the only place the untouched,
+// nothing-configured state is tested where it matters. It has to run here,
+// before section B types a policy in, because after that the state is gone.
+// ---------------------------------------------------------------------------
+await logout();
+await login('cashier.f1@test.local');
+await startOrder();
+await openDiscountModal();
+await shot('01b-till-unconfigured');
+
+const bodyDeny = await page.textContent('body');
+ok(
+  'A6 with nothing configured the till tells the cashier they may not discount',
+  bodyDeny.includes('You are not permitted to apply order discounts'),
+);
+
+// Not a large discount. A FIFTH of one percent, which no ceiling anywhere in
+// this fixture would refuse — so if it goes through, what let it through was
+// the absence of a policy, not the size of the number.
+await applyDiscount('PERCENT', 0.2);
+await shot('01c-till-unconfigured-refused');
+
+const bodyDeny2 = await page.textContent('body');
+ok(
+  'A7 and the server refuses even a 0.2% discount, asking for a manager',
+  bodyDeny2.includes('A manager needs to approve this'),
+);
+
+const denyOrder = await prisma.order.findFirst({ where: { companyId: fox.id }, orderBy: { createdAt: 'desc' } });
+ok('A8 nothing was taken off the bill', denyOrder?.discountValue === null, `got ${denyOrder?.discountValue}`);
+const denied = await prisma.posAuditLog.findFirst({
+  where: { companyId: fox.id, action: 'ORDER_DISCOUNT_DENIED' },
+  orderBy: { at: 'desc' },
+});
+ok('A9 and the refusal is in the audit log, not just on the screen', !!denied);
+ok(
+  'A10 the refusal records the deny-by-default ceiling it was measured against',
+  denied?.meta?.actorLimit?.allowOrderDiscount === false && denied?.meta?.actorLimit?.maxPctMilli === 0,
+  `got ${JSON.stringify(denied?.meta?.actorLimit)}`,
+);
+
+// Back out of the prompt and hand the session back to the owner for section B.
+await cancelPrompt();
+await logout();
+await login('owner.f@test.local');
+await page.goto(`${BASE}/discounts`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(500);
 
 // ---------------------------------------------------------------------------
 // B. Company default: 10%, item and order discounts allowed
@@ -229,21 +384,15 @@ ok('D5 Manager F2 also granted 50% approval, at their own branch', mgr2Row?.canA
 // ---------------------------------------------------------------------------
 await logout();
 await login('cashier.f1@test.local');
-await page.goto(`${BASE}/sell`, { waitUntil: 'networkidle' });
-await page.waitForTimeout(900);
-
 // The till refuses to hold items before it knows what kind of order this is
-// — "Choose Takeaway or pick a table first". Clicking the product without
-// this leaves an empty cart, and every later step then hunts for a discount
-// control on an order that does not exist.
-await page.click('button:has-text("Takeaway")');
-await page.waitForTimeout(700);
-await page.click('text=Filter Coffee');
-await page.waitForTimeout(1200);
+// — "Choose Takeaway or pick a table first". startOrder presses Takeaway
+// first for that reason; clicking the product without it leaves an empty cart
+// and every later step then hunts for a discount control on an order that
+// does not exist.
+await startOrder();
 await shot('05-till-with-item');
 
-await page.click('[aria-label="Edit order discount"]');
-await page.waitForTimeout(500);
+await openDiscountModal();
 await shot('06-till-ceiling-shown');
 
 const bodyE = await page.textContent('body');
@@ -257,10 +406,7 @@ ok('E2 and says the two discounts count together', /counting item and order disc
 // ---------------------------------------------------------------------------
 // F. ALLOWED — 10% is inside the limit and needs nobody
 // ---------------------------------------------------------------------------
-await page.click('button:has-text("% Percent")');
-await page.fill('#disc-value', '10');
-await page.click('button[type="submit"]:has-text("Apply discount")');
-await page.waitForTimeout(1200);
+await applyDiscount('PERCENT', 10);
 await shot('07-allowed-10pct');
 
 const afterAllowed = await page.textContent('body');
@@ -275,12 +421,7 @@ ok('F3 nobody was recorded as approving it', order?.discountApprovedById === nul
 // ---------------------------------------------------------------------------
 // G. ABOVE LIMIT — 11% is refused, and the refusal opens a prompt
 // ---------------------------------------------------------------------------
-await page.click('[aria-label="Edit order discount"]');
-await page.waitForTimeout(500);
-await page.click('button:has-text("% Percent")');
-await page.fill('#disc-value', '11');
-await page.click('button[type="submit"]:has-text("Apply discount")');
-await page.waitForTimeout(1500);
+await applyDiscount('PERCENT', 11);
 await shot('08-above-limit-prompt');
 
 const bodyG = await page.textContent('body');
@@ -296,11 +437,7 @@ ok('G4 the order is still at 10% while the prompt is open', Number(order?.discou
 // ---------------------------------------------------------------------------
 // H. CROSS BRANCH — a real manager, real password, wrong branch
 // ---------------------------------------------------------------------------
-await page.fill('#approver-email', 'mgr.f2@test.local');
-await page.fill('#approver-password', PW);
-await page.fill('#approver-reason', 'Regular customer, manager said ok');
-await page.click('button[type="submit"]:has-text("Approve")');
-await page.waitForTimeout(1500);
+await approveAs('mgr.f2@test.local', 'Regular customer, manager said ok');
 await shot('09-cross-branch-refused');
 
 const bodyH = await page.textContent('body');
@@ -317,11 +454,7 @@ ok('H4 and stamped nobody on it', order?.discountApprovedById === null);
 // ---------------------------------------------------------------------------
 // I. APPROVED — the manager of THIS branch, within their delegated 50%
 // ---------------------------------------------------------------------------
-await page.fill('#approver-email', 'mgr.f1@test.local');
-await page.fill('#approver-password', PW);
-await page.fill('#approver-reason', 'Spillage, comped by manager');
-await page.click('button[type="submit"]:has-text("Approve")');
-await page.waitForTimeout(2000);
+await approveAs('mgr.f1@test.local', 'Spillage, comped by manager');
 await shot('10-approved');
 
 const bodyI = await page.textContent('body');
@@ -358,6 +491,305 @@ ok(
   approved?.meta?.actorLimit?.maxPctMilli === 10000,
   `got ${JSON.stringify(approved?.meta?.actorLimit)}`,
 );
+
+// ---------------------------------------------------------------------------
+// Sections J onwards need several orders and several policy edits. The till
+// helpers they use are defined with the fixture at the top of the file; these
+// two are only wanted from here down.
+// ---------------------------------------------------------------------------
+
+// Signs out to the owner, edits one policy row on the settings screen, and
+// comes back as the cashier. Policy is changed through the SCREEN here, not
+// through prisma, because a policy the admin cannot actually type in is not a
+// policy the customer has.
+const ownerEdits = async (rowLabel, fn) => {
+  await logout();
+  await login('owner.f@test.local');
+  await page.goto(`${BASE}/discounts`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(700);
+  await page.click(`[aria-label="Edit ${rowLabel}"]`);
+  await page.waitForTimeout(500);
+  await fn();
+  await saveModal();
+  await logout();
+  await login('cashier.f1@test.local');
+};
+
+const lastRefusal = () =>
+  prisma.posAuditLog.findFirst({
+    where: { companyId: fox.id, action: 'ORDER_DISCOUNT_APPROVAL_FAILED' },
+    orderBy: { at: 'desc' },
+  });
+
+// ---------------------------------------------------------------------------
+// J. The approval does not come with the cashier to the next customer
+//
+// Section I ended with a manager standing at the till signing for 11%. The
+// question this answers is what the till does one customer later, once the
+// manager has walked away. Same cashier, same product, same 11%.
+// ---------------------------------------------------------------------------
+const orderJ = await startOrder();
+ok('J1 the next customer is a different order', !!orderJ && orderJ.id !== order.id);
+
+await applyDiscount('PERCENT', 11);
+await shot('11-second-order-asks-again');
+const bodyJ = await page.textContent('body');
+ok(
+  'J2 the same 11% on the next order asks for a manager all over again',
+  bodyJ.includes('A manager needs to approve this'),
+);
+const orderJafter = await prisma.order.findFirst({ where: { id: orderJ.id } });
+ok(
+  'J3 and nothing was carried over onto it',
+  orderJafter?.discountValue === null && orderJafter?.discountApprovedById === null,
+  `got value=${orderJafter?.discountValue} approver=${orderJafter?.discountApprovedById}`,
+);
+
+// ---------------------------------------------------------------------------
+// K. A manager may only sign for what THEY were delegated
+//
+// Manager F1's password is correct, they are at the right branch, and they are
+// permitted to approve discounts. They were given a 50% ceiling to approve
+// within. This is 60%.
+// ---------------------------------------------------------------------------
+await cancelPrompt();
+await applyDiscount('PERCENT', 60);
+await approveAs('mgr.f1@test.local', 'Signing for more than I was given');
+await shot('12-approver-over-own-ceiling');
+
+const bodyK = await page.textContent('body');
+ok(
+  'K1 a correct manager password does NOT lift a discount past that manager’s own ceiling',
+  bodyK.includes('A manager needs to approve this'),
+);
+ok(
+  'K2 and the refusal says what that manager may authorise',
+  /may authorise up to 50%/.test(bodyK),
+  bodyK.match(/That approver may authorise[^.]*/)?.[0] || 'no approver-ceiling sentence found',
+);
+const orderK = await prisma.order.findFirst({ where: { id: orderJ.id } });
+ok('K3 the bill is untouched', orderK?.discountValue === null, `got ${orderK?.discountValue}`);
+const refusalK = await lastRefusal();
+ok(
+  'K4 the audit calls it an over-limit approver, not a bad password',
+  refusalK?.meta?.refusal === 'APPROVER_OVER_LIMIT',
+  `got ${refusalK?.meta?.refusal}`,
+);
+
+// ---------------------------------------------------------------------------
+// L. …and exactly at the ceiling they may
+//
+// The boundary matters on its own: a limit that refuses the number it was set
+// to is a different rule from the one the admin typed.
+// ---------------------------------------------------------------------------
+await cancelPrompt();
+await applyDiscount('PERCENT', 50);
+await approveAs('mgr.f1@test.local', 'Exactly at my delegated ceiling');
+await shot('13-approver-at-ceiling');
+
+const bodyL = await page.textContent('body');
+ok('L1 a discount exactly at the manager’s 50% ceiling is accepted', !bodyL.includes('A manager needs to approve this'));
+const orderL = await prisma.order.findFirst({ where: { id: orderJ.id } });
+ok('L2 the 50% is on the bill', Number(orderL?.discountValue) === 50, `got ${orderL?.discountValue}`);
+ok('L3 stamped with the manager who signed', orderL?.discountApprovedById === mgrF1.id);
+
+// ---------------------------------------------------------------------------
+// M. A 100% discount — the whole bill — is refused until a policy allows it
+//
+// This is the one a customer asks about by name. The point of the section is
+// that the block is POLICY, not a special case hard-coded against the number
+// 100: the same 100% goes through once somebody with the authority to widen
+// the ceiling actually widens it.
+// ---------------------------------------------------------------------------
+const orderM = await startOrder();
+await applyDiscount('PERCENT', 100);
+await shot('14-hundred-percent-denied');
+
+const bodyM = await page.textContent('body');
+ok('M1 a cashier cannot zero a bill on their own say-so', bodyM.includes('A manager needs to approve this'));
+
+await approveAs('mgr.f1@test.local', 'Comping the whole bill');
+await shot('15-hundred-percent-approver-refused');
+const bodyM2 = await page.textContent('body');
+ok(
+  'M2 and a manager delegated 50% cannot sign for the whole bill either',
+  bodyM2.includes('A manager needs to approve this') && /may authorise up to 50%/.test(bodyM2),
+);
+const orderMmid = await prisma.order.findFirst({ where: { id: orderM.id } });
+ok('M3 the customer still owes the full amount', orderMmid?.discountValue === null);
+
+// Now the owner widens what Manager F1 may sign for, on the settings screen.
+await cancelPrompt();
+await ownerEdits('Manager F1', async () => {
+  await setNum('max-appr-pct', 100);
+});
+
+const orderM2 = await startOrder();
+await applyDiscount('PERCENT', 100);
+await approveAs('mgr.f1@test.local', 'Comped in full, manager authorised');
+await shot('16-hundred-percent-allowed-by-policy');
+
+const bodyM3 = await page.textContent('body');
+ok('M4 once the policy allows it, the same 100% is approved', !bodyM3.includes('A manager needs to approve this'));
+const orderM2after = await prisma.order.findFirst({ where: { id: orderM2.id } });
+ok('M5 and the whole bill comes off', Number(orderM2after?.discountValue) === 100, `got ${orderM2after?.discountValue}`);
+ok(
+  'M6 the discount equals the subtotal, so nothing is left to pay',
+  Number(orderM2after?.discountAmount) === Number(orderM2after?.subtotal),
+  `discount=${orderM2after?.discountAmount} subtotal=${orderM2after?.subtotal}`,
+);
+
+// ---------------------------------------------------------------------------
+// N. The rupee ceiling is a separate limit, not a restatement of the percentage
+//
+// The company keeps its 10% but also caps any discount at ₹40. One coffee is
+// ₹500, so 10% is ₹50 — inside the percentage and outside the cash cap. If the
+// two ceilings were really one number, this discount would go through.
+// ---------------------------------------------------------------------------
+await ownerEdits('Everyone, unless overridden below', async () => {
+  await setNum('max-flat', 40);
+});
+
+const orderN = await startOrder();
+await openDiscountModal();
+const bodyN = await page.textContent('body');
+ok(
+  'N1 the till states both halves of the ceiling',
+  /Your limit is 10% or ₹40\.00, whichever is lower/.test(bodyN),
+  bodyN.match(/Your limit is[^,]*,[^,]*/)?.[0] || 'no combined ceiling sentence',
+);
+
+await applyDiscount('PERCENT', 10);
+await shot('17-flat-cap-refuses-an-in-percentage-discount');
+const bodyN2 = await page.textContent('body');
+ok(
+  'N2 a 10% discount is refused because ₹50 is over the ₹40 cash cap',
+  bodyN2.includes('A manager needs to approve this') && /Your limit is ₹40\.00/.test(bodyN2),
+  bodyN2.match(/That takes the total discount to[^.]*\.[^.]*\./)?.[0] || 'no flat-breach sentence',
+);
+const orderNmid = await prisma.order.findFirst({ where: { id: orderN.id } });
+ok('N3 nothing came off while it was refused', orderNmid?.discountValue === null);
+
+await cancelPrompt();
+await applyDiscount('FLAT', 40);
+await shot('18-flat-cap-allows-forty');
+const bodyN3 = await page.textContent('body');
+ok('N4 ₹40 exactly is inside the cap and needs nobody', !bodyN3.includes('A manager needs to approve this'));
+const orderNafter = await prisma.order.findFirst({ where: { id: orderN.id } });
+ok(
+  'N5 stored as a ₹40 flat discount with no approver',
+  orderNafter?.discountType === 'FLAT' &&
+    Number(orderNafter?.discountValue) === 40 &&
+    orderNafter?.discountApprovedById === null,
+  `type=${orderNafter?.discountType} value=${orderNafter?.discountValue}`,
+);
+
+// ---------------------------------------------------------------------------
+// O. Shrinking the bill re-opens a discount that was already allowed
+//
+// The exposure test the whole guard exists for. A ₹60 discount on a ₹620 bill
+// is 9.7% and needs nobody. Take the ₹120 chai back off the order and the same
+// untouched ₹60 becomes 12% of what is left — over the cashier's 10% — without
+// anybody going near the discount field. The request that has to be refused is
+// a line DELETE, which never mentions a discount at all.
+// ---------------------------------------------------------------------------
+await ownerEdits('Everyone, unless overridden below', async () => {
+  await setNum('max-flat', null);
+});
+
+const orderO = await startOrder(['Filter Coffee', 'Masala Chai']);
+await applyDiscount('FLAT', 60);
+const bodyO = await page.textContent('body');
+ok('O1 ₹60 off a ₹620 bill is 9.7% and is allowed outright', !bodyO.includes('A manager needs to approve this'));
+const orderOmid = await prisma.order.findFirst({ where: { id: orderO.id } });
+ok('O2 the ₹60 is on the bill, unapproved', Number(orderOmid?.discountValue) === 60 && orderOmid?.discountApprovedById === null);
+
+await page.click('li:has-text("Masala Chai") [aria-label="Remove line"]');
+await page.waitForTimeout(1800);
+await shot('19-removing-a-line-reopens-approval');
+
+const bodyO2 = await page.textContent('body');
+ok(
+  'O3 removing a line asks for approval, though the request names no discount',
+  bodyO2.includes('A manager needs to approve this'),
+);
+const itemsStill = await prisma.orderItem.count({ where: { orderId: orderO.id, status: 'ACTIVE' } });
+ok('O4 and the line is still on the order while it is unapproved', itemsStill === 2, `got ${itemsStill} active lines`);
+
+await approveAs('mgr.f1@test.local', 'Customer changed their mind about the chai');
+await page.waitForTimeout(800);
+await shot('20-line-removed-once-approved');
+
+const bodyO3 = await page.textContent('body');
+ok('O5 the manager’s signature lets the removal through', !bodyO3.includes('A manager needs to approve this'));
+const itemsAfter = await prisma.orderItem.count({ where: { orderId: orderO.id, status: 'ACTIVE' } });
+const orderOafter = await prisma.order.findFirst({ where: { id: orderO.id } });
+ok('O6 the line is gone', itemsAfter === 1, `got ${itemsAfter} active lines`);
+ok(
+  'O7 the ₹60 survived the change and is now stamped with the approver',
+  Number(orderOafter?.discountValue) === 60 && orderOafter?.discountApprovedById === mgrF1.id,
+  `value=${orderOafter?.discountValue} approver=${orderOafter?.discountApprovedById}`,
+);
+
+// ---------------------------------------------------------------------------
+// P. Pressing it twice, and reloading, does not take the money off twice
+// ---------------------------------------------------------------------------
+const orderP = await startOrder();
+await applyDiscount('PERCENT', 5);
+const ordersBefore = await prisma.order.count({ where: { companyId: fox.id } });
+const orderPonce = await prisma.order.findFirst({ where: { id: orderP.id } });
+
+await applyDiscount('PERCENT', 5);
+await shot('21-same-discount-applied-twice');
+const orderPtwice = await prisma.order.findFirst({ where: { id: orderP.id } });
+ok(
+  'P1 applying the same 5% again does not compound it',
+  Number(orderPtwice?.discountValue) === 5 &&
+    Number(orderPtwice?.discountAmount) === Number(orderPonce?.discountAmount),
+  `value=${orderPtwice?.discountValue} amount=${orderPtwice?.discountAmount} was ${orderPonce?.discountAmount}`,
+);
+ok('P2 and stamps nobody on a discount that needed nobody', orderPtwice?.discountApprovedById === null);
+
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForTimeout(1200);
+const ordersAfter = await prisma.order.count({ where: { companyId: fox.id } });
+const orderPreload = await prisma.order.findFirst({ where: { id: orderP.id } });
+ok('P3 a reload does not open a second order', ordersAfter === ordersBefore, `${ordersBefore} -> ${ordersAfter}`);
+ok(
+  'P4 and the bill still carries exactly the one ₹ discount it had',
+  Number(orderPreload?.discountAmount) === Number(orderPonce?.discountAmount),
+  `got ${orderPreload?.discountAmount}`,
+);
+
+// ---------------------------------------------------------------------------
+// Q. The password went through the form many times. It is nowhere.
+//
+// Both halves of this are swept with a POSITIVE CONTROL beside them, because
+// "the string is absent" is also what you get from an empty table, a log that
+// was never written, and a typo in the search.
+// ---------------------------------------------------------------------------
+const allAudit = await prisma.posAuditLog.findMany({ where: { companyId: fox.id } });
+const auditText = JSON.stringify(allAudit);
+ok('Q1 the run left a dense audit trail to search', allAudit.length > 15, `${allAudit.length} rows`);
+ok(
+  'Q2 the trail names approvers, so the sweep is looking at real approval rows',
+  auditText.includes('mgr.f1@test.local'),
+);
+ok('Q3 and no audit row anywhere contains the password', !auditText.includes(PW));
+
+const LOG = process.env.BACKEND_LOG;
+if (!LOG) {
+  console.log('SKIP Q4/Q5 server-log sweep — set BACKEND_LOG to the API log file');
+} else {
+  let logText = '';
+  try {
+    logText = readFileSync(LOG, 'utf8');
+  } catch {
+    logText = '';
+  }
+  ok('Q4 the server log was written and is readable', logText.length > 500, `${logText.length} bytes from ${LOG}`);
+  ok('Q5 and the password appears nowhere in it', logText.length > 0 && !logText.includes(PW));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 console.log(`screenshots: ${OUT}`);
