@@ -1,66 +1,61 @@
-# v1.0.1 production deploy — single owner
+# v1.0.1 production deploy — WITHDRAWN, see `DEPLOY-OWNER.md`
 
-Same job as `GATEWAY-TESTING-OWNER.md` and `UAT-TILL-RESERVATION.md`, for the
-third piece of shared mutable state: the `pos-prod` stack itself. It is in the
-repo so every session sees it without being told to look.
+**This claim is withdrawn.** Session `bc4e7056` claimed the v1.0.1 deploy at
+2026-09-23 06:24:21Z and released it at 06:26Z, unexecuted. Nothing was built,
+tagged, migrated or deployed under it.
 
-**Owner of the v1.0.1 deploy: session `bc4e7056`, from 2026-09-23 06:25Z.**
+**The owner is session `896234f0`, from 06:20Z — four minutes earlier.** Read
+`DEPLOY-OWNER.md`; this file is only here so the collision is on the record.
 
-## Why this file exists
+## How two sessions both claimed it
 
-More than one session has been told it owns this release. "I was told I own
-it" is not evidence — so the tiebreak has to be something a peer can read.
+Ordinary race, worth writing down because the convention is supposed to stop
+exactly this and nearly didn't:
 
-A deploy is not like a lane: two sessions cannot each do half of it and merge
-the halves. `docker compose build` moves `:latest`, `up -d` replaces running
-containers, and the backend applies migrations on boot. Two deploys overlapping
-produce a stack whose code, images and schema came from different candidates,
-and no artefact afterwards records which. The rollback anchors are the part
-that actually breaks: if a second session builds while the first is mid-deploy,
-the first session's "previous image" tag now points at an image that was never
-running, and the rollback path silently stops being a rollback.
-
-## What was checked before claiming it
-
-Taken 2026-09-23 06:22–06:25Z, before anything was written or built:
-
-| Signal | Reading |
+| Time (Z) | Event |
 |---|---|
-| `phase2-release-v1.0.1` head | `f841ca2`, committed 05:42:50Z |
-| reflog on that branch | branch created 05:37:11Z from `c793fe3`, two merges, one test commit — then nothing |
-| `release-v101` worktree | `git status --short` empty; no work in flight |
-| build / deploy / migrate processes | none. The only `prisma migrate deploy` matches are the three backend containers' own `sh -c` entrypoints |
-| `pos-prod` containers | all three created 04:01Z and still `Up (healthy)` — **no deploy has run**, the candidate has never been shipped |
+| 06:20 | `896234f0` claims the deploy |
+| 06:21:51 | `bc4e7056` reads the branch — head is `f841ca2`, no owner file exists yet |
+| 06:22:46 | `896234f0`'s claim lands as `7bf459e` |
+| 06:23:15 | `896234f0` merges `phase2-integration` as `7f3d22e` |
+| 06:24:21 | `bc4e7056` commits its own claim as `5078fe0`, on top, still unaware |
+| 06:24:42 | `bc4e7056` reads `DEPLOY-OWNER.md` and stands down |
 
-So the peer that assembled the candidate finished assembling it and stopped;
-it did not go on to deploy. Claimed rather than contested — but if that session
-is still live and disagrees, this file is the place to say so, and the deploy
-is reversible from the anchors recorded in `docs/DEPLOY-PHASE2.md §7`.
+The claim was made *before* the file existed and committed *after* it did. A
+read of the branch is a snapshot, not a lock, and a 90-second gap between
+deciding and committing was enough. The lesson is not "check harder" — it is
+that the check and the claim have to be the same operation, or a re-read
+immediately before the first mutating step has to be part of the procedure.
 
-## What this owner is doing
+What made this cheap rather than expensive: the claim was the first thing
+either session wrote, and a docs commit is not a deploy. Had the order been
+"tag the images, then claim", two sessions would have retagged the same
+rollback anchors four minutes apart and neither tag would name what was
+running. Claim first.
 
-Deploying `phase2-release-v1.0.1` to `pos-prod` with Razorpay left disabled:
-image rollback anchors → verified DB backup and restore drill → migration gate
-→ build and `up -d` → verify both fixes on the running build **by content**,
-because a `--build` can ship a cached bundle that looks identical from outside.
+## What `bc4e7056` did NOT do
 
-The two fixes this release exists for:
+No production mutation of any kind. Specifically: no image retag, no
+`docker compose build` / `up` / `restart`, no `pg_dump`, no `prisma migrate
+deploy`, no DDL, and no write to `atc_pos` by any route. `pos-prod` containers
+are still the 04:01Z set and image tags are unchanged from 02:22Z.
 
-- `7cc7896` — one receipt per print, not one per page of the screen behind it.
-- `3ecfa29` — a retried **partial** payment must not collect the bill twice.
+The deploy tree `/home/atc-noc/atc-pos` was left where it was found:
+`phase2-gateway` at `d899cc6`, working tree clean. It was never detached.
 
-## What it is NOT doing
+## What is handed over
 
-- Not tagging `vexo-connect-core-v1.0`. Hardware acceptance is still pending
-  and the final tag waits for a hardware PASS.
-- Not enabling Razorpay, and not consuming `pay_Tf4bqZCtM4GOU2`.
-- Not writing to `BSC-CH` — its closing for 2026-09-23 is filed, see
-  `UAT-TILL-RESERVATION.md`.
-- Not claiming anything about physical printing. Paper, 58 mm and every
-  hardware capability stay **NOT TESTED** until a printer is attached.
+`896234f0` has the deploy. The hardware-UAT lane (`phase2-hardware-uat`,
+`0688f65`) holds two things it may want after v1.0.1 is up:
 
-## Releasing it
+- `docs/UAT-HARDWARE-RUNBOOK.md` §0.1 — the STOP block naming both fixes as
+  undeployed. **It needs updating once v1.0.1 ships**; its evidence lines are
+  content checks that will flip.
+- `deploy/uat-catalog-prep.mjs` — archives the two remaining `UAT Filter
+  Coffee` products through the audited catalog API and creates the long-name
+  demo product for the print wrap test. Written, syntax-checked, **never run**.
+  It needs the demo owner's password, so it is the operator's to run, and it
+  should run against the deployed v1.0.1 rather than this build.
 
-Replace the owner line with **RELEASED**, the timestamp, and the deployed
-commit. Leave the rest: the next session needs to know what shipped and what
-the rollback anchors are, not that a file once existed.
+Physical printing, paper width and 58 mm remain **NOT TESTED** either way. No
+printer is attached, and nothing in this release changes that.
