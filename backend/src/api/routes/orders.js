@@ -831,6 +831,13 @@ router.post(
         amount: money2.optional(),
         tendered: money2.optional(),
         note: z.string().trim().max(200).optional(),
+        // One tender, one key, however many retries the network forces. See the
+        // column comment on Payment.idempotencyKey: without it a retried PARTIAL
+        // payment is collected twice, because the guards below only catch the
+        // full-amount case. Optional, so an older till or an existing script
+        // still works — but a caller that omits it is not protected, which is
+        // why the browser always sends one.
+        idempotencyKey: z.string().trim().min(8).max(64).optional(),
       })
       .parse(req.body);
     if (body.method === 'CASH') {
@@ -853,6 +860,51 @@ router.post(
       // status and due-amount checks below are the guard; they are worth
       // nothing unless the row is held while they are made.
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
+      // Replay check, and it has to be here: inside the lock, so a concurrent
+      // duplicate waits and then sees the first row rather than racing it, and
+      // ahead of every guard below, because a retried FULL payment leaves the
+      // order PAID and would otherwise be refused with "Order is already paid
+      // in full" — a refusal that is true but useless. The cashier asked "did
+      // my payment land?", and the answer is the payment itself.
+      //
+      // This is the half the status guards never covered. They refuse a repeat
+      // only once the order is fully collected, so a double-click on a full
+      // tender is caught by accident; a retried PARTIAL payment sails straight
+      // past them and is written twice. Proven on the deployed build against
+      // BSC-CP/26-27/00011: one ₹47.25 card swipe, two payment rows, the order
+      // marked PAID, and the drawer ₹47.25 short at day close with nothing on
+      // screen to say so.
+      if (body.idempotencyKey) {
+        const prior = await tx.payment.findUnique({
+          where: {
+            orderId_idempotencyKey: { orderId: order.id, idempotencyKey: body.idempotencyKey },
+          },
+          include: { receivedBy: { select: { id: true, fullName: true } } },
+        });
+        if (prior) {
+          // Same key, different money. The caller reused a key across two
+          // genuinely different tenders — a till that regenerates on the wrong
+          // event, a cloned device — and handing back the first row would
+          // report a payment that was never taken while silently dropping one
+          // that was. Refuse loudly instead: a replay is only a replay if it
+          // is identical.
+          const wanted =
+            body.tendered !== undefined ? toPaise(body.tendered) : toPaise(body.amount);
+          const had = prior.tendered === null ? paiseOf(prior.amount) : paiseOf(prior.tendered);
+          if (prior.method !== body.method || wanted !== had) {
+            throw conflict('This idempotency key was already used for a different payment');
+          }
+          return {
+            payment: prior,
+            replayed: true,
+            changeDue:
+              prior.tendered === null
+                ? null
+                : toRupees(paiseOf(prior.tendered) - paiseOf(prior.amount)),
+          };
+        }
+      }
 
       const cur = await tx.order.findUnique({
         where: { id: order.id },
@@ -888,6 +940,10 @@ router.post(
           amount: (applied / 100).toFixed(2),
           tendered: tendered === null ? null : (tendered / 100).toFixed(2),
           note: body.note ?? null,
+          // Stored in the same statement that takes the money, so the row and
+          // the thing that identifies it can never disagree. Null when the
+          // caller sent none, which the unique index permits any number of.
+          idempotencyKey: body.idempotencyKey ?? null,
           receivedById: req.user.id,
         },
         include: { receivedBy: { select: { id: true, fullName: true } } },
@@ -898,20 +954,35 @@ router.post(
           data: { status: 'PAID', closedAt: new Date() },
         });
       }
-      return { payment, changeDue: tendered === null ? null : toRupees(tendered - applied) };
+      return {
+        payment,
+        replayed: false,
+        changeDue: tendered === null ? null : toRupees(tendered - applied),
+      };
     });
 
+    // A replay collected nothing, so it must not be audited as a collection.
+    // ORDER_PAYMENT rows carry an amount and get summed; emitting one per
+    // retry would rebuild, in the audit trail, exactly the double-count the
+    // key just prevented. It still gets a row of its own — a till retrying is
+    // worth seeing — with no amount to add up.
     await audit(req, {
-      action: 'ORDER_PAYMENT',
+      action: result.replayed ? 'ORDER_PAYMENT_REPLAY' : 'ORDER_PAYMENT',
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { method: body.method, amount: String(result.payment.amount), channel: 'MANUAL' },
+      meta: result.replayed
+        ? { paymentId: result.payment.id, channel: 'MANUAL' }
+        : { method: body.method, amount: String(result.payment.amount), channel: 'MANUAL' },
     });
-    res.status(201).json({
+    // 200, not 201: a replay created nothing. The body is otherwise identical
+    // so a till that retries blind still renders the right receipt, and
+    // `replayed` lets one that cares tell the difference.
+    res.status(result.replayed ? 200 : 201).json({
       order: await fullOrder(order.id),
       payment: publicPayment(result.payment),
       changeDue: result.changeDue,
+      replayed: result.replayed,
     });
   }),
 );

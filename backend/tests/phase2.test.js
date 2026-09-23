@@ -608,6 +608,255 @@ describe('transitions, refunds and voids', () => {
     const after = await prisma.order.findUnique({ where: { id: o.id } });
     expect(after.status).toBe('PAID');
   });
+
+  // The till retries a payment whose response never arrived. The request
+  // reached the server and was committed; only the answer was lost, so the
+  // cashier is looking at an error for money that has already been taken and
+  // the only sane thing they can do is press the button again.
+  //
+  // Found in a browser against the deployed build, not reasoned about: on
+  // BSC-CP/26-27/00011 a ₹47.25 card payment was committed, its response
+  // dropped, the payment retried, and the ₹94.50 bill came out PAID on two
+  // ₹47.25 rows 1.2 s apart. The drawer is short by a full tender at day
+  // close and nothing on any screen says why.
+  describe('a retried payment collects once', () => {
+    const half = (total) => Math.round(total * 50) / 100;
+    const pay = (orderId, body) =>
+      request(app).post(`/api/orders/${orderId}/payments`).set(auth(tokens.cashierA1)).send(body);
+
+    // NEGATIVE CONTROL. Everything below passes trivially if the route simply
+    // stopped accepting second payments, so this proves the opposite first:
+    // with no key the double-collection is still reachable, exactly as it was
+    // before the fix. If someone later makes partial payments unrepeatable
+    // for an unrelated reason, this test goes red and says so, rather than
+    // letting the rest of the block claim credit for a guard it did not add.
+    it('CONTROL: without a key the same partial payment is still taken twice', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const part = half(total);
+
+      const first = await pay(o.id, { method: 'CARD', amount: part });
+      const second = await pay(o.id, { method: 'CARD', amount: part });
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+
+      const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+      expect(rows.length, 'the unprotected path still double-collects').toBe(2);
+      expect(rows.reduce((s, p) => s + Number(p.amount), 0)).toBeCloseTo(total, 2);
+    });
+
+    it('with a key the retry returns the first payment and takes nothing more', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const part = half(total);
+      const key = 'retry-partial-0001';
+
+      const first = await pay(o.id, { method: 'CARD', amount: part, idempotencyKey: key });
+      expect(first.status).toBe(201);
+      expect(first.body.replayed).toBe(false);
+
+      const retry = await pay(o.id, { method: 'CARD', amount: part, idempotencyKey: key });
+      // 200, not 201: nothing was created. The body is still a whole payment
+      // so a till that retries blind renders the same receipt either way.
+      expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+      expect(retry.body.replayed).toBe(true);
+      expect(retry.body.payment.id).toBe(first.body.payment.id);
+
+      const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+      expect(rows.length, 'one tender, one row').toBe(1);
+      expect(Number(rows[0].amount)).toBeCloseTo(part, 2);
+      // Still BILLED with the other half outstanding — the retry must not
+      // have closed the order either.
+      const after = await prisma.order.findUnique({ where: { id: o.id } });
+      expect(after.status).toBe('BILLED');
+    });
+
+    // The full-amount case was already covered, by accident, by the PAID
+    // guard — but it answered 409 "already paid in full", which tells a
+    // cashier that something is wrong when in fact their payment worked.
+    // With a key the honest answer is the payment itself.
+    it('a retried FULL payment answers with the payment, not a 409', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const key = 'retry-full-0001';
+
+      const first = await pay(o.id, { method: 'CARD', amount: total, idempotencyKey: key });
+      expect(first.status).toBe(201);
+      const retry = await pay(o.id, { method: 'CARD', amount: total, idempotencyKey: key });
+      expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+      expect(retry.body.payment.id).toBe(first.body.payment.id);
+      expect(retry.body.order.status).toBe('PAID');
+
+      expect((await prisma.payment.findMany({ where: { orderId: o.id } })).length).toBe(1);
+    });
+
+    // A double-click sends both requests before either answers, so the replay
+    // lookup has to happen under the same row lock as the insert. If it were
+    // outside, both would look, both would miss, and both would write.
+    it('two simultaneous requests with one key produce one payment', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const part = half(total);
+      const key = 'retry-concurrent-0001';
+      const body = { method: 'UPI', amount: part, idempotencyKey: key };
+
+      const [a, b] = await Promise.all([pay(o.id, body), pay(o.id, body)]);
+      const statuses = [a.status, b.status].sort();
+      expect(statuses, `${a.status}/${b.status}`).toEqual([200, 201]);
+      expect(a.body.payment.id).toBe(b.body.payment.id);
+
+      const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+      expect(rows.length).toBe(1);
+      expect(Number(rows[0].amount)).toBeCloseTo(part, 2);
+    });
+
+    // The regression this fix could most easily cause, and the one that would
+    // cost the café real money: an evenly split bill is two different tenders
+    // with identical fields. They must both be collected, so the key has to
+    // be per tender and not per order — which is why the Sell screen rolls it
+    // in startAnother rather than only when the dialog opens.
+    it('an even split under two keys is still two payments', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const part = half(total);
+      const rest = Math.round((total - part) * 100) / 100;
+
+      const a = await pay(o.id, { method: 'CASH', amount: part, idempotencyKey: 'split-guest-a' });
+      const b = await pay(o.id, { method: 'CASH', amount: rest, idempotencyKey: 'split-guest-b' });
+      expect(a.status).toBe(201);
+      expect(b.status, JSON.stringify(b.body)).toBe(201);
+      expect(a.body.payment.id).not.toBe(b.body.payment.id);
+
+      const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+      expect(rows.length).toBe(2);
+      expect(rows.reduce((s, p) => s + Number(p.amount), 0)).toBeCloseTo(total, 2);
+      expect((await prisma.order.findUnique({ where: { id: o.id } })).status).toBe('PAID');
+    });
+
+    // Reusing a key for a genuinely different tender is a fault in the
+    // caller. Answering with the first payment would report money that was
+    // never taken and silently drop money that was, so it is refused instead.
+    it('the same key for a different amount is refused, and the first payment stands', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const part = half(total);
+      const key = 'reused-key-0001';
+
+      const first = await pay(o.id, { method: 'CARD', amount: part, idempotencyKey: key });
+      expect(first.status).toBe(201);
+
+      const wrong = await pay(o.id, { method: 'CARD', amount: total, idempotencyKey: key });
+      expect(wrong.status).toBe(409);
+      expect(wrong.body.error.message).toMatch(/already used for a different payment/i);
+
+      const method = await pay(o.id, { method: 'UPI', amount: part, idempotencyKey: key });
+      expect(method.status).toBe(409);
+
+      const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+      expect(rows.length, 'the refusals wrote nothing').toBe(1);
+      expect(rows[0].id).toBe(first.body.payment.id);
+    });
+
+    // Change is derived from the stored row, so a replay has to quote the
+    // same figure. A cashier who retries after a lost response is standing at
+    // an open drawer; a second, different number is the one thing that must
+    // not happen.
+    it('a replayed CASH payment reports the same change due', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const tendered = Math.ceil(total / 100) * 100 || 100;
+      const key = 'retry-cash-0001';
+
+      const first = await pay(o.id, { method: 'CASH', tendered, idempotencyKey: key });
+      expect(first.status).toBe(201);
+      expect(first.body.changeDue).toBeCloseTo(tendered - total, 2);
+
+      const retry = await pay(o.id, { method: 'CASH', tendered, idempotencyKey: key });
+      expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+      expect(retry.body.changeDue).toBeCloseTo(first.body.changeDue, 2);
+      expect(retry.body.payment.tendered).toBeCloseTo(tendered, 2);
+
+      expect((await prisma.payment.findMany({ where: { orderId: o.id } })).length).toBe(1);
+    });
+
+    // One key, two bills. Scoping the uniqueness to the order is what keeps a
+    // till that reuses keys — a reset clock, a cloned device image — from
+    // suppressing a real payment on somebody else's tab.
+    it('the same key on a different order is a different payment', async () => {
+      const o1 = await takeaway();
+      const t1 = Number((await bill(o1.id)).total);
+      const o2 = await takeaway();
+      const t2 = Number((await bill(o2.id)).total);
+      const key = 'shared-key-across-orders';
+
+      const a = await pay(o1.id, { method: 'CARD', amount: t1, idempotencyKey: key });
+      const b = await pay(o2.id, { method: 'CARD', amount: t2, idempotencyKey: key });
+      expect(a.status).toBe(201);
+      expect(b.status, JSON.stringify(b.body)).toBe(201);
+      expect(a.body.payment.id).not.toBe(b.body.payment.id);
+      expect((await prisma.payment.findMany({ where: { orderId: o2.id } })).length).toBe(1);
+    });
+
+    // A replay collected nothing, so it must not leave a row that a report
+    // would add up as a collection. The retry is still recorded — a till
+    // retrying is worth seeing — under an action of its own.
+    it('a replay is audited as a replay, not as a second collection', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const key = 'retry-audit-0001';
+      await pay(o.id, { method: 'CARD', amount: total, idempotencyKey: key });
+      await pay(o.id, { method: 'CARD', amount: total, idempotencyKey: key });
+
+      const logs = await prisma.posAuditLog.findMany({
+        where: { entityId: o.id, action: { in: ['ORDER_PAYMENT', 'ORDER_PAYMENT_REPLAY'] } },
+      });
+      const collected = logs.filter((l) => l.action === 'ORDER_PAYMENT');
+      const replays = logs.filter((l) => l.action === 'ORDER_PAYMENT_REPLAY');
+      expect(collected.length, 'one collection audited').toBe(1);
+      expect(replays.length, 'the retry is visible').toBe(1);
+      expect(replays[0].meta.amount, 'a replay carries no amount to sum').toBeUndefined();
+    });
+
+    // The route's replay lookup is what makes a retry pleasant. This is what
+    // makes it safe: the database refuses the second row outright, so a bug
+    // in that lookup costs the cashier an error message, not the customer a
+    // second charge. Verified by disabling the lookup and re-running this
+    // block — the partial retry came back 500 with one row in the table
+    // instead of 201 with two — and asserted here so the backstop cannot be
+    // dropped by a later schema edit without something going red.
+    it('the database itself refuses a second row under one key', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const first = await pay(o.id, {
+        method: 'CARD',
+        amount: half(total),
+        idempotencyKey: 'db-backstop-0001',
+      });
+      expect(first.status).toBe(201);
+
+      await expect(
+        prisma.payment.create({
+          data: {
+            orderId: o.id,
+            method: 'CARD',
+            amount: '1.00',
+            idempotencyKey: 'db-backstop-0001',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      // …while NULL keys stay exempt, which is what lets every pre-existing
+      // row and every gateway payment go on coexisting.
+      const a = await prisma.payment.create({
+        data: { orderId: o.id, method: 'CASH', amount: '1.00' },
+      });
+      const b = await prisma.payment.create({
+        data: { orderId: o.id, method: 'CASH', amount: '1.00' },
+      });
+      expect(a.idempotencyKey).toBeNull();
+      expect(b.idempotencyKey).toBeNull();
+    });
+  });
 });
 
 describe('order isolation and ATC read-only', () => {
