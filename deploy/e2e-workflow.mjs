@@ -294,10 +294,18 @@ check('PAY-4', 'payment', 'order A holds exactly two payment rows after four sen
 // session's pushes still reach it.
 const displayCash = await login(cpCash.email, cpCash.password);
 const mint = await api(displayCash.token, 'POST', '/display/pair-code', {});
+// VC-101 can be dropped from a release by reverting its merge. Then the route
+// is simply not mounted, and its checks are skipped and SAID so — never
+// silently passed, never counted as failures of the Core flow.
+const displayOn = mint.status !== 404;
+let displayToken = null;
+if (!displayOn) {
+  observe('OBS-4', 'The customer display (VC-101) is not in this build — display checks skipped', say(mint));
+} else {
 check('DSP-1', 'customer display', 'a cashier mints a 6-digit pairing code',
   mint.status === 201 && /^\d{6}$/.test(mint.body?.code ?? ''), say(mint));
 const paired = await api(null, 'POST', '/display/pair', { code: mint.body.code });
-const displayToken = paired.body?.displayToken;
+displayToken = paired.body?.displayToken;
 check('DSP-2', 'customer display', 'the display redeems it without any staff credential',
   paired.status === 201 && Boolean(displayToken), say(paired));
 const replayCode = await api(null, 'POST', '/display/pair', { code: mint.body.code });
@@ -328,6 +336,7 @@ if (early.status === 201) {
   check('ISO-9', 'branch isolation', "a cashier cannot point their display at another branch's bill",
     crossBranch.status === 403, say(crossBranch));
 }
+}
 
 const reused = await pay(cpCash.token, { method: 'CARD', amount: rupees(half + 1), idempotencyKey: K1 });
 check('PAY-5', 'payment', 'a key reused for a different amount is refused, not replayed',
@@ -343,16 +352,18 @@ check('PAY-6', 'payment', `cash settles the ₹${rupees(dueA).toFixed(2)} still 
   cash.status === 201 && cash.body.order.status === 'PAID' && paise(cash.body.changeDue) === tendered - dueA,
   `${say(cash)} change ${cash.body?.changeDue}`);
 
-const thanks = await api(displayToken, 'GET', '/display/state');
-const afterThanks = await api(displayToken, 'GET', '/display/state');
-check('DSP-7', 'customer display', 'once paid, the display thanks the customer with the total, then goes idle',
-  thanks.body?.view === 'THANKYOU' && paise(thanks.body.total) === totalA && afterThanks.body?.view === 'IDLE',
-  `${thanks.body?.view} ${thanks.body?.total} → ${afterThanks.body?.view}`);
+if (displayOn) {
+  const thanks = await api(displayToken, 'GET', '/display/state');
+  const afterThanks = await api(displayToken, 'GET', '/display/state');
+  check('DSP-7', 'customer display', 'once paid, the display thanks the customer with the total, then goes idle',
+    thanks.body?.view === 'THANKYOU' && paise(thanks.body.total) === totalA && afterThanks.body?.view === 'IDLE',
+    `${thanks.body?.view} ${thanks.body?.total} → ${afterThanks.body?.view}`);
 
-must(await api(displayCash.token, 'POST', '/auth/logout'), 'sign out the display session');
-const afterLogout = await api(displayToken, 'GET', '/display/state');
-check('DSP-8', 'customer display', "signing out the cashier who paired it ends the display",
-  afterLogout.status === 401, say(afterLogout));
+  must(await api(displayCash.token, 'POST', '/auth/logout'), 'sign out the display session');
+  const afterLogout = await api(displayToken, 'GET', '/display/state');
+  check('DSP-8', 'customer display', "signing out the cashier who paired it ends the display",
+    afterLogout.status === 401, say(afterLogout));
+}
 
 // The drawer, as a person standing at it would count it.
 let drawerPaise = dueA;
