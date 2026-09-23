@@ -198,7 +198,13 @@ const closeAnyModal = closeModal;
 // A fresh order. "New sale" only clears the till's idea of the current order,
 // so the next Takeaway + product opens a genuinely new row — which is what the
 // replay cases need.
+const newestOrder = async () => prisma.order.findFirst({ orderBy: { createdAt: 'desc' } });
+
 const startOrder = async (items = 1) => {
+  // Which bill was the newest BEFORE this call, so we can tell the one this
+  // call creates from the one the last scenario left behind.
+  const previousId = (await newestOrder())?.id ?? null;
+
   await page.goto(`${BASE}/sell`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(900);
   const ns = page.locator('button:has-text("New sale")');
@@ -209,7 +215,19 @@ const startOrder = async (items = 1) => {
     await page.click('text=Filter Coffee');
     await page.waitForTimeout(800);
   }
-  await page.waitForTimeout(400);
+
+  // The POST that actually creates the order is fired by the first item click,
+  // and the waits above are guesses. Wait for the row instead of guessing: on
+  // a loaded machine the insert lands after them, every `latestOrder()` in the
+  // scenario that follows then reads the PREVIOUS bill, and the assertion
+  // fails for a reason that has nothing to do with discounts. That is exactly
+  // how R8 once failed while the database plainly showed the right answer.
+  for (let i = 0; i < 25; i += 1) {
+    const current = await newestOrder();
+    if (current && current.id !== previousId) return current;
+    await page.waitForTimeout(300);
+  }
+  throw new Error('startOrder: no new order appeared within 7.5s of adding the first item');
 };
 
 const openDiscount = async () => {
