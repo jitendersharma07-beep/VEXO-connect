@@ -22,7 +22,7 @@ code changes to verified areas; documentation only after the freeze.
 | | |
 |---|---|
 | Branch | `sprint/client-handover-rc` — lab `vexo-lab`, `~/atc-pos` |
-| **Code-final** | **`a1e5228`** (`a1e5228ab4de23188e1b604fa484f45235bd5234`). Everything after it is `docs/` only — check with `git diff --name-only a1e5228 HEAD`. |
+| **Code-final** | **`114ffc9`** (`114ffc9d592022132579d4264b87048f1778bfd8`). Everything after it is `docs/` only — check with `git diff --name-only 114ffc9 HEAD`. Moved on 2026-09-23 from `a1e5228`, whose only code successor is a one-line day-close fix in `frontend/src/pages/DayClose.jsx`. |
 | Tip at time of writing | `5659243` (docs). The **release-final sha is stamped at the freeze**, after the last documentation commits land; it is not known yet and is not invented here. |
 | Package for the deployment owner | `/home/atc-noc/pos-rc-v1.1-rc1-20260923/` — bundle, `RELEASE-V1.1-RC.md`, `CLIENT-HANDOVER-SCOPE.md`, README, `SHA256SUMS` (**re-verified OK 2026-09-23**) |
 | Migrations | 13 (v1.0.1 has 12). New: `20260923160000_refund_method` — one nullable column, rollback proven 8/8 |
@@ -33,7 +33,7 @@ code changes to verified areas; documentation only after the freeze.
 |---|---|---|---|
 | 1 | Core flows — orders, billing, payments, retry-safety, refunds, reports, day close, isolation | RC-verified | ✅ suite 384/384; e2e 52/52 |
 | 2 | **Discount policy** — see §Discount close-out | RC-verified | ✅ **CLOSED** |
-| 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`) | RC-verified | ✅ fixed, each moved a check FAIL → PASS |
+| 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`), and a saved day close reported as "Could not file the closing" (`114ffc9`; also live in deployed v1.0.1 since `2c3acb1`) | RC-verified; `114ffc9` found and re-checked by Window 1's browser run on an RC-1-built stack | ✅ fixed, each moved a check FAIL → PASS |
 | 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser evidence ACCEPTED by the owner** 2026-09-23 (atc-noc dev stack, not a lab run, not full RC browser acceptance); one display per counter |
 | 5 | Physical receipt / KOT print | Browser-verified only | ⏳ **PENDING** — `docs/PRINTER-UAT-RUNBOOK.md`, 2026-09-24 |
 | 6 | Off-host encrypted backup | One copy exists but is **not compliant** (Window 2's record @ `9ff94ac`) — see §Off-host backup | ⛔ **Not done** — re-send after the owner's new key; remediation stays with Window 2 and the owner |
@@ -98,12 +98,15 @@ survives the host, real client data, and anything on production.
   `vc101-browser-evidence-atc-noc-dev/` (renamed from `lab-browser-evidence/`,
   because the old name was itself a lab label; the report inside is unchanged
   and pinned in `SHA256SUMS`).
-- **Still not verified in a browser** — these stay listed as limitations: (a) no browser has driven a stack *built from* RC-1, with migration 13
-  applied and the RC's Prisma client (the tested tree has 12 migrations,
-  RC-1 has 13); (b) nothing ran on the lab host itself (F-9: the lab accepts
-  only `http://localhost:5177`); (c) RC-only screens — the refund dialog's
-  "Returned as" and the cash-only day close — have HTTP evidence only
-  (REF-*, DC-*), which is Core's gate; (d) display behaviour outside the
+- **Still not verified in a browser** — these stay listed as limitations: (a) no browser has driven the *customer display* on a stack *built from*
+  RC-1, with migration 13 applied and the RC's Prisma client (the tested
+  tree has 12 migrations, RC-1 has 13). Window 1's browser run on an
+  RC-1-built stack covered refund and day close, not the display; (b)
+  nothing ran on the lab dev host itself (F-9: the lab accepts only
+  `http://localhost:5177`); (c) the RC-only screens — the refund dialog's
+  "Returned as" and the cash-only day close — are Core's gate: Window 1
+  reports 10/10 in a browser on an RC-1-built stack after `114ffc9`, which
+  is not re-verified here; (d) display behaviour outside the
   gate's four areas is HTTP- or design-level only: a discount line on the
   display, void → idle, the "Reconnecting…" strip on network loss, and idle
   after a backend restart; (e) two displays on one station is out of scope
@@ -195,7 +198,7 @@ Nothing in this sprint has deployed. When the owner approves RC-1, the
 deployment owner:
 
 1. Verifies the package: `cd /home/atc-noc/pos-rc-v1.1-rc1-20260923 && sha256sum -c SHA256SUMS`.
-2. Confirms code-final: `git diff --name-only a1e5228 <release-final>` lists `docs/` only.
+2. Confirms code-final: `git diff --name-only 114ffc9 <release-final>` lists `docs/` only.
 3. Follows `docs/RELEASE-V1.1-RC.md` §2 — tag `rollback-v101` images
    **before** building, take and verify the backup, and gate on **exactly one**
    unapplied migration (`20260923160000_refund_method`) — any other → STOP.
