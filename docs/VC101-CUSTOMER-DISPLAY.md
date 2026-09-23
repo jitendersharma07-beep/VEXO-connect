@@ -55,8 +55,13 @@ construction — proven in the suite, not assumed.
   the display until the cashier's next action on the sale re-points it,
   and kills unminted codes. Pairings themselves survive restarts — the
   token is stateless and its session row is in the database.
-- One display mirrors one cashier's station. Two displays paired to the
-  same station show the same thing.
+- One display mirrors one cashier's station. Two displays CAN pair to the
+  same station and mirror it identically — but on settlement, whichever
+  polls first consumes the THANKYOU flip and clears the pointer, so the
+  other goes straight to IDLE. No figure or field beyond the allowlist is
+  exposed either way. (Surfaced by the Core session's RC integration
+  review; accepted for v1.1 — one screen per counter is the intended
+  deployment.)
 
 ## Acceptance results (2026-09-23)
 
@@ -74,9 +79,20 @@ construction — proven in the suite, not assumed.
   idle, sign-out landing on the pairing screen. Screenshots archived with
   the sprint evidence.
 - Receipt/KOT fix `7cc7896`: ancestor of this branch; print path untouched.
+- Independent verification on the merged RC (lab, fresh databases, run by
+  the Core session, not by the author): backend **384/384**, frontend
+  build clean, and an HTTP end-to-end harness **52/52** including nine
+  display checks written outside this suite — mint, redeem without a
+  staff credential, single-use code, part-paid mirroring, exact-key
+  allowlist, both directions of token cross-use, cross-branch PUT,
+  PAID → THANKYOU → IDLE, and sign-out killing the display.
 
 ## Commits
 
 `7872e5b` API + tests · `2b34084` display screen, pair page, walkthrough ·
 `5ac675a` the single marked Sell.jsx block (file owned by the Core
 session; integrated by agreement).
+
+Integrated into the lab RC `sprint/client-handover-rc` as replayed commits
+`0a98c97` / `46b1940` / `ca0d983` / `3e9e4ec` under one `--no-ff` merge
+`629461b`; the conditional drop at the freeze is `git revert -m 1 629461b`.
