@@ -4,9 +4,11 @@ Same purpose as `GATEWAY-TESTING-OWNER.md`, for a different piece of shared
 mutable state. It is in the repo so every session sees it without being told
 to look.
 
-**Reserved: `Brew Street Café — Cyber Hub` (`BSC-CH`), demo company, for the
-browser acceptance run. Held by the session running `~/pos-bsc-ch-uat/run.mjs`,
-from 2026-09-23 08:09 IST, business date `2026-09-23`.**
+**RELEASED 2026-09-23 08:23 IST.** `Brew Street Café — Cyber Hub` (`BSC-CH`),
+demo company, was held for the browser acceptance run by the session running
+`~/pos-bsc-ch-uat/run.mjs` from 08:09 IST. That run filed its closing on
+business date `2026-09-23` and is done. **No till is reserved right now** — but
+read the next section before writing to `BSC-CH` *today*.
 
 > **Owner changed 2026-09-23 08:20 IST.** The integration lane (branch
 > `phase2-integration`) held this from 00:28 IST and never ran — its writing
@@ -15,9 +17,9 @@ from 2026-09-23 08:09 IST, business date `2026-09-23`.**
 > outcome: a reservation is meant to stop two runs colliding, not to park a
 > till behind a lane that cannot move. Recorded rather than contested.
 
-## Status 2026-09-23 08:20 IST — IN USE, part-spent
+## Status 2026-09-23 08:23 IST — SPENT, closing filed. Released.
 
-`BSC-CH` on business date `2026-09-23` is no longer clean, by design:
+The run finished. `BSC-CH` on business date `2026-09-23` is closed:
 
 | | |
 |---|---|
@@ -25,15 +27,22 @@ from 2026-09-23 08:09 IST, business date `2026-09-23`.**
 | total | ₹189.00 (no discount) |
 | payment | ₹189.00 CASH at 08:16:23 |
 | refund | ₹10.00, part refund — order correctly stays `PAID` |
-| day closing | **not yet filed** — the run is at its `report` phase |
+| day closing | **filed 08:22:47 IST**, `cmudicq7o0024n36yaq3ygcv5` — counted ₹179.00, float ₹0.00, expected ₹179.00, **variance ₹0.00**, 1 bill |
 
 Independently cross-checked through the production sales report UI by the
 integration lane at 08:19 IST: report reads net ₹189 / refunds ₹10, and the
 database agrees to the paisa. That is a read, not a write.
 
-**Do not open an order on `BSC-CH` today.** The closing still to be filed has
-to cover exactly the trade above; anything else lands inside it and the figures
-stop being a statement anyone can check.
+**This reservation is now released** — see *Releasing it* below. It is kept
+here rather than deleted because the release is the useful part of the record:
+the next run needs to know the date was spent, not that a file once existed.
+
+**`BSC-CH` on `2026-09-23` is finished — do not write to it again today.** Not
+because anything is reserved any more, but because the closing is permanent and
+already filed. A further order on this till today would sit outside it, and a
+second closing would only be recordable as a correction against a run that was
+deliberately proved correct. **The next run needs a fresh business date**, on
+this till or any other.
 
 ## The discount leg is NOT on this till
 
@@ -89,9 +98,10 @@ select 'BSC-CH today: orders=' || (select count(*) from "Order" o join "Branch" 
 SQL
 ```
 
-As of 08:20 IST this reads `orders=1 closings=0`, and that is the expected
-reading, not a fault. It becomes a fault if `orders` moves again before the
-closing is filed.
+As of 08:23 IST this reads `orders=1 closings=1` — the finished state. Nothing
+further is expected to move on this till today. If a later reader sees
+`closings=2`, a correction was filed after the fact and the run's headline
+result needs re-reading before it is quoted.
 
 ## The business date rolls at midnight IST
 
