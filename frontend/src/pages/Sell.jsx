@@ -651,6 +651,23 @@ export default function Sell() {
     [toast],
   );
 
+  // --- VC-101 customer display (marked block; owner: display sprint) --------
+  // Mirrors this station's active order onto the paired customer display.
+  // Fire-and-forget on purpose: a till with no display paired gets a cheap
+  // in-memory no-op, and a failed push must never disturb the sale.
+  const displayOrderId = order?.id ?? null;
+  useEffect(() => {
+    api.put('/display/state', { orderId: displayOrderId }).catch(() => {});
+  }, [displayOrderId]);
+  useEffect(
+    () => () => {
+      // Leaving the Sell screen blanks the customer display.
+      api.put('/display/state', { orderId: null }).catch(() => {});
+    },
+    [],
+  );
+  // --- end VC-101 marked block ----------------------------------------------
+
   // --- catalog ---------------------------------------------------------------
   useEffect(() => {
     let alive = true;
