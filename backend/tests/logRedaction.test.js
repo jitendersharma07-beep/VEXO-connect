@@ -97,5 +97,45 @@ describe('request-log credential redaction', () => {
       expect(line.res.headers['content-length']).toBe('1612');
       expect(line.msg).toBe('request completed');
     });
+
+    // A discount approval puts a manager's password inside a nested object, so
+    // it sits deeper than the `*.password` above can see — `*` is one level,
+    // not any number of them. Measured, not assumed: logging a request body
+    // with this list already in force wrote the password out in full.
+    //
+    // Each case below is the shape of a log line somebody would plausibly
+    // write. They are pinned separately because they are separate paths in
+    // REDACT, and a ladder is exactly the kind of thing that gets tidied down
+    // to one rung by someone who reads `*` as a glob.
+    describe('an approval password, however deep it is nested', () => {
+      const CANARY = 'manager-password-canary';
+
+      it('is censored at approval.password', () => {
+        const line = emit({ approval: { password: CANARY } });
+        expect(line.approval.password).toBe('[REDACTED]');
+      });
+
+      it('is censored at body.approval.password', () => {
+        const line = emit({ body: { approval: { password: CANARY } } });
+        expect(line.body.approval.password).toBe('[REDACTED]');
+      });
+
+      it('is censored at req.body.approval.password', () => {
+        const line = emit({ req: { body: { approval: { password: CANARY } } } });
+        expect(line.req.body.approval.password).toBe('[REDACTED]');
+      });
+
+      // The assertions above each name the path they check, so a censor that
+      // blanked the whole object would satisfy them. This one reads the
+      // serialised line, which is what actually reaches the disk.
+      it('leaves no copy anywhere in the serialised line', () => {
+        const line = emit({
+          req: { body: { approval: { approverEmail: 'mgr@test.local', password: CANARY } } },
+        });
+        expect(JSON.stringify(line)).not.toContain(CANARY);
+        // ...while keeping the part that makes the line worth having.
+        expect(line.req.body.approval.approverEmail).toBe('mgr@test.local');
+      });
+    });
   });
 });

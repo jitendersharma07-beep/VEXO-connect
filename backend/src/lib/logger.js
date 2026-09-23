@@ -18,6 +18,21 @@ export const REDACT = [
   '*.passwordHash',
   '*.token',
   '*.licenseKey',
+  // A discount approval carries the manager's password two levels down —
+  // `body.approval.password`. pino's `*` matches exactly ONE level, so the
+  // line above does not reach it, and neither does anything else here: a
+  // deliberate `logger.info({ body: req.body })` wrote the password out in
+  // full, in plain text, with this list already in force.
+  //
+  // Nothing in the app logs a request body today, so this is depth rather
+  // than a live hole — but it is the layer everyone assumes is covering them
+  // while they add the log line that needs it. fast-redact has no
+  // arbitrary-depth wildcard, so the depths are spelled out: these three
+  // reach `approval.password`, `body.approval.password` and
+  // `req.body.approval.password` respectively.
+  '*.*.password',
+  '*.*.*.password',
+  '*.*.*.*.password',
 ];
 
 // A whitelist, where REDACT is a denylist: pino-http logs every response
