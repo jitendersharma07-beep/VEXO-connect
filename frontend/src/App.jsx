@@ -19,6 +19,8 @@ import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
 import Discounts from './pages/Discounts.jsx';
+import CustomerDisplay from './pages/CustomerDisplay.jsx';
+import PairDisplay from './pages/PairDisplay.jsx';
 import NotFound from './pages/NotFound.jsx';
 
 function Home() {
@@ -39,6 +41,10 @@ export default function App() {
           <ApprovalProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
+            {/* VC-101: the customer-facing screen authenticates with its own
+                pairing token, so it lives outside RequireAuth on purpose —
+                an unpaired display shows its pairing screen, never login. */}
+            <Route path="/display" element={<CustomerDisplay />} />
             <Route
               path="/"
               element={
@@ -63,6 +69,16 @@ export default function App() {
                 }
               />
               <Route path="orders" element={<Orders />} />
+              {/* VC-101: staff side of display pairing — same roles the Sell
+                  screen admits. */}
+              <Route
+                path="display/pair"
+                element={
+                  <RequireRoles roles={['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER']}>
+                    <PairDisplay />
+                  </RequireRoles>
+                }
+              />
               <Route
                 path="catalog"
                 element={
