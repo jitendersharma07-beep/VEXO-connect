@@ -21,6 +21,7 @@ import tableRoutes from './api/routes/tables.js';
 import orderRoutes from './api/routes/orders.js';
 import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
+import displayRoutes from './api/routes/display.js';
 import gatewayRoutes from './api/routes/gateway.js';
 
 export const createApp = () => {
@@ -115,6 +116,7 @@ export const createApp = () => {
   api.use('/orders', orderRoutes);
   api.use('/discount-policies', discountPolicyRoutes);
   api.use('/reports', reportRoutes);
+  api.use('/display', displayRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);
