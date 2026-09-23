@@ -10,10 +10,21 @@ input only the owner can give, not code.**
 |---|---|
 | As of | 2026-09-23, 15:00 UTC |
 | Sprint window | brief received ≈ 2026-09-23 14:00 UTC → **feature freeze ≈ 2026-09-25 14:00 UTC** (T+48 h) → handover ≈ 2026-09-26 14:00 UTC (T+72 h) |
-| Candidate | `sprint/client-handover-rc` — head and full commit list in `docs/RELEASE-V1.1-RC.md` |
+| Candidate | `sprint/client-handover-rc` — **code-final `a1e5228`** (later commits are docs only); full commit list in `docs/RELEASE-V1.1-RC.md` |
 | Base | `4a01c7e` = the v1.0.1 line; build inputs identical to deployed `55bf2dc` |
 | Production deployment owner | session `7565dff8` (`DEPLOY-OWNER.md`). Nothing in this sprint deploys. |
 | Maintained by | Window 1 — Core correctness and integration |
+
+## Three tiers of "verified" — never merge them
+
+| Tier | Means | Holds today |
+|---|---|---|
+| **RC-verified** | Proven on the lab, against the merged candidate, on fresh databases | Every "Included" row below |
+| **Deployed-verified** | Proven on production after the deployment owner has deployed RC-1 | **Nothing.** Production runs v1.0.1 and RC-1 is not deployed. |
+| **Hardware-verified** | Observed on physical devices: paper out of a real printer | **Nothing.** The printer table is PENDING until 2026-09-24. |
+
+Nothing here may be reported at a higher tier than it has reached. "RC-verified"
+is not "deployed", and a print preview is not paper.
 
 ## Blockers — owner action needed
 
@@ -22,7 +33,7 @@ input only the owner can give, not code.**
 | B1 | **Product Master Specification v1.1 is not held by anyone.** It was searched for across both machines, the handover package, every session transcript, artifacts and docs. Window 3 confirms the same. | Reconciling this scope against the spec. Every "Included" row below is included **on code evidence**, not on a spec line. | Owner: supply the document. |
 | B2 | **No client data pack**: menu, store details, staff list, GST treatment, licence terms. | Real onboarding. Every row of `docs/CLIENT-ONBOARDING-CHECKLIST.md` is BLOCKED, and demo output is labelled DEMO. | Owner / client |
 | B3 | **The RC-1 deployment decision.** RC-1 adds migration 13 (`20260923160000_refund_method`, one nullable column). | Anything reaching production. | Owner, then the deployment owner `7565dff8` |
-| B4 | **No off-host backup yet.** The tooling is ready and drilled 8/8 on the ops branch `ops/offhost-backup-readiness`. | A backup that survives losing the host. | Owner: the GPG **public** key |
+| B4 | **No off-host backup yet.** On `ops/offhost-backup-readiness` @ `33ee8c2` (`docs/OPS-HANDOVER.md` §4), the off-host restore drill is verified, and the persistent-copy tooling is verified only with a throwaway key. No real off-host copy exists, and the candidate destination (the lab) sits on the same /24, so it is not confirmed as physically off-site. That tooling is not in RC-1 and is not a build input. | A backup that survives losing the host. | Owner: the GPG **public** key and an off-site destination |
 | B5 | **Physical print test** is scheduled for 2026-09-24. | Moving printing from Conditional to Included. | Window 3, with a printer |
 
 ## Who owns what
@@ -60,7 +71,7 @@ fresh database, **52/52 on RC-1**. "Suite" is the backend vitest suite:
 | Refunds: manager-and-up, capped, reason required, **tender recorded** | Core | REF-1..5; **fix `5f8ef01`** |
 | Sales and activity reports | Core | suite; REP-1, REP-2 |
 | **Day close** — expected cash counts only cash that left the drawer; an honest count closes at zero | Core | DC-1..5; **fix `5f8ef01`**; rollback RB-1..8 |
-| **VC-101 customer display** — pairing, live bill mirror, amount due, thank-you, sign-out ends it | Window 3 | W3 suite 13/13; W3 Chromium walkthrough 8/8; DSP-1..8 and ISO-9 run independently by Window 1 |
+| **VC-101 customer display** — pairing, live bill mirror, amount due, thank-you, sign-out ends it. **Accepted as INCLUDED by the owner, 2026-09-23, on the merged-build evidence (relayed by Window 3).** Merged at `629461b`; its docs at `ae98beb`; RC code-final `a1e5228`, to be re-stamped at the freeze. **Supported deployment: ONE customer display per counter.** Several displays paired to one station is not supported — see F-8. | Window 3 | W3 suite 13/13; W3 Chromium walkthrough 8/8 (original box); DSP-1..8 and ISO-9 run independently by Window 1 |
 | Licensing, session revocation, server-side tenant scope, log redaction | Core | shipped v1.0.1; suite |
 | Navigation below 768 px | Core | shipped v1.0.1, measured 33/33 |
 | Quick guide and onboarding checklist (DEMO-labelled) | Window 3 | `docs/QUICK-GUIDE.md`, `docs/CLIENT-ONBOARDING-CHECKLIST.md` |
@@ -71,7 +82,7 @@ fresh database, **52/52 on RC-1**. "Suite" is the backend vitest suite:
 |---|---|---|---|
 | Physical receipt and KOT printing | All 7 rows of `docs/PRINTER-UAT-RUNBOOK.md` pass on paper | Window 3 | Ship as "browser print, untested on paper", as v1.0.1 does |
 | RC-1 in production | Owner approves. The deployment owner runs backup, the migration gate (exactly one new migration) and verification per `docs/RELEASE-V1.1-RC.md`. | `7565dff8` | Production stays on v1.0.1; nothing is lost |
-| VC-101 in the release | Still green at the freeze | Window 3 | Drop it: `git revert ae98beb`, then `git revert -m 1 629461b`, then re-run the suite. Core is untouched. |
+| VC-101 in the release | Owner-accepted; the only condition left is that it is still green at the freeze | Window 3 | Contingency only: `git revert ae98beb`, then `git revert -m 1 629461b`. Executed on the lab: 371/371, 43/43, Core untouched. |
 | Real client onboarding | B2 cleared | Owner, then Window 3's checklist | Hand over on DEMO data, labelled as such |
 | Off-host backup | B4 cleared | ops session | Backups stay on one disk (see `PENDING.md` §2) |
 | Demo-data correction for production bills 00009 and 00011 | Owner picks A or B (`docs/DEMO-DATA-CORRECTION.md`) | Owner | Unchanged. Note: after RC-1, option B's two card refunds would be recorded as CARD and would no longer distort that day's cash. |
@@ -100,7 +111,7 @@ fresh database, **52/52 on RC-1**. "Suite" is the backend vitest suite:
 | F-5 | The handover said the discount cap (§6.1) and mobile navigation (§6.12) were pending. Both shipped in v1.0.1. | Corrected here. The stale text lives in `docs/HANDOVER.md`. |
 | F-6 | The release-notes draft claims delivery orders. | Doc correction needed; see Deferred. |
 | F-7 | `deploy/dev-verify.sh` false-failed on a brand-new database volume. | **Fixed `4faf36e`** (tooling, not a build input) |
-| F-8 | VC-101: with two displays paired to one station, only the first shows the thank-you screen. | Accepted limit, documented in `docs/VC101-CUSTOMER-DISPLAY.md` |
+| F-8 | VC-101: with two displays paired to one station, only the first shows the thank-you screen. Nothing outside the allowlist is exposed. | Accepted limit, documented in `docs/VC101-CUSTOMER-DISPLAY.md`. The deployment scope is one display per counter. |
 
 ## Evidence index
 
