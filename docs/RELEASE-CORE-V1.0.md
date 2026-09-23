@@ -13,30 +13,36 @@ Prepared 2026-09-23 on `phase2-integration`.
 
 | | |
 |---|---|
-| Candidate commit | `e0258d7` — reconciled, see below |
+| Candidate commit | `91f3fac` — reconciled, see below |
 | Branch | `phase2-integration` |
 | Application code actually deployed | `847423d` |
 | Running images | `pos-prod-backend:core-v1.0-rc-847423d` → `3a994795fbf1`, `pos-prod-frontend:core-v1.0-rc-847423d` → `44f405c5d6e1` |
 | Proposed tag (NOT created) | `vexo-connect-core-v1.0` |
 
-The candidate advanced from `510cb42` to `e0258d7` during the closing sweep:
+The candidate advanced from `510cb42` to `91f3fac` during the closing sweep:
 `6dcf20c` added this pack, `7838805` added the discount-approval browser
 harness, `18ff43f` bounded the container logs, `0c13497` closed the backup and
 rotation gates, `317449d` replaced the argued restart-persistence claim with an
-observed one, `c793fe3` recorded the final integrity sweep, and `e0258d7`
-merged the peer lane. The equivalence argument below was re-checked against
-`e0258d7` and still holds.
+observed one, `c793fe3` recorded the final integrity sweep, `e0258d7` merged
+the peer lane, `20afdef` corrected §8 to state print capability as a code fact,
+and `91f3fac` added the recommended hardware spec.
+
+`20afdef` is the last commit whose build inputs are byte-identical to the
+deployed image. `91f3fac` adds one file that is inside a build context but
+cannot reach the artefact; that is proved, not assumed, below. Either is
+taggable — `91f3fac` is the one to tag if the hardware recommendation should
+ship with the release.
 
 ### Why two hashes, and why that is not a discrepancy
 
 Production was built at 02:22:35Z, between `847423d` (02:13:11Z) and `40c4e91`
 (02:33:49Z), so the running image was built from `847423d`. The candidate is
-the later `e0258d7`.
+the later `91f3fac`.
 
-`git diff 847423d..e0258d7` touches only `deploy/` harnesses, `docs/`, one root
-markdown, and `docker-compose.prod.yml` — which is orchestration read by the
-daemon at container-create time, not application code baked into a layer, and
-which is already applied to the running stack.
+`git diff 847423d..91f3fac` touches only `deploy/` harnesses, `docs/`,
+`frontend/docs/`, one root markdown, and `docker-compose.prod.yml` — which is
+orchestration read by the daemon at container-create time, not application code
+baked into a layer, and which is already applied to the running stack.
 
 #### Equivalence proved over the inputs the Dockerfiles actually read
 
@@ -55,27 +61,70 @@ any source file.
 
 Compared by git tree hash, which covers full recursive content:
 
-| Input | `847423d` | `e0258d7` |
+| Input | `847423d` | `91f3fac` | |
+|---|---|---|---|
+| `frontend` (whole tree — `COPY . .`) | `1b075b8fe2b2` | `544996351087` | **differs — see below** |
+| `backend/package.json` | `7d0a19b4f0f9` | `7d0a19b4f0f9` | same |
+| `backend/package-lock.json` | `22f28b6d6a4f` | `22f28b6d6a4f` | same |
+| `backend/prisma` | `0e925b9e5488` | `0e925b9e5488` | same |
+| `backend/src` | `ad8d2da409f8` | `ad8d2da409f8` | same |
+| `backend/scripts` | `d31967f64513` | `d31967f64513` | same |
+| `backend/Dockerfile` | `2b1c4afa4872` | `2b1c4afa4872` | same |
+| `backend/.dockerignore` | `98c1fcdac608` | `98c1fcdac608` | same |
+
+The compose `build:` stanzas — context, dockerfile name and `args` — are
+unchanged too: the **only** difference in `docker-compose.prod.yml` between the
+two commits is the `x-logging` anchor and its three `logging:` references, which
+are runtime options, not build inputs.
+
+#### The one input that differs, and why it cannot change the artefact
+
+Because `frontend/Dockerfile.prod` has no `.dockerignore`, `frontend/docs/` is
+inside the build context, and `91f3fac` edited `frontend/docs/HARDWARE-CHECKLIST.md`.
+So the honest statement is that seven of eight inputs are byte-identical and the
+eighth is not. What follows is why that delta is inert, argued from the build
+file rather than from intent.
+
+`git diff --name-only 847423d 91f3fac -- frontend` returns exactly one path:
+
+```
+frontend/docs/HARDWARE-CHECKLIST.md
+```
+
+Every input Vite reads is unchanged — checked individually, not inferred from
+the parent tree:
+
+| | `847423d` | `91f3fac` |
 |---|---|---|
-| `frontend` (whole tree — `COPY . .`) | `1b075b8fe2b2` | `1b075b8fe2b2` |
-| `backend/package.json` | `7d0a19b4f0f9` | `7d0a19b4f0f9` |
-| `backend/package-lock.json` | `22f28b6d6a4f` | `22f28b6d6a4f` |
-| `backend/prisma` | `0e925b9e5488` | `0e925b9e5488` |
-| `backend/src` | `ad8d2da409f8` | `ad8d2da409f8` |
-| `backend/scripts` | `d31967f64513` | `d31967f64513` |
-| `backend/Dockerfile` | `2b1c4afa4872` | `2b1c4afa4872` |
-| `backend/.dockerignore` | `98c1fcdac608` | `98c1fcdac608` |
+| `frontend/src` | `7bb410c40837` | `7bb410c40837` |
+| `frontend/public` | `69909a5af50e` | `69909a5af50e` |
+| `frontend/index.html` | `727627cd158c` | `727627cd158c` |
+| `frontend/package-lock.json` | `32af966cfe74` | `32af966cfe74` |
+| `frontend/vite.config.js` | `2b51f9933d2b` | `2b51f9933d2b` |
 
-Every pair matches. The compose `build:` stanzas — context, dockerfile name and
-`args` — are unchanged too: the **only** difference in
-`docker-compose.prod.yml` between the two commits is the `x-logging` anchor and
-its three `logging:` references, which are runtime options, not build inputs.
+`package.json`, `tailwind.config.js`, `postcss.config.js` and `nginx.conf` match
+as well. `vite.config.js` sets no `publicDir` override and no copy plugin, so
+nothing outside `index.html`'s import graph and `public/` can enter `dist`.
 
-So a rebuild at `e0258d7` would produce the same image. The running containers
-are the candidate's code and **no rebuild is owed**.
+And `Dockerfile.prod` is two-stage. The runtime stage copies `/app/dist` and
+`nginx.conf` and nothing else, so the whole builder filesystem — `frontend/docs/`
+included — is discarded. The running container's web root is the proof:
+
+```
+/usr/share/nginx/html: 50x.html  assets  favicon.svg  index.html
+/usr/share/nginx/html/assets: index-BtquQISu.js  index-C042CUnc.css
+```
+
+No `docs` directory ships. The delta's entire effect is a cache miss on the
+builder stage's `COPY . .` layer.
+
+So a rebuild at `91f3fac` produces the same served bundle. The running containers
+are the candidate's code and **no rebuild is owed**. Tagging `20afdef` instead
+avoids even the cache miss, at the cost of leaving the hardware recommendation
+out of the tagged tree.
 
 Zero changes under `backend/src`, `backend/prisma`, `backend/scripts`,
-`backend/package.json` or `frontend/`.
+`backend/package.json`, `frontend/src` or `frontend/public`.
 
 The original five-file comparison against `510cb42` was:
 
@@ -97,7 +146,7 @@ This is worth restating at tag time: re-verify the diff still contains no
 
 ### Working tree
 
-The lane `~/atc-pos-lanes/integration` is **clean** at `317449d`. The earlier
+The lane `~/atc-pos-lanes/integration` is **clean** at `91f3fac`. The earlier
 note here — that `deploy/discount-approval-run.mjs` was an untracked concurrent
 harness — is now obsolete: it was committed as `7838805` and is part of the
 candidate.
@@ -410,6 +459,13 @@ Honest list. None of these is a defect; each is a boundary.
 
 This is the only thing standing between the candidate and the tag. Run it on the
 real counter, with the real devices, on the deployed build.
+
+**Nothing has been bought yet.** The owner asked for the best configuration
+rather than supplying one, so the buy-to recommendation lives in
+`frontend/docs/HARDWARE-CHECKLIST.md` §0, chosen line by line against the
+constraints in §8.0 below — 80 mm roll with 72 mm printable, Epson TM-T82/T88,
+USB for a single counter, Windows 11, Chrome or Edge at 100 % zoom, 1366×768 or
+larger. Buy to that and this section runs as written with no code change.
 
 > **Corrected 2026-09-23.** The previous version of this section listed a cash
 > drawer group ("drawer opens on cash payment", "manual open drawer works for an
