@@ -13,28 +13,36 @@ Prepared 2026-09-23 on `phase2-integration`.
 
 | | |
 |---|---|
-| Candidate commit | `18ff43f` |
+| Candidate commit | `317449d` |
 | Branch | `phase2-integration` |
 | Application code actually deployed | `847423d` |
+| Running images | `pos-prod-backend:core-v1.0-rc-847423d` → `3a994795fbf1`, `pos-prod-frontend:core-v1.0-rc-847423d` → `44f405c5d6e1` |
 | Proposed tag (NOT created) | `vexo-connect-core-v1.0` |
 
-The candidate advanced from `510cb42` to `18ff43f` during the closing sweep:
+The candidate advanced from `510cb42` to `317449d` during the closing sweep:
 `6dcf20c` added this pack, `7838805` added the discount-approval browser
-harness, `18ff43f` bounded the container logs. The equivalence argument below
-was re-checked against `18ff43f` and still holds.
+harness, `18ff43f` bounded the container logs, `0c13497` closed the backup and
+rotation gates, `317449d` replaced the argued restart-persistence claim with an
+observed one. The equivalence argument below was re-checked against `317449d`
+and still holds.
 
 ### Why two hashes, and why that is not a discrepancy
 
 Production was built at 02:22:35Z, between `847423d` (02:13:11Z) and `40c4e91`
 (02:33:49Z), so the running image was built from `847423d`. The candidate is
-the later `18ff43f`.
+the later `317449d`.
 
-`git diff --stat 847423d..18ff43f` touches eight files and **none of them ship
+`git diff --stat 847423d..317449d` touches eight files and **none of them ship
 inside the image**: the four `deploy/` harnesses, two `docs/`, one root
 markdown, and `docker-compose.prod.yml` — which is orchestration read by the
 daemon at container-create time, not application code baked into a layer. It is
 already applied to the running stack, so production and the candidate agree on
 it too.
+
+Re-measured at freeze time, not quoted from the earlier run:
+`git diff --name-only 847423d..317449d -- 'backend/src/**' 'frontend/src/**'
+'src/**' 'prisma/**' 'backend/prisma/**'` returns **0 files**. The running
+image is the candidate's application code, and no rebuild is owed.
 
 Zero changes under `backend/src`, `backend/prisma`, `backend/scripts`,
 `backend/package.json` or `frontend/`.
@@ -59,10 +67,26 @@ This is worth restating at tag time: re-verify the diff still contains no
 
 ### Working tree
 
-Clean except one untracked file, `deploy/discount-approval-run.mjs`, which is a
-**concurrent session's** discount-approval harness and was still being written
-while this pack was assembled. It is not part of the candidate and must not be
-swept into a release commit by anyone tidying the tree.
+The lane `~/atc-pos-lanes/integration` is **clean** at `317449d`. The earlier
+note here — that `deploy/discount-approval-run.mjs` was an untracked concurrent
+harness — is now obsolete: it was committed as `7838805` and is part of the
+candidate.
+
+### One bookkeeping gap the tagger must settle first
+
+The deployed checkout `~/atc-pos` is **not** on this branch. It sits on
+`phase2-gateway` at `76d8062` ("ops(prod): bound the container logs before the
+disk decides for us" — a peer session's own commit of the same rotation block),
+with `deploy/uat-acceptance.mjs` modified and uncommitted.
+
+This is not a runtime risk: the running containers were started from the
+`core-v1.0-rc-847423d` images, not from that working tree, and the compose file
+is byte-identical across both branches (sha256
+`45a8bccf7b8b2711a06a7b87c263e0b5a2738d52c2d2d450f60ea5c4077fcbb2`). But two
+branches now each carry a copy of the rotation change, and the tag must be cut
+on **one** of them. Reconcile `phase2-gateway` and `phase2-integration` before
+creating `vexo-connect-core-v1.0`, and do not tag the deployed tree while it
+holds uncommitted edits.
 
 ---
 
@@ -442,3 +466,51 @@ So that the next reader does not re-derive it.
   container, 150 MB for the stack**, against a measured backend rate of
   ~116 KB/hour (~2.8 MB/day) — roughly 18 days of backend history, and the
   durable record is the audit table and the dump, not stdout.
+
+### 9.1 Final integrity sweep, and the three things it flagged
+
+Run read-only against live production on 2026-09-23. The schema side is clean:
+**42 of 42 foreign keys created *and* validated** (`convalidated`, so none is a
+`NOT VALID` shell that never checked the existing rows), **0 invalid indexes**,
+**0 unvalidated constraints**, 11 migrations finished. Every orphan check and
+every money check returned zero: no order without a branch, no item/payment/
+refund without an order, no policy without a subject, no PAID order underpaid,
+no refund exceeding what was paid, `total = subtotal − discount + tax` on all
+14 orders, no VOID order holding money, and no discount exceeding its subtotal,
+approved without an approver, or approved by a non-user.
+
+Three counters came back non-zero. All three were chased to ground, and none is
+a data defect — but they are written down here so the next reader does not have
+to re-open them.
+
+1. **"users without a company: 1"** — this is the `POS_SUPER_ADMIN`, whose
+   `companyId` is `NULL` and whose column is nullable *by design*: the platform
+   operator sits outside every tenant. All 15 tenant users have a real company.
+   The check was phrased too broadly; the data is right.
+
+2. **"audit rows without an actor: 52"** — 46 `LOGIN_FAILED` (no actor is
+   knowable at a failed login) and 6 `PASSWORD_ROTATED` written by the
+   2026-09-21 rotation script, which runs from the CLI with no web session and
+   records `{"source":"scoped-rotation","demoCredential":true}`. **No other
+   action type is ever missing an actor.** Known limitation, not corruption.
+
+3. **"audit rows without a role: 100"** — `actorRole` is *new in this release*
+   (migration `20260922200000_audit_actor_role`) and was deliberately not
+   backfilled. The cut-over is exact: the last roleless row is 02:23:26 and the
+   first roled row is 02:29:48 on 2026-09-23, with **zero** roleless rows after
+   it. All 139 post-deploy rows carry a role, including all 13 rows of the
+   Phase-3 acceptance order. The single roleless `ORDER_DISCOUNT_SET` is from
+   2026-09-22 18:53, before the deploy. This is a forward-only column addition
+   behaving exactly as designed.
+
+   Inside that set, 32 rows name an `actorId` that no longer exists. That is
+   intentional too: **`PosAuditLog` carries no foreign key at all**, so the
+   audit trail outlives the user it describes. The 11 vanished actors are the
+   pre-release demo tenant — and the orders they touched are gone with them
+   (`entityIds still present in "Order": 0`), so the 9 money-shaped rows among
+   them describe no live financial row. The live ledger is self-consistent
+   independently of them.
+
+   The residual limitation is honest and small: for audit rows written before
+   2026-09-23 02:29, the actor's *role at the time* was never captured, and for
+   those 32 demo rows the actor can no longer be named at all.
