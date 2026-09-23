@@ -618,7 +618,7 @@ enum GatewayEventSource {
 // would let anyone squat the unique key with a forged id and permanently block
 // the genuine event from ever being applied. Rejections go to PosAuditLog.
 model GatewayWebhookEvent {
-  id            String         @id @default(cuid())
+  id            String             @id @default(cuid())
   provider      String
   eventId       String
   kind          String
@@ -630,8 +630,8 @@ model GatewayWebhookEvent {
   // route by which an event can be attributed to a company, since events
   // carry no tenant of their own.
   intentId      String?
-  intent        PaymentIntent? @relation(fields: [intentId], references: [id])
-  receivedAt    DateTime       @default(now())
+  intent        PaymentIntent?     @relation(fields: [intentId], references: [id])
+  receivedAt    DateTime           @default(now())
   processedAt   DateTime?
   // Why a verified delivery still changed nothing — unknown intent, already
   // settled, order no longer billable. Null once it has been applied.
