@@ -58,6 +58,15 @@ const styleEl = () => {
 function measureHeightMm(el) {
   const clone = el.cloneNode(true);
   clone.setAttribute('aria-hidden', 'true');
+  // The clone is a direct child of <body>, and index.css gives every body child
+  // WITHOUT this attribute `display: none` in print media. Whether that bites
+  // depends on whether the engine has already switched to print media by the
+  // time `beforeprint` fires — engine-specific, and not worth betting a page
+  // height on: a `display:none` clone measures 0, and a 2 mm page is a receipt
+  // sliced into strips. So the clone claims the attribute. It is removed three
+  // lines below, long before anything is painted, and the inline
+  // `left:-10000px` keeps it off the paper even if it somehow were not.
+  clone.setAttribute('data-print-root', '');
   clone.style.cssText = [
     'position:absolute',
     'left:-10000px',

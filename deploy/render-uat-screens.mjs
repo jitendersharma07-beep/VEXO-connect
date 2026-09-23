@@ -282,14 +282,19 @@ try {
   //    band cannot tell those two apart.
   await page.emulateMedia({ media: 'print' });
   for (const name of SHOTS) {
-    // ONE VIEW PER NAVIGATION, and not merely for tidiness. In `@media print`
-    // `.print-area` is `position:absolute; left:0; top:0`, so on ?view=all
-    // every receipt is stacked at the same origin. The measurements below read
-    // the element box and are unaffected, but an element screenshot captures
+    // ONE VIEW PER NAVIGATION, and not merely for tidiness. `.print-area` was
+    // `position:absolute; left:0; top:0` in `@media print`, so on ?view=all
+    // every receipt stacked at the same origin. The measurements below read the
+    // element box and were unaffected, but an element screenshot captures
     // PAINTED PIXELS — so the saved PNG was a composite of all four receipts
     // while still being named after one of them. The numbers were right and
     // the picture was a lie, which is the worse of the two failure modes:
     // these images are the client's UAT evidence.
+    //
+    // That rule is gone — the receipt prints in normal flow now (see the
+    // @media print block in index.css) — so the overlap cannot recur. One view
+    // per navigation stays anyway: it is also what keeps each printed document
+    // to a single page, and it costs four navigations.
     await page.goto(`${BASE}/uat-render.html?view=${name}`, { waitUntil: 'networkidle' });
     const el = page.locator(`[data-shot="${name}"] .print-area`);
     if (!(await el.isVisible().catch(() => false))) {

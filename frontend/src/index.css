@@ -58,9 +58,25 @@
 }
 
 /* Receipt / KOT printing (contract §9): 80 mm thermal layout. Everything but
-   the mounted .print-area is hidden so no app chrome reaches the printer.
+   the mounted .print-area is taken out of the printed document entirely, so no
+   app chrome reaches the printer.
 
-   PAPER vs PRINTABLE WIDTH — the distinction this block exists to hold.
+   HIDDEN IS NOT THE SAME AS GONE — the distinction that cost three receipts.
+   This block used to say `body * { visibility: hidden }`. That hides the ink
+   but leaves every element occupying its box, so the printed document stayed
+   as tall as the whole application — on the orders screen, three pages of it.
+   And `.print-area` is mounted inside an overlay that is `position: fixed`,
+   which the paged-media model repaints on EVERY page of the job. Three pages
+   behind the receipt therefore produced three complete, identical receipts:
+   three cuts of roll, and a customer handed a duplicate of their own bill.
+   Measured on the deployed build — 3 pages before, 1 after.
+
+   So the app is removed from the FLOW (`display: none`), not merely from view,
+   and the printed document is left containing exactly one thing. That is what
+   `[data-print-root]` marks: the receipt dialog portals itself onto <body> so
+   it can be the survivor. Nothing else on <body> prints.
+
+   PAPER vs PRINTABLE WIDTH — the other distinction this block exists to hold.
    An "80 mm" roll is 80 mm of paper but only ~72 mm of imageable width
    (576 dots at 203 dpi on an EPSON TM-T82/T88-class head); the rest is dead
    margin under the head's edges. The previous rules set the content box to
@@ -89,17 +105,46 @@
   body {
     background: #fff;
   }
-  body * {
-    visibility: hidden;
+
+  /* The whole application leaves the printed document. `display: none`, not
+     `visibility: hidden` — see the note above; the difference is the entire
+     defect. Printing from the app with no receipt dialog open was never
+     supported and produced blank paper before this change too; it now produces
+     ONE blank page instead of however many the screen happened to be tall. */
+  body > *:not([data-print-root]) {
+    display: none !important;
   }
-  .print-area,
-  .print-area * {
-    visibility: visible;
+
+  /* The dialog's on-screen chrome is not paper. It is a full-viewport fixed
+     overlay with a scrim, holding a 24rem rounded card — none of which belongs
+     on a 72 mm roll, and `position: fixed` in particular is what repeated the
+     receipt onto every page. Flatten all of it back into normal flow. */
+  [data-print-root] {
+    position: static !important;
+    display: block !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: none !important;
   }
+  [data-print-root] .print-shell,
+  [data-print-root] .print-frame {
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: #fff !important;
+  }
+
   .print-area {
-    position: absolute;
-    left: 0;
-    top: 0;
+    /* In flow, at the top of the page. This was `position: absolute; left: 0;
+       top: 0` back when it had to escape a tall hidden app; with the app gone
+       there is nothing to escape, and staying in flow is what lets the browser
+       measure a page height from the content. */
+    position: static;
     /* 72 mm printable, not 80 mm paper. */
     width: 72mm;
     max-width: 72mm;

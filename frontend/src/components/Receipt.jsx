@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Printer, X } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
 import { fmtINR, fmtDateTime } from '../lib/pos.js';
@@ -12,9 +13,19 @@ import { ErrorNote } from './ui.jsx';
 // 272 px so the modal shows what the paper will actually carry; a preview wider
 // than the printable area is how the clipping went unnoticed.
 //
-// `.print-area` + `@media print` rules in index.css hide all app chrome when
-// printing. Every rupee figure on the receipt is a server-sent value rendered
-// verbatim — no client math.
+// WHY THESE MODALS ARE PORTALLED, and it is not a styling preference.
+// Both print dialogs mount straight onto <body> carrying `data-print-root`,
+// because index.css takes every OTHER body child out of the printed flow. When
+// the modal lived inside #root instead, printing one receipt produced THREE:
+// the old rule only made the app `visibility:hidden`, which hides ink but keeps
+// the app occupying its full height, so the print job ran to three pages — and
+// a `position:fixed` element (this overlay) is repainted on EVERY page of a
+// print job. Three pages behind it meant three receipts, i.e. three cuts of
+// roll and a customer handed a duplicate bill. Measured on the deployed build:
+// 3 pages before, 1 page after. Keep these mounted on <body>.
+//
+// Every rupee figure on the receipt is a server-sent value rendered verbatim —
+// no client math.
 
 // 72 mm printable width at 96 dpi. Keep in step with .print-area in index.css.
 const PAPER_W = 'w-[272px]';
@@ -126,13 +137,25 @@ export function ReceiptView({ receipt }) {
   );
 }
 
-export function ReceiptModal({ receipt, onClose }) {
-  if (!receipt) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-pos-ink/40 p-4" onMouseDown={onClose}>
-      <div className="w-full max-w-sm rounded-xl bg-white p-4 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
+// The one print dialog. Mounted on <body>, not inside #root — see the note at
+// the top of this file for what that is load-bearing for. `data-print-root` is
+// the hook index.css uses to decide what survives onto the paper; the class
+// names below (`print-shell`, `print-frame`) are the hooks it uses to strip the
+// on-screen chrome — rounded corners, shadow, the 24rem modal width — off the
+// printed copy. Do not rename them without changing that block.
+function PrintDialog({ title, onClose, children }) {
+  return createPortal(
+    <div
+      data-print-root
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-pos-ink/40 p-4"
+      onMouseDown={onClose}
+    >
+      <div
+        className="print-shell w-full max-w-sm rounded-xl bg-white p-4 shadow-xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="no-print mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-bold text-pos-ink">Receipt</h2>
+          <h2 className="text-lg font-bold text-pos-ink">{title}</h2>
           <div className="flex items-center gap-2">
             <button type="button" className="btn-primary" onClick={() => window.print()}>
               <Printer className="h-4 w-4" /> Print
@@ -147,11 +170,19 @@ export function ReceiptModal({ receipt, onClose }) {
             </button>
           </div>
         </div>
-        <div className="rounded-lg border border-slate-200">
-          <ReceiptView receipt={receipt} />
-        </div>
+        <div className="print-frame rounded-lg border border-slate-200">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
+  );
+}
+
+export function ReceiptModal({ receipt, onClose }) {
+  if (!receipt) return null;
+  return (
+    <PrintDialog title="Receipt" onClose={onClose}>
+      <ReceiptView receipt={receipt} />
+    </PrintDialog>
   );
 }
 
@@ -182,29 +213,9 @@ export function KotView({ kot }) {
 export function KotModal({ kot, onClose }) {
   if (!kot) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-pos-ink/40 p-4" onMouseDown={onClose}>
-      <div className="w-full max-w-sm rounded-xl bg-white p-4 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="no-print mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-bold text-pos-ink">Kitchen order ticket</h2>
-          <div className="flex items-center gap-2">
-            <button type="button" className="btn-primary" onClick={() => window.print()}>
-              <Printer className="h-4 w-4" /> Print
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-              aria-label="Close"
-            >
-              <X className="h-5 w-5" />
-            </button>
-          </div>
-        </div>
-        <div className="rounded-lg border border-slate-200">
-          <KotView kot={kot} />
-        </div>
-      </div>
-    </div>
+    <PrintDialog title="Kitchen order ticket" onClose={onClose}>
+      <KotView kot={kot} />
+    </PrintDialog>
   );
 }
 
