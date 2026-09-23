@@ -16,7 +16,7 @@
 import { prisma } from './prisma.js';
 import { verifyPassword, hashPassword } from './crypto.js';
 import { audit } from './audit.js';
-import { approvalRefused, discountDenied } from './errors.js';
+import { approvalRefused, conflict, discountDenied } from './errors.js';
 import {
   authorizeApproval,
   authorizeDiscount,
@@ -84,16 +84,38 @@ const exposureForAudit = (e) => ({
 });
 
 /**
- * Decides whether this request may leave the order in the `after` state.
+ * Decides whether this request may leave the order in the `after` state, and
+ * performs the write itself, under one lock, if it may.
  *
- * Returns { policy, approver, reason } on success — approver is null when the
- * actor was inside their own limit and needed nobody. Throws a 403 otherwise,
- * having written the refusal to the audit log first: a denial nobody can find
- * afterwards is indistinguishable from a denial that never happened.
+ * `measure(order)` returns the { before, after } exposure pair this request
+ * would produce against the order it is given. It is called twice: once on the
+ * order as the route read it, to decide whether a password is needed at all,
+ * and again on the order re-read under a row lock, which is the reading the
+ * decision is actually binding on. `apply(tx, { approver, reason })` does the
+ * write, inside that same lock.
+ *
+ * The two-call shape is the whole point. The guard used to measure, decide,
+ * return, and let the route open its transaction afterwards — so two requests
+ * arriving together both measured an undiscounted bill, both were told yes,
+ * and both wrote. A 10% ceiling paid out 20%, with neither request refused and
+ * nothing in the trail marked as a breach. A line discount racing an order
+ * discount reproduces it most easily, because those touch different rows and
+ * so nothing in the write path makes them queue.
+ *
+ * Credential checking stays OUTSIDE the lock on purpose. Verifying a password
+ * is the slowest thing that happens here by an order of magnitude, and holding
+ * a row lock across it would let one till stall another; nothing about it
+ * depends on the state of the bill, so it does not need to be inside.
+ *
+ * Returns { policy, before, after, approver, reason } — approver is null when
+ * the actor was inside their own limit and needed nobody. Throws a 403
+ * otherwise, having written the refusal to the audit log first: a denial
+ * nobody can find afterwards is indistinguishable from one that never
+ * happened.
  */
 export const guardDiscountChange = async (
   req,
-  { order, before, after, shape, approval, action },
+  { order, measure, shape, approval, action, apply },
 ) => {
   const companyId = order.companyId;
   const policy = await resolveDiscountPolicy(prisma, {
@@ -103,8 +125,14 @@ export const guardDiscountChange = async (
     branchId: order.branchId,
   });
 
+  const { before, after } = measure(order);
   const verdict = authorizeDiscount({ policy, before, after, shape });
-  if (verdict.ok) return { policy, approver: null, reason: null };
+  if (verdict.ok) {
+    return commitUnderLock(req, {
+      order, policy, measure, shape, approver: null, approverPolicy: null,
+      reason: null, apply, action,
+    });
+  }
 
   const baseMeta = {
     branchId: order.branchId,
@@ -221,8 +249,11 @@ export const guardDiscountChange = async (
   }
 
   clearApprovalFailures(key);
-  return {
+  return commitUnderLock(req, {
+    order,
     policy,
+    measure,
+    shape,
     approver: {
       id: approver.id,
       email: approver.email,
@@ -235,6 +266,65 @@ export const guardDiscountChange = async (
       // anybody reviewing a discount wants to know.
       selfApproved: approver.id === req.user.id,
     },
+    approverPolicy,
     reason: approval.reason,
-  };
+    apply,
+    action,
+  });
 };
+
+// Re-measures the bill against a locked row, re-decides on that reading, and
+// writes — all in one transaction, so nothing can land between the decision
+// and the write.
+//
+// The re-decision is not a formality. Every refusal it produces is a request
+// that was legitimately allowed when it arrived and is not allowed any more,
+// because another request committed first. That is a 409, not a 403: the
+// operator did nothing wrong and retrying will show them the real state.
+const commitUnderLock = async (
+  req,
+  { order, policy, measure, shape, approver, approverPolicy, reason, apply, action },
+) =>
+  prisma.$transaction(async (tx) => {
+    // Every guarded route ends up updating this row, so taking it explicitly
+    // first makes concurrent requests queue here — where the state can still
+    // be re-read — instead of at whichever write happens to touch it last.
+    await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
+    const fresh = await tx.order.findUnique({
+      where: { id: order.id },
+      include: { items: true },
+    });
+    if (!fresh || fresh.status !== 'OPEN') {
+      throw conflict('Order is not open');
+    }
+
+    const { before, after } = measure(fresh);
+    const verdict = authorizeDiscount({ policy, before, after, shape });
+    if (!verdict.ok) {
+      const settled = approver && authorizeApproval({ policy: approverPolicy, after }).ok;
+      if (!settled) {
+        await audit(req, {
+          action: 'ORDER_DISCOUNT_RACE_REFUSED',
+          entity: 'Order',
+          entityId: order.id,
+          companyId: order.companyId,
+          meta: {
+            branchId: order.branchId,
+            attemptedAction: action,
+            before: exposureForAudit(before),
+            after: exposureForAudit(after),
+            actorLimit: limitForAudit(policy),
+            breach: breachForAudit(verdict.breach),
+            approverEmail: approver?.email ?? null,
+          },
+        });
+        throw conflict(
+          'Somebody else changed this bill while that was being approved. Check the total and try again.',
+        );
+      }
+    }
+
+    await apply(tx, { approver, reason });
+    return { policy, before, after, approver, reason };
+  });

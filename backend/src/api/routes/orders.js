@@ -293,45 +293,50 @@ router.post(
     // ceiling does: under a percentage discount, a bigger bill is a bigger
     // discount in rupees, and that is the number a cash ceiling exists to
     // bound. Guarded for that case alone, and it passes silently otherwise.
-    const lines = activeLines(order.items);
-    const orderDiscount = orderDiscountOf(order);
-    const before = exposureOf(lines, orderDiscount);
-    const after = exposureOf(
-      [...lines, { id: '__new__', unitPrice: paiseOf(line.unitPrice), qty: line.qty, lineDiscount: 0 }],
-      orderDiscount,
-    );
-    const { policy, approver, reason } = await guardDiscountChange(req, {
+    const measure = (o) => {
+      const lines = activeLines(o.items);
+      const orderDiscount = orderDiscountOf(o);
+      return {
+        before: exposureOf(lines, orderDiscount),
+        after: exposureOf(
+          [...lines, { id: '__new__', unitPrice: paiseOf(line.unitPrice), qty: line.qty, lineDiscount: 0 }],
+          orderDiscount,
+        ),
+      };
+    };
+    const { policy, before, after, approver, reason } = await guardDiscountChange(req, {
       order,
-      before,
-      after,
+      measure,
       shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
       approval: body.approval,
       action: 'ORDER_ITEM_ADD',
-    });
-
-    await prisma.$transaction(async (tx) => {
-      const existing = await tx.orderItem.findFirst({
-        where: {
-          orderId: order.id,
-          productId: line.productId,
-          variantId: line.variantId,
-          status: 'ACTIVE',
-          kotId: null,
-        },
-      });
-      if (existing) {
-        const qty = Math.min(existing.qty + line.qty, 999);
-        await tx.orderItem.update({ where: { id: existing.id }, data: { qty } });
-      } else {
-        await tx.orderItem.create({ data: { orderId: order.id, ...line } });
-      }
-      // Only written when somebody actually had to sign for this add. An add
-      // that stayed inside the operator's own limit leaves any earlier
-      // approval standing, because that approval is still the one in force.
-      if (approver) {
-        await tx.order.update({ where: { id: order.id }, data: approvalStamp(approver, reason) });
-      }
-      await recomputeOrder(tx, order.id);
+      apply: async (tx, { approver: signer, reason: signedReason }) => {
+        const existing = await tx.orderItem.findFirst({
+          where: {
+            orderId: order.id,
+            productId: line.productId,
+            variantId: line.variantId,
+            status: 'ACTIVE',
+            kotId: null,
+          },
+        });
+        if (existing) {
+          const qty = Math.min(existing.qty + line.qty, 999);
+          await tx.orderItem.update({ where: { id: existing.id }, data: { qty } });
+        } else {
+          await tx.orderItem.create({ data: { orderId: order.id, ...line } });
+        }
+        // Only written when somebody actually had to sign for this add. An add
+        // that stayed inside the operator's own limit leaves any earlier
+        // approval standing, because that approval is still the one in force.
+        if (signer) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: approvalStamp(signer, signedReason),
+          });
+        }
+        await recomputeOrder(tx, order.id);
+      },
     });
 
     await audit(req, {
@@ -399,17 +404,20 @@ router.patch(
     // or not the request names a discount at all.
     const newLineDiscount =
       body.lineDiscount !== undefined ? toPaise(body.lineDiscount) : paiseOf(item.lineDiscount);
-    const lines = activeLines(order.items);
-    const orderDiscount = orderDiscountOf(order);
-    const before = exposureOf(lines, orderDiscount);
-    const after = exposureOf(
-      lines.map((l) => (l.id === item.id ? { ...l, qty, lineDiscount: newLineDiscount } : l)),
-      orderDiscount,
-    );
-    const { policy, approver, reason } = await guardDiscountChange(req, {
+    const measure = (o) => {
+      const lines = activeLines(o.items);
+      const orderDiscount = orderDiscountOf(o);
+      return {
+        before: exposureOf(lines, orderDiscount),
+        after: exposureOf(
+          lines.map((l) => (l.id === item.id ? { ...l, qty, lineDiscount: newLineDiscount } : l)),
+          orderDiscount,
+        ),
+      };
+    };
+    const { policy, before, after, approver, reason } = await guardDiscountChange(req, {
       order,
-      before,
-      after,
+      measure,
       shape: {
         raisesLineDiscount:
           body.lineDiscount !== undefined && newLineDiscount > paiseOf(item.lineDiscount),
@@ -417,23 +425,27 @@ router.patch(
       },
       approval: body.approval,
       action: 'ORDER_ITEM_UPDATE',
-    });
-
-    await prisma.$transaction(async (tx) => {
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: {
-          ...(body.qty !== undefined ? { qty: body.qty } : {}),
-          ...(body.lineDiscount !== undefined ? { lineDiscount: body.lineDiscount.toFixed(2) } : {}),
-        },
-      });
-      // Only a request that moved a discount value restates who allowed it.
-      // A quantity edit leaves an earlier approval standing, because the
-      // approval it recorded is still the one in force.
-      if (body.lineDiscount !== undefined) {
-        await tx.order.update({ where: { id: order.id }, data: approvalStamp(approver, reason) });
-      }
-      await recomputeOrder(tx, order.id);
+      apply: async (tx, { approver: signer, reason: signedReason }) => {
+        await tx.orderItem.update({
+          where: { id: item.id },
+          data: {
+            ...(body.qty !== undefined ? { qty: body.qty } : {}),
+            ...(body.lineDiscount !== undefined
+              ? { lineDiscount: body.lineDiscount.toFixed(2) }
+              : {}),
+          },
+        });
+        // Only a request that moved a discount value restates who allowed it.
+        // A quantity edit leaves an earlier approval standing, because the
+        // approval it recorded is still the one in force.
+        if (body.lineDiscount !== undefined) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: approvalStamp(signer, signedReason),
+          });
+        }
+        await recomputeOrder(tx, order.id);
+      },
     });
 
     await audit(req, {
@@ -467,28 +479,33 @@ router.delete(
     // Taking a line off shrinks the bill the discount is measured against.
     // Under a fixed discount that is how an in-limit 10% becomes an
     // out-of-limit 50% without anybody touching the discount field.
-    const lines = activeLines(order.items);
-    const orderDiscount = orderDiscountOf(order);
-    const before = exposureOf(lines, orderDiscount);
-    const after = exposureOf(
-      lines.filter((l) => l.id !== item.id),
-      orderDiscount,
-    );
-    const { policy, approver, reason } = await guardDiscountChange(req, {
+    const measure = (o) => {
+      const lines = activeLines(o.items);
+      const orderDiscount = orderDiscountOf(o);
+      return {
+        before: exposureOf(lines, orderDiscount),
+        after: exposureOf(
+          lines.filter((l) => l.id !== item.id),
+          orderDiscount,
+        ),
+      };
+    };
+    const { policy, before, after, approver, reason } = await guardDiscountChange(req, {
       order,
-      before,
-      after,
+      measure,
       shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
       approval: body.approval,
       action: 'ORDER_ITEM_REMOVE',
-    });
-
-    await prisma.$transaction(async (tx) => {
-      await tx.orderItem.delete({ where: { id: item.id } });
-      if (approver) {
-        await tx.order.update({ where: { id: order.id }, data: approvalStamp(approver, reason) });
-      }
-      await recomputeOrder(tx, order.id);
+      apply: async (tx, { approver: signer, reason: signedReason }) => {
+        await tx.orderItem.delete({ where: { id: item.id } });
+        if (signer) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: approvalStamp(signer, signedReason),
+          });
+        }
+        await recomputeOrder(tx, order.id);
+      },
     });
 
     await audit(req, {
@@ -519,34 +536,36 @@ router.post(
     if (!item.kotId) throw conflict('Line was never sent to the kitchen; delete it instead');
 
     // Same shrinking bill as a line removal, so the same guard.
-    const lines = activeLines(order.items);
-    const orderDiscount = orderDiscountOf(order);
-    const before = exposureOf(lines, orderDiscount);
-    const after = exposureOf(
-      lines.filter((l) => l.id !== item.id),
-      orderDiscount,
-    );
-    const { policy, approver, reason: approvalReason } = await guardDiscountChange(req, {
+    const measure = (o) => {
+      const lines = activeLines(o.items);
+      const orderDiscount = orderDiscountOf(o);
+      return {
+        before: exposureOf(lines, orderDiscount),
+        after: exposureOf(
+          lines.filter((l) => l.id !== item.id),
+          orderDiscount,
+        ),
+      };
+    };
+    const { policy, before, after, approver, reason: approvalReason } = await guardDiscountChange(req, {
       order,
-      before,
-      after,
+      measure,
       shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
       approval: body.approval,
       action: 'ORDER_ITEM_VOID',
-    });
-
-    await prisma.$transaction(async (tx) => {
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: { status: 'VOIDED', voidReason: body.reason, voidedById: req.user.id },
-      });
-      if (approver) {
-        await tx.order.update({
-          where: { id: order.id },
-          data: approvalStamp(approver, approvalReason),
+      apply: async (tx, { approver: signer, reason: signedReason }) => {
+        await tx.orderItem.update({
+          where: { id: item.id },
+          data: { status: 'VOIDED', voidReason: body.reason, voidedById: req.user.id },
         });
-      }
-      await recomputeOrder(tx, order.id);
+        if (signer) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: approvalStamp(signer, signedReason),
+          });
+        }
+        await recomputeOrder(tx, order.id);
+      },
     });
 
     await audit(req, {
@@ -642,34 +661,63 @@ router.post(
       throw badRequest('FLAT discount cannot exceed the subtotal', 'value');
     }
 
-    const lines = activeLines(order.items);
-    const before = exposureOf(lines, orderDiscountOf(order));
-    const after = exposureOf(lines, {
-      type: body.type,
-      value: body.type === 'FLAT' ? toPaise(body.value) : pctToMilli(body.value),
-    });
-    const { policy, approver, reason } = await guardDiscountChange(req, {
+    const measure = (o) => {
+      const lines = activeLines(o.items);
+      return {
+        before: exposureOf(lines, orderDiscountOf(o)),
+        after: exposureOf(lines, {
+          type: body.type,
+          value: body.type === 'FLAT' ? toPaise(body.value) : pctToMilli(body.value),
+        }),
+      };
+    };
+    // Whether this request RAISES the order discount is a question about what
+    // was asked for, so it is answered against the bill as the route read it.
+    // The ceiling is the thing that gets re-checked against fresh state.
+    const asked = measure(order);
+    const { policy, before, after, approver, reason } = await guardDiscountChange(req, {
       order,
-      before,
-      after,
+      measure,
       shape: {
         raisesLineDiscount: false,
-        raisesOrderDiscount: after.orderDiscountPaise > before.orderDiscountPaise,
+        raisesOrderDiscount: asked.after.orderDiscountPaise > asked.before.orderDiscountPaise,
       },
       approval: body.approval,
       action: 'ORDER_DISCOUNT_SET',
-    });
+      apply: async (tx, { approver: signer, reason: signedReason }) => {
+        // A request that re-sends the discount already on the bill moves no
+        // money, and so must not restate who authorised it. The till's modal
+        // opens pre-filled with the current value, which makes pressing
+        // "Apply discount" a second time an ordinary thing for a cashier to
+        // do — no tampering required. Without this, that second press cleared
+        // discountApprovedById/At/Reason, and an approved above-limit discount
+        // silently became one that reads as unapproved on the very row billing
+        // and reporting trust. Read under the same lock the guard took, so the
+        // comparison is against the bill as it actually stands.
+        //
+        // A signer is still stamped even when nothing moves: approving the
+        // same figure again is a real approval, and the trail should say so.
+        // The sibling line-discount route already refuses to restate a stamp
+        // it did not move; this is that rule for the order-level discount.
+        const current = await tx.order.findUnique({
+          where: { id: order.id },
+          select: { discountType: true, discountValue: true },
+        });
+        const unchanged =
+          current?.discountType === body.type &&
+          current?.discountValue != null &&
+          Number(current.discountValue).toFixed(2) === body.value.toFixed(2);
 
-    await prisma.$transaction(async (tx) => {
-      await tx.order.update({
-        where: { id: order.id },
-        data: {
-          discountType: body.type,
-          discountValue: body.value.toFixed(2),
-          ...approvalStamp(approver, reason),
-        },
-      });
-      await recomputeOrder(tx, order.id);
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            discountType: body.type,
+            discountValue: body.value.toFixed(2),
+            ...(unchanged && !signer ? {} : approvalStamp(signer, signedReason)),
+          },
+        });
+        await recomputeOrder(tx, order.id);
+      },
     });
 
     await audit(req, {
@@ -698,24 +746,26 @@ router.delete(
     // Removing a discount takes nothing further off the bill, so the guard
     // always clears it — but it still runs, so that the trail shows who
     // removed it and what the order looked like on either side.
-    const lines = activeLines(order.items);
-    const before = exposureOf(lines, orderDiscountOf(order));
-    const after = exposureOf(lines, null);
-    const { policy } = await guardDiscountChange(req, {
+    const measure = (o) => {
+      const lines = activeLines(o.items);
+      return {
+        before: exposureOf(lines, orderDiscountOf(o)),
+        after: exposureOf(lines, null),
+      };
+    };
+    const { policy, before, after } = await guardDiscountChange(req, {
       order,
-      before,
-      after,
+      measure,
       shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
       approval: undefined,
       action: 'ORDER_DISCOUNT_CLEAR',
-    });
-
-    await prisma.$transaction(async (tx) => {
-      await tx.order.update({
-        where: { id: order.id },
-        data: { discountType: null, discountValue: null, ...approvalStamp(null, null) },
-      });
-      await recomputeOrder(tx, order.id);
+      apply: async (tx) => {
+        await tx.order.update({
+          where: { id: order.id },
+          data: { discountType: null, discountValue: null, ...approvalStamp(null, null) },
+        });
+        await recomputeOrder(tx, order.id);
+      },
     });
     await audit(req, {
       action: 'ORDER_DISCOUNT_CLEAR',
