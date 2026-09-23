@@ -15,11 +15,15 @@ say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
 say "0/6  Dev Postgres up + reachable"
 docker compose up -d
+# Ready means the real database answers a query. pg_isready over the socket
+# also says yes to the temporary server the image runs while it initialises a
+# fresh volume — before atc_pos exists — so on a cold volume the next step
+# failed with 'database "atc_pos" does not exist' and a re-run then passed.
 for i in $(seq 1 30); do
-  docker exec atc-pos-dev-db pg_isready -U atc_pos -d atc_pos -q && break
+  docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -tAc 'SELECT 1' >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec atc-pos-dev-db pg_isready -U atc_pos -d atc_pos
+docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -tAc 'SELECT 1' >/dev/null
 # The test database exists only if the initdb script ran on first boot;
 # create it if the volume predates the script.
 docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -tc \
