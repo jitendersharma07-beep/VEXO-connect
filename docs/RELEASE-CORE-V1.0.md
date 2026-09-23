@@ -13,18 +13,33 @@ Prepared 2026-09-23 on `phase2-integration`.
 
 | | |
 |---|---|
-| Candidate commit | `510cb42` |
+| Candidate commit | `18ff43f` |
 | Branch | `phase2-integration` |
 | Application code actually deployed | `847423d` |
 | Proposed tag (NOT created) | `vexo-connect-core-v1.0` |
+
+The candidate advanced from `510cb42` to `18ff43f` during the closing sweep:
+`6dcf20c` added this pack, `7838805` added the discount-approval browser
+harness, `18ff43f` bounded the container logs. The equivalence argument below
+was re-checked against `18ff43f` and still holds.
 
 ### Why two hashes, and why that is not a discrepancy
 
 Production was built at 02:22:35Z, between `847423d` (02:13:11Z) and `40c4e91`
 (02:33:49Z), so the running image was built from `847423d`. The candidate is
-the later `510cb42`.
+the later `18ff43f`.
 
-`git diff --stat 847423d..510cb42` touches five files and **none of them ship**:
+`git diff --stat 847423d..18ff43f` touches eight files and **none of them ship
+inside the image**: the four `deploy/` harnesses, two `docs/`, one root
+markdown, and `docker-compose.prod.yml` — which is orchestration read by the
+daemon at container-create time, not application code baked into a layer. It is
+already applied to the running stack, so production and the candidate agree on
+it too.
+
+Zero changes under `backend/src`, `backend/prisma`, `backend/scripts`,
+`backend/package.json` or `frontend/`.
+
+The original five-file comparison against `510cb42` was:
 
 ```
 UAT-TILL-RESERVATION.md
@@ -241,17 +256,26 @@ Honest list. None of these is a defect; each is a boundary.
    Production carries no gateway keys, the webhook route is unmounted, and there
    are zero intents and zero webhook events. The adapter has unit and mock
    coverage only.
-3. **The newest backup is behind the candidate schema.** At freeze time the
-   latest dump recorded 8 migrations against production's 11. The nightly timer
-   (`atc-pos-backup.timer`, 02:30 Asia/Kolkata) will close the gap on its next
-   run; an on-demand run during this freeze was denied by execution policy. A
-   restore from the current newest dump gives a schema three migrations old.
+3. ~~**The newest backup is behind the candidate schema.**~~ **CLOSED
+   2026-09-23 03:58Z.** `pos-prod-20260923T035811Z.dump` was taken against the
+   current 11-migration schema and restored into an isolated scratch database
+   (`atc-pos-dev-db:pos_restore_verify`, never production). `pg_restore
+   --exit-on-error` returned 0, all 23 tables and every row count matched the
+   manifest exactly, and `_prisma_migrations` read 11 finished / 0 failed. The
+   scratch copy was dropped afterwards so no second copy of production survives.
 4. **No off-host backup copy.** Every dump lives on the same disk as the
    database it protects. This is the single largest operational risk in the
    product and it is not a code problem.
-5. **Container logs are unbounded.** The daemon has no `/etc/docker/daemon.json`,
-   so `json-file` runs without `max-size`, on a filesystem already at 83%, which
-   also carries `/`, `/tmp` and every database volume. Slow-burning, but it fills.
+5. ~~**Container logs are unbounded.**~~ **CLOSED 2026-09-23 04:01Z** by
+   `18ff43f`. All three `pos-prod` services now carry `json-file` with
+   `max-size=10m`, `max-file=5` — a hard 50 MB per container, 150 MB for the
+   stack. Verified on the running containers via `docker inspect`. Existing
+   logs were archived to
+   `atc-backups/pos-prod/logs-pre-rotation-20260923T040500Z` before the
+   recreate rather than truncated. The daemon still has no
+   `/etc/docker/daemon.json`, so **every other stack on this host remains
+   unbounded** — that was left alone deliberately, as it is outside VEXO
+   Connect's blast radius and would need a daemon restart.
 6. **Request headers are logged under a denylist, not a whitelist.** `cookie`,
    `authorization` and `x-api-key` are redacted by name. A future
    credential-bearing header leaks until someone adds it to the list.
@@ -348,5 +372,29 @@ So that the next reader does not re-derive it.
   accept connections" with no PANIC and no corruption, and the migration rows
   written before those crashes survived them. This is observed history, not a
   drill.
-* **Gateway is off** — zero intents, zero webhook events, all payments
-  `MANUAL`/`CASH`, and no Razorpay key in the backend container's environment.
+* **Gateway is off** — proven four ways, not one: no `POS_GATEWAY_PROVIDER` in
+  the running container's environment (and `gatewayEnabled` is exactly
+  `Boolean(env.POS_GATEWAY_PROVIDER)`), `POST /api/gateway/razorpay/webhook`
+  answers **404** because `app.js` only mounts the router when enabled, and the
+  data agrees: zero `PaymentIntent`, zero `GatewayWebhookEvent`, zero
+  non-`MANUAL` payments or refunds, zero `providerRef` set anywhere.
+* **Discount approval, browser UAT** — executed against production by the peer
+  session (`7838805`) and then verified here independently from the resulting
+  production rows rather than from their report. Order
+  `cmudkf6v200a6n36y33wo1mxd`, ten `ORDER_DISCOUNT_*` audit rows between
+  03:50:53 and 03:51:37: within-limit set (0 → 10%) with no approver;
+  above-limit refused at 25%; `BAD_PASSWORD` refused **with the next row's
+  `before` still reading 10%**, which is what proves no mutation; over-limit
+  approver refused at 40% with the approver's own 20% ceiling recorded;
+  authorised approval 10% → 15% by `demo.manager` (`BRANCH_MANAGER`) with a
+  reason; and a replay landing 15% → 15% rather than compounding. Every row
+  carries requester, role, ceiling and `branchId`. The order finished VOID with
+  **no payment attached**, and the newest payment on the whole database predates
+  the run by seven minutes — the UAT moved no money.
+* **Log rotation** — `max-size=10m`, `max-file=5` confirmed on all three running
+  containers after recreate; stack healthy, frontend `/` 200 and `/api/health`
+  200 through the real proxy path; database row counts identical across the
+  Postgres recreate. A `docker restart` round-trip was **not** run — execution
+  policy refused it — so restart-persistence rests on the config being
+  declarative in `docker-compose.prod.yml` with `restart: unless-stopped`,
+  not on an observed restart. Stated plainly so nobody records it as tested.
