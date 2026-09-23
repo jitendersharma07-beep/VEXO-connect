@@ -19,7 +19,7 @@ The two documents the client actually receives are `guide-owner.md` and
 |---|---|
 | URL | `https://atcworkspace.com/pos` |
 | Health | `https://atcworkspace.com/pos/api/health` → `{"status":"ok","service":"atc-pos-api"}` |
-| Release | **`543a220`** — `phase2-integration`, the touchscreen-UI and 80 mm print release. Built and deployed 18:17 UTC from a worktree pinned at that commit, never from a shared tree |
+| Release | **`543a220`** — `phase2-integration`, the touchscreen-UI and 80 mm print release. Built and deployed **18:17 UTC 2026-09-22** from a worktree pinned at that commit, never from a shared tree |
 | Backend | Image `pos-prod-backend:20260922-integration-543a220` (`f000ba8e3e89`), container created **18:17:02 UTC**. Also tagged `:latest` |
 | Frontend | Image `pos-prod-frontend:20260922-integration-543a220` (`40a41c4e0c09`), container created **18:17:13 UTC**. Also tagged `:latest` |
 | Frontend bundle | `assets/index-BYmQsKta.js`, sha256 `4a3bbd1ed1bd64fd…`, **434862 bytes** — hashed off the public URL, which is what the client actually receives. Carries `pos-print-page-size` ×1 and `beforeprint` ×1 (the print fix) **and** `reports/activity` ×4 + `Discounts, voids and refunds` ×2, so this build is a superset of `f014ab5` and the activity report did not regress |
@@ -70,6 +70,48 @@ automatic receipt-to-counter / KOT-to-kitchen routing. The operator may pick any
 printer in the dialog and change it per job, but nothing stops a KOT printing at
 the counter. Each would be a new integration — a local print agent or an ESC/POS
 bridge. See §6 for the standing limitation entries.
+### `543a220` is the deployed release; `b6dd7d2` is the handover branch tip
+
+Two different commits get quoted for the same build, so the relationship is
+written out rather than left to be re-derived.
+
+`543a220` is what was built and deployed. `b6dd7d2` is the branch tip at the
+time this pack was handed over, and it is a **descendant** of `543a220` — one
+commit ahead. That single commit is
+`docs(deploy): record the 543a220 deploy…`, and it adds **77 lines to
+`docs/DEPLOY-PHASE2.md` and nothing else**.
+
+**Their shipped code is byte-identical**, and that is checkable without a
+rebuild, because git already hashes trees:
+
+```sh
+for p in backend/src backend/prisma frontend/src \
+         backend/package.json frontend/package.json backend/Dockerfile; do
+  printf '%-24s %s  %s\n' "$p" \
+    "$(git rev-parse 543a220:$p | cut -c1-12)" \
+    "$(git rev-parse b6dd7d2:$p | cut -c1-12)"
+done
+```
+
+Every pair matches — `backend/src` `1497b9f99797`, `backend/prisma`
+`b1ca84775257`, `frontend/src` `1123ad7c1bb6`, and both manifests and the
+Dockerfile likewise. A tree hash covers the full recursive content, so equal
+hashes mean the two commits would produce the same image from the same
+Dockerfile.
+
+**The consequence is operational: do not redeploy `b6dd7d2`.** It would rebuild,
+mint fresh layer digests, restart both containers and serve the identical
+bundle — downtime and a new set of image IDs bought for a documentation commit
+that never enters the image. `backend/Dockerfile` copies `package*.json`,
+`prisma`, `src` and `scripts`; `docs/` is not among them.
+
+Use `543a220` when naming what is running. Use `b6dd7d2` when naming what to
+branch from. They are not in conflict and neither is wrong.
+
+> The same tree-hash technique is how the **Core v1.0** candidate was proved
+> equivalent to its built image `847423d` — see `docs/RELEASE-CORE-V1.0.md` §1.
+> It generalises: compare `git rev-parse <commit>:<path>` for every path the
+> Dockerfile actually copies, and equal hashes mean equal images.
 
 **This table went stale four times in one afternoon** — twice while this very
 section was being edited. At 14:49 UTC another session deployed `1ca40bc` +
@@ -102,11 +144,18 @@ are the two cases a commit-based check cannot see:
 **The release is now frozen at `f014ab5`** for client UAT. See §9 for who may
 deploy during the freeze.
 
-One number in that row invites a wrong conclusion, so it is written out:
-`deploy/prod-verify.mjs` reports the bundle as 429947 while the file is 430357
-bytes. Nothing is truncated — the script measures a decoded JavaScript string,
-whose length counts UTF-16 units, and the difference is the multi-byte
-characters in it (₹ and the é in café among them). Compare hashes, not sizes.
+A seventh, on 2026-09-22 at 18:17: the whole table was retargeted from the
+`9b85da3`/`0084936` pair to the `543a220` release above. Anything below that
+still names `9b85da3` is a dated record of a check that was run then, not a
+claim about what is running now.
+
+One kind of number in that row invites a wrong conclusion, so it is written
+out. On the previous build `deploy/prod-verify.mjs` reported the bundle as
+419854 bytes while the file was 420234. Nothing was truncated — the script
+measures a decoded JavaScript string, whose length counts UTF-16 units, and the
+difference is the multi-byte characters in it (₹ and the é in café among them).
+The gap will be a different number for the current 434862-byte bundle and the
+principle is the same: **compare hashes, not sizes.**
 
 So: it is the most perishable thing in this document. Production is redeployed
 by whoever is working on it and the table does not update itself. Treat every
@@ -129,7 +178,13 @@ git log --oneline <deployed-commit>..HEAD -- \
 using the commit you just *proved* by rebuild, not the one this table claims.
 Empty output is the only acceptable answer. It was empty at 15:54 UTC against
 `9b85da3` with the pathspec exactly as written above, and `compose --dry-run`
-reported all three services `Running`.
+reported all three services `Running`. That was the *previous* release; re-run
+it against `543a220` before quoting it.
+
+`b6dd7d2` is the one case where non-empty output is expected and harmless: it
+returns nothing at all under this pathspec, because its only commit touches
+`docs/`, which the pathspec deliberately excludes. That is the check agreeing
+with the tree hashes above — a docs-only tip needs no deploy.
 
 **Scope that pathspec deliberately, and keep it in step with the Dockerfile.**
 `backend/Dockerfile` copies exactly four things — `package*.json`, `prisma`,
@@ -487,6 +542,37 @@ Verified against the live TEST account, on order `cmucyvfuj002t1grlxxb6smh6`
 | Refund | `rfnd_TfB3TLNRxpbgl5` `processed` ₹40 | genuine event `TfB42UGWqm3vNh` → `Refund` `SUCCEEDED` |
 | Replay | same bytes, twice each — as a provider retry and under a fresh event id | totals held at `payments=1/105 refunds=1/40` |
 
+**Zero gateway rows in production establish nothing**, in either direction, and
+this is the specific inference to refuse. Production really is empty — measured,
+not assumed:
+
+```sh
+docker exec pos-prod-postgres-1 psql -U atc_pos -d atc_pos -At -c \
+  'select (select count(*) from "PaymentIntent"),
+          (select count(*) from "GatewayWebhookEvent"),
+          (select count(*) from "Payment" where method::text = $$GATEWAY$$);'
+# 0|0|0   at 2026-09-22
+```
+
+Those zeroes are the **expected** output of a switched-off feature, not a
+verdict on it. The production backend carries no Razorpay or gateway
+environment variable at all (`printenv | grep -ci 'razorpay\|GATEWAY'` → `0`),
+so there is no gateway to exercise and nothing that could have written a row.
+The sandbox runs against a *development* backend and a *different* database.
+An empty production table is not evidence the provider sequence passed, and
+not evidence it failed — it is evidence that production is doing exactly what
+it was configured to do. **Absence of a record is not absence of an event, and
+here it is not even a record of the right system.**
+
+**None of this blocks the pilot**, which is manual-payment-only by agreement.
+Manual payment entry is recorded as manual and stays visibly distinct from a
+gateway-verified payment — `method` is `CASH`/`CARD`/`UPI` with a real
+`receivedById`, against a gateway leg's `GATEWAY` with `receivedById = null`,
+which is the field that says *no human recorded this*. Nothing on the till
+offers the client an online payment they cannot take. What the sandbox work
+gates is **turning gateway payment on** — a later window, on the client's own
+merchant account, with the written authorisation named in §8.
+
 The refund was **partial on purpose**: a full refund is a weak test, because
 code ignoring the requested amount and returning the whole payment would look
 perfect. ₹40 of ₹105 forces the figure to survive every hop.
@@ -704,43 +790,68 @@ survive a restore. Full detail and caveats: `docs/BACKUP-RESTORE.md` §6.
 
 Written down so they are disclosed rather than discovered.
 
-1. **No cap on cashier discounts.** Any cashier can discount up to 100 % of a
-   bill without approval. For a café this is a cash-shrinkage hole. The fix is
-   small but ATC cannot pick the threshold — ask the owner for a number and a
-   rule ("above 10 %, manager approves").
+1. **No cap on cashier discounts — in the DEPLOYED release.** Any cashier can
+   discount up to 100 % of a bill without approval. For a café this is a
+   cash-shrinkage hole.
 
-   **Confirmed on production, 2026-09-23**, rather than read off the source.
+   **Confirmed on production, 2026-09-23 — measured, not read off the source.**
    `deploy/discount-probe.mjs` signed in as `demo.cashier@atcpos.example`,
    opened a ₹165 order on `BSC-CP` and applied `{type:'PERCENT', value:100}`:
    `HTTP 200`, order total `₹0`, discount `₹165`. The probe order was voided by
    the owner immediately afterwards so it never reads as trade. The route is
    `POST /orders/:id/discount`, gated by `operate` in
-   `backend/src/api/routes/orders.js:47` — `CUSTOMER_OWNER`, `BRANCH_MANAGER`
+   `backend/src/api/routes/orders.js` — `CUSTOMER_OWNER`, `BRANCH_MANAGER`
    **and `CASHIER`** — and validated only for value range, never for magnitude
-   or for who is asking.
+   or for who is asking. The UI does not gate it either, which is at least
+   consistent: the screen is not pretending to a restriction the API would not
+   enforce.
 
-   **There is no customer-admin control over this, and none is hidden
-   anywhere.** This was asked as a separate question and answered separately:
+   **Read that probe for exactly what it measured: the deployed build.** The
+   same run found no owner-facing policy endpoint (`/settings`,
+   `/company/settings`, `/permissions`, `/roles`, `/company/permissions` — all
+   404) and no policy column on `PosUser` or `Company`. That is true of
+   `543a220` and it is the right description of what the client would meet
+   today. It is **not** a statement about the product, and the conclusion once
+   drawn from it — that ATC must ask the owner for a threshold before a
+   preventive control can be built — **is withdrawn.** Probing a release that
+   predates a feature cannot show the feature does not exist; it shows the
+   release predates it.
 
-   - Five candidate owner-facing surfaces were probed with an owner token —
-     `/settings`, `/company/settings`, `/permissions`, `/roles`,
-     `/company/permissions`. All five returned **HTTP 404**. There is no
-     policy endpoint to find.
-   - `PosUser` carries only `role`; there is no per-user permission column and
-     no `customPermissions`-style override. `Company` carries no discount
-     policy field. So there is nowhere to store a threshold even if a screen
-     existed to set one.
-   - The **UI does not gate it either** — the discount control on `Sell.jsx`
-     is offered to every role that can operate an order. That is at least
-     consistent: the screen is not pretending to a restriction the API would
-     not enforce, which would be the worse failure.
+   **This is a deployment gap, not an open design question.** The rule is
+   decided and built: the customer's own Admin/Owner controls discount
+   permissions and limits, for a single branch or many, as a company default
+   that a branch may override and a named member of staff may override again.
+   ATC is **not** waiting on the owner to supply a universal ceiling, and there
+   is no single number to ask for — a universal cashier ceiling is precisely
+   what this design rejects, because one number cannot be right for every
+   branch and every person in it. Status, kept separate on purpose:
 
-   So the honest statement to a client is: discounts are **detected, not
-   prevented.** Read the rest of this item as describing a detective control,
-   and note that ATC still needs the owner's threshold before any preventive
-   one can be built.
+   | | State |
+   |---|---|
+   | Design | **Decided** — customer-admin controlled, three levels |
+   | Implementation | **Built** on branch `phase2-discount-policy` |
+   | Verification | **API-proven**: 56 tests (26 + 30) inside a measured 291/291 |
+   | Browser verification | **DONE** 2026-09-23 — 49/49 against production, `deploy/discount-approval-run.mjs` |
+   | Merged to release | **Yes** — `847423d` on `phase2-integration` |
+   | Deployed | **Yes** — 2026-09-23 02:22Z, images `core-v1.0-rc-847423d` |
 
-   What softens it, and what does not:
+   > **The three rows above flipped on 2026-09-23 and this limitation is
+   > therefore CLOSED for Core v1.0.** It is kept in place rather than deleted
+   > because the paragraphs around it are the reasoning that produced the
+   > design, and because anyone running the *older* `543a220` build still meets
+   > the gap exactly as described. Read it as history plus an upgrade note, not
+   > as an open item. The acceptance evidence is in
+   > `docs/RELEASE-CORE-V1.0.md` §9.
+
+   Cashiers default to **no** discount permission until an owner enables it, so
+   the shipped state of the feature is the safe one. Above an operator's limit
+   the discount is refused and an authorised approver signs **with their own
+   email and password, re-verified server-side on every request** — never a
+   shared manager code. Item and order discounts are measured **together**
+   against the gross, which is what stops 50 % off a line plus 50 % off the
+   order becoming 75 % off the bill.
+
+   What softens the deployed gap, and what does not:
 
    - Every discount **is** recorded, with who applied it, what they applied,
      to which order, and from where — `ORDER_DISCOUNT_SET` for a whole bill,
@@ -849,7 +960,26 @@ Written down so they are disclosed rather than discovered.
    `guide-owner.md` §10 — this is stated to the client, not hidden.
 4. **No offline mode.** No connection, no billing.
 5. **Printing is browser-based** and has not been tested against any physical
-   printer. §7.
+   printer. `guide-owner.md` §7. Two distinct facts sit under that heading and
+   they are easy to run together:
+
+   - **Automatic kitchen/counter routing is unimplemented.** There is no
+     printer concept anywhere in the product — not in the schema, not in the
+     backend, not on any settings screen. `ReceiptModal` and `KotModal` both
+     call a bare `window.print()` and neither names a destination. So a KOT
+     does not find the kitchen by itself, and no configuration exists that
+     would make it.
+   - **Manual selection of a different printer through the browser dialog is a
+     separate capability, and it works.** The dialog lists every printer
+     installed on that device, so an operator can send a KOT to the kitchen
+     machine and a receipt to the counter machine by choosing each time. It is
+     manual and it depends on the person choosing, but it is not a placeholder.
+
+   The practical trap, written into the owner guide: ticking the browser's "do
+   not ask again" suppresses the dialog, and suppressing the dialog is what
+   destroys the manual choice. One device per printer is the arrangement that
+   behaves the way people expect routing to behave — and it is an arrangement
+   of hardware, not a feature that was built.
 6. **Backups are on the same disk as the database.** There is no off-host copy.
    This survives a bad migration; it does not survive losing the server. The
    procedure for fixing it is now written out in `BACKUP-RESTORE.md` §8 — it is
@@ -1037,10 +1167,11 @@ Ask for all of it at once. Everything else is finished.
 3. **Branch list** — names and the short code for each (the invoice prefix;
    permanent once billing starts).
 4. **Staff list** — name, email, and role for each person.
-5. **Printer make and model**, and whether the kitchen printer is a separate
-   machine.
-6. **A discount rule** — the cap above which a manager must approve (§6.1).
-7. **The till hardware** — what the cashier will actually look at: screen size
+5. **The printer and its host** — make and model, the **paper width** (58 mm or
+   80 mm), whether the kitchen printer is a separate machine, and the operating
+   system the till runs. All four change what the print UAT can even attempt;
+   §6's printing entry explains why.
+6. **The till hardware** — what the cashier will actually look at: screen size
    and resolution, touch or mouse, and whether it sits portrait or landscape.
    The layout has been checked at 1440×900 on a desktop browser. That is not a
    claim about a 10-inch tablet, and the difference is the kind that is only
@@ -1048,9 +1179,18 @@ Ask for all of it at once. Everything else is finished.
    touchscreen, 1920×1080" — and it decides whether any layout work is needed
    before the client sees the screen.
 
+**Not on this list: a discount cap.** ATC is not waiting for one, and there is
+no number to ask the client for. Discount permission is set by the client's own
+Admin/Owner — a company default, a per-branch override, a per-person override —
+on a screen built for it. Nothing about that is blocked on the client, and
+nothing about it is blocked on the owner naming a universal ceiling. What *is*
+outstanding is on ATC's side: the feature is built and API-proven but not yet
+merged or deployed (§6, item 1). Until it ships, the deployed release has no
+cap at all, which is the limitation as written — not a missing decision.
+
 Only if online payment is wanted:
 
-8. **The client's own Razorpay merchant account**, with test credentials first.
+7. **The client's own Razorpay merchant account**, with test credentials first.
    ATC then completes the sandbox sequence in §5.2 — a real captured payment, a
    duplicate webhook, and a real refund — before any live key is installed.
    **Live payments stay off until that is done and the client authorises it in
