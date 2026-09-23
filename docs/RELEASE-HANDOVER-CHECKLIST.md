@@ -34,9 +34,9 @@ code changes to verified areas; documentation only after the freeze.
 | 1 | Core flows — orders, billing, payments, retry-safety, refunds, reports, day close, isolation | RC-verified | ✅ suite 384/384; e2e 52/52 |
 | 2 | **Discount policy** — see §Discount close-out | RC-verified | ✅ **CLOSED** |
 | 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`) | RC-verified | ✅ fixed, each moved a check FAIL → PASS |
-| 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP) + browser-verified on RC-identical code | ✅ **INCLUDED, owner-accepted**; one display per counter |
+| 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser gate CLOSED** 2026-09-23; one display per counter |
 | 5 | Physical receipt / KOT print | Browser-verified only | ⏳ **PENDING** — `docs/PRINTER-UAT-RUNBOOK.md`, 2026-09-24 |
-| 6 | Off-host encrypted backup | Restore drill verified; permanent copy NOT done | ⛔ **Blocked** — owner's GPG public key + off-site destination |
+| 6 | Off-host encrypted backup | One copy exists but is **not compliant** (Window 2's record @ `9ff94ac`) — see §Off-host backup | ⛔ **Not done** — re-send after the owner's new key; remediation stays with Window 2 and the owner |
 | 7 | Client onboarding (menu, stores, staff) | — | ⛔ **Blocked** — client data pack not supplied (B2) |
 | 8 | Reconcile against Product Master Specification v1.1 | — | ⛔ **Blocked** — document not held by anyone (B1) |
 | 9 | RC-1 in production | — | ⏸ **Owner decision**, then the deployment owner (B3) |
@@ -70,6 +70,39 @@ survives the host, real client data, and anything on production.
   browser tooling. Direct and proxied logins on the lab both answered 200.
   Getting a browser run *on the lab* needs either that port freed or the
   lab CORS widened — both outside this session's ownership during the freeze.
+- **Browser gate CLOSED, 2026-09-23, on a later 17/17.** Run by session
+  `7565dff8`: Run A at 15:36Z, `tests/e2e/walk-display.cjs` unmodified, 8/8;
+  Run B at 15:38Z, `walk-display-qty-partial.cjs`, 9/9 — a quantity update
+  re-priced on till and display, a part payment asks for the balance and does
+  not thank the customer, settlement, sign-out revocation. **Environment: the
+  original box `atc-noc` (20.20.20.55), isolated dev stack `~/vexo-connect-dev`
+  — API 127.0.0.1:5350, Vite 127.0.0.1:5351, Postgres 5440 — not the lab,**
+  whatever its evidence folder is called. **Source:
+  `sprint/vc101-customer-display` @ `1d5407b`**, tree clean; its code is
+  identical to `5ac675a` (every later commit is docs). Corroborated from
+  machine records rather than the report: the runner scripts
+  (`POS_E2E_BASE=http://127.0.0.1:5351`, sourcing `~/vexo-connect-dev/.env`);
+  this box's backend log (HeadlessChrome, host `127.0.0.1:5351`, zero 5xx,
+  logout 200 → display 401 within 4 s in both runs); and dev orders
+  `BSC-CP/26-27/00002` (₹283.50) and `00003` (Cappuccino ×2, ₹378.00, paid
+  ₹189.00 + ₹189.00). **Coverage of RC-1 `7faa9d6`:** every code path the 17
+  steps executed is byte-identical to the RC. The display files, `Sell.jsx`
+  and `App.jsx` match. Every RC change to `routes/orders.js` sits in the
+  refunds route, the gateway-reconcile select or an import — none in the
+  create, items, quantity, bill or payments handlers the runs used — and the
+  `lib/orders.js` changes are refund-only. Evidence: package folder
+  `lab-browser-evidence/` (outside `SHA256SUMS`).
+- **Still not verified in a browser** — none of these reopens the display
+  gate: (a) no browser has driven a stack *built from* RC-1, with migration 13
+  applied and the RC's Prisma client (the tested tree has 12 migrations,
+  RC-1 has 13); (b) nothing ran on the lab host itself (F-9: the lab accepts
+  only `http://localhost:5177`); (c) RC-only screens — the refund dialog's
+  "Returned as" and the cash-only day close — have HTTP evidence only
+  (REF-*, DC-*), which is Core's gate; (d) display behaviour outside the
+  gate's four areas is HTTP- or design-level only: a discount line on the
+  display, void → idle, the "Reconnecting…" strip on network loss, and idle
+  after a backend restart; (e) two displays on one station is out of scope
+  (F-8).
 
 **Deployment scope: ONE customer display per counter.** Two displays on one
 station mirror the same bill, but only the first to poll after payment
@@ -116,6 +149,26 @@ No live session reports as Window 2. This comes from its work product,
   until the owner supplies a **GPG public key**. The candidate destination
   (the lab) is on the same /24, so it is not confirmed off-site.
 - Not in RC-1 and not a build input.
+
+**Current record — Window 2, `docs/OPS-HANDOVER.md` §0 @ `9ff94ac`.** It
+supersedes the bullets above, which reflect `33ee8c2`:
+
+- **Retained encrypted copy: EXISTS — NOT COMPLIANT.** One copy on vexo-lab,
+  shipped 15:04:27Z by another backup session, intact (sha256 `52335566…`),
+  but encrypted to key `…0F05CA51AEC13029`, whose **unprotected private half
+  is on the POS host**. It is also stored under an unrestricted login, so it
+  is not append-only. It must be re-sent after the owner supplies a new key.
+- **Scheduling: prepared, NOT installed — on purpose** until a real success.
+- **Restore: rehearsed 21/21 with throwaway keys, not done for real** — a
+  real restore needs the owner's Mac key.
+- **Off-site separation: UNCONFIRMED** (same /24), and the destination is
+  not append-only yet (it needs a dedicated account).
+- **Root disk: URGENT — owner** (§7 P1). Read on `atc-noc` 2026-09-23: 88% of
+  98 GB used.
+
+A report by session `7565dff8` (`lab-browser-evidence/LAB-BROWSER-EVIDENCE.md`
+§5) calls that copy "DONE". Window 2's own record does not, and Window 2's
+record governs. Status and remediation stay with Window 2 and the owner.
 
 ## Physical printer — Window 3's result
 
