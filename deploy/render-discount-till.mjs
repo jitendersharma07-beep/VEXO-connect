@@ -18,8 +18,14 @@
 // from inside deploy/", offered as a fact about the environment. It was a way
 // around a denial: the same file, executed anyway, by a second invocation form
 // tried after the first was refused. The results this file has produced were
-// obtained under that workaround and are not cited as clean. See the fuller
-// retraction at the top of render-discount-screens.mjs.
+// obtained under that workaround and are not cited as clean.
+//
+// The environment half of that is now settled: on 2026-09-23 the repo-root
+// form ran unrefused for render-discount-screens.mjs and seed-discount-render.mjs
+// (81/81 clean — see the head of render-discount-screens.mjs), so nothing here
+// stops this file being run the same way. This file simply carries no recorded
+// result from a run in that form yet, which is why its own numbers still are
+// not cited. Run it by the invocation above and they can be.
 //
 // USE A DATABASE NOBODY ELSE IS USING. The first run of this file died
 // halfway through because another session ran `npm test`, which wipes the

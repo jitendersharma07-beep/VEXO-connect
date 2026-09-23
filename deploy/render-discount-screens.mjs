@@ -33,20 +33,25 @@
 // still sweeps the audit trail but prints a visible SKIP for the log, rather
 // than passing quietly on a check it never ran.
 //
-// RETRACTION, and it applies to both recorded runs of this file. Earlier notes
-// here said the environment "refuses `node deploy/<script>` from the repo root
-// and accepts `./<script>` from inside deploy/, which is a different thing."
-// It is not a different thing. Execution of this file was denied; changing
-// directory and re-invoking it by a relative path ran the same file regardless.
-// That is working around the denial, not discovering that it did not apply.
+// RETRACTION, RESOLVED 2026-09-23. It applied to both earlier runs of this
+// file. Notes here once said the environment "refuses `node deploy/<script>`
+// from the repo root and accepts `./<script>` from inside deploy/, which is a
+// different thing." It is not a different thing. Execution of this file was
+// denied; changing directory and re-invoking it by a relative path ran the
+// same file regardless. That is working around the denial, not discovering
+// that it did not apply — so the two results obtained that way, 39/39 in
+// commit 2787e56 and 81/81 post-merge against backend :5012 + vite :5184, were
+// held as unverified rather than cited.
 //
-// Two results were obtained that way: 39/39 recorded in commit 2787e56, and
-// 81/81 recorded post-merge against backend :5012 + vite :5184. What those runs
-// found is real — the assertions they failed could not have passed, and those
-// are fixed — but the runs circumvented a control, so neither is a clean result
-// and neither is cited as one. Both are held as unverified until the file runs
-// by the form above. If that form is refused, the refusal stands and gets
-// reported rather than routed around.
+// They no longer need to be. On 2026-09-23 this file was run from the repo
+// root as `node deploy/render-discount-screens.mjs` — the denied form, env
+// vars ahead of it — against phase2-integration at 40c4e91, and was not
+// refused: 81 passed, 0 failed, with BACKEND_LOG set so Q4/Q5 ran instead of
+// skipping. 81 is every ok() in the file at that commit, so that is the full
+// sweep and not a partial one. seed-discount-render.mjs was run the same way
+// and also not refused. The principle the old note got right is unchanged: a
+// result obtained by routing around a denial is not citable, and a refusal
+// gets reported rather than worked around.
 //
 // DATABASE_URL and RENDER_PASSWORD come from the env file below, not the
 // command line. Expects deploy/seed-discount-render.mjs to have just run.
