@@ -78,6 +78,36 @@ if (CLOSE_DAY && TILL !== RESERVED_TILL) {
     + 'and a closing over trade this run did not make is not evidence of anything.',
   );
 }
+// Pick an order back up instead of opening a new one. The flow above assumes
+// it bills what it created, which is only true the first time through: when a
+// run dies part-way — as one did on 2026-09-23, killed with the kitchen ticket
+// still on screen — it leaves a real OPEN order behind, already discounted and
+// already KOT'd. Re-running from the top is not a retry of that order, it
+// opens a SECOND one carrying a second discount, and the till ends the day
+// describing trade that never happened.
+//
+//   RESUME_ORDER=<orderId> node deploy/billing-browser-run.mjs
+//
+// Skips create → discount → KOT and re-enters at billing. The discount facts
+// are then READ off the order rather than remembered from having applied them,
+// which is the stronger reading in any case: it asserts what the order holds,
+// not what this process believes it once sent.
+const RESUME_ORDER = (process.env.RESUME_ORDER || '').trim();
+// It is interpolated into SQL below, so pin its shape here rather than trust
+// an environment variable to be an id.
+if (RESUME_ORDER && !/^[a-z0-9]{20,40}$/i.test(RESUME_ORDER)) {
+  throw new Error(`RESUME_ORDER is not an order id: ${JSON.stringify(RESUME_ORDER)}`);
+}
+if (RESUME_ORDER && CLOSE_ONLY) {
+  throw new Error('RESUME_ORDER and CLOSE_ONLY are two different halves of a split run — pick one.');
+}
+// A resumed run skips the refund, so it never learns what the drawer handed
+// back — and a closing counted from `due` alone would be wrong by exactly a
+// refund it never saw. Refuse the combination rather than file that figure.
+if (RESUME_ORDER && CLOSE_DAY) {
+  throw new Error('RESUME_ORDER does not run the refund leg, so it cannot know what the drawer '
+    + 'should hold. File the closing from a full run, not a resumed one.');
+}
 
 mkdirSync(OUT, { recursive: true });
 
@@ -178,9 +208,24 @@ const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
 // Surface anything the page itself complains about. A billing screen that
 // works while throwing is still a defect, and it will not show up in a
 // screenshot.
+//
+// One of them is expected and is not a defect: the SPA boots on /login and
+// asks GET /api/auth/me whether a session already exists. On a cold browser
+// there is none, the server answers 401 correctly, and axios logs the failed
+// XHR. Counting that as a fault fails check 7.1 on every single run, and a
+// check that always fails stops being read — which is how the real one gets
+// missed. So classify it HERE, at capture time, by cause rather than by
+// status: a 401 is forgiven only while this run has not yet signed in. One
+// after that means the session was lost mid-flow, which is precisely what
+// this check exists to catch.
+let signedIn = false;
 const consoleErrors = [];
-page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
-page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
+const noteError = (text) => consoleErrors.push({
+  text,
+  benign: !signedIn && /Failed to load resource/.test(text) && /\b401\b/.test(text),
+});
+page.on('console', (m) => { if (m.type() === 'error') noteError(m.text()); });
+page.on('pageerror', (e) => noteError(`pageerror: ${e.message}`));
 
 try {
   await page.goto(`${BASE}/login`, { waitUntil: 'networkidle' });
@@ -207,6 +252,7 @@ try {
       .innerText().catch(() => '');
     throw new Error(`login did not complete — still on /login${why ? `: ${why.trim()}` : ''}`);
   }
+  signedIn = true;
   log('signed in as owner', page.url().replace(BASE, ''));
   await page.screenshot({ path: `${OUT}/01-after-login.png`, fullPage: true });
 
@@ -241,6 +287,85 @@ try {
     if (!want) throw new Error(`${selector}: nothing matches ${re} in [${labels.join(' | ')}]`);
     await page.selectOption(selector, { label: want });
     return want;
+  };
+
+  // ---- overlays, and why Bill needs a rail in front of it ----------------
+  // Every modal in this app is the same shape: a full-viewport
+  // `div.fixed.inset-0.z-50` backdrop with the panel nested inside it,
+  // dismissed by a mousedown on the backdrop — components/ui.jsx `Modal`
+  // (discount, payment, refund), Receipt.jsx `KotModal` / `KotListModal` /
+  // `ReceiptModal`, and the Orders.jsx drawer. Not one of them closes on
+  // Escape; there is no key handler anywhere in the app. The backdrop is the
+  // only mechanism that works on all of them, which is why the discount step
+  // already had a hand-rolled version of this loop.
+  //
+  // It has to be a shared rail rather than a local fix because of `Send KOT`:
+  // it opens KotModal ("Kitchen order ticket") and leaves it up. The backdrop
+  // covers the viewport, so the Bill button underneath cannot receive a
+  // pointer event, and the run has two ways to lose from there — Playwright
+  // spins on actionability until it times out, or the click lands on the
+  // backdrop instead, which dismisses the modal, bills nothing, and leaves the
+  // next database read to report the order as still OPEN. The second failure
+  // is the dangerous one: it looks exactly like billing being broken. That is
+  // what happened on 2026-09-23.
+  //
+  // Deliberately narrow about what it may click: the BACKDROP and nothing
+  // else. KotModal's header carries a Print button immediately beside its
+  // close control, so a helper that reached for "the first button in the
+  // modal" would call window.print() and wedge a headless browser. Dismissing
+  // a modal must never be able to commit anything.
+  const OVERLAY = 'div.fixed.inset-0.z-50';
+  // A point counts as backdrop only when the overlay ITSELF is the element
+  // under it. Asked of the page rather than assumed, because the panels are
+  // variously centred, top-aligned and right-aligned, and a corner that is
+  // clear for one is inside the panel of another.
+  const openOverlays = () => page.evaluate((sel) => {
+    const live = [...document.querySelectorAll(sel)].filter((el) => el.getClientRects().length);
+    return live.map((el) => {
+      const { innerWidth: w, innerHeight: h } = window;
+      const spot = [[5, 5], [w - 5, 5], [5, h - 5], [w - 5, h - 5]]
+        .find(([x, y]) => document.elementFromPoint(x, y) === el) || null;
+      return { title: (el.querySelector('h2, h3')?.innerText || '').trim() || '(untitled)', spot };
+    });
+  }, OVERLAY);
+
+  // Returns the titles of what it actually closed, so a run can report "the
+  // kitchen ticket was up and was cleared" rather than the far weaker "nothing
+  // went wrong".
+  const dismissOverlays = async (before) => {
+    const closed = [];
+    for (let i = 0; i < 6; i += 1) {
+      const up = await openOverlays();
+      if (!up.length) return closed;
+      const top = up[up.length - 1];
+      if (!top.spot) {
+        throw new Error(`overlay "${top.title}" covers the viewport with no reachable backdrop`
+          + ` — refusing to guess a click target before ${before}`);
+      }
+      if (!closed.includes(top.title)) closed.push(top.title);
+      await page.mouse.click(top.spot[0], top.spot[1]);
+      await page.waitForTimeout(350);
+    }
+    const stuck = await openOverlays();
+    throw new Error(`${stuck.length} overlay(s) still up before ${before}: `
+      + stuck.map((o) => o.title).join(', '));
+  };
+
+  // The only way this file presses a button that commits anything. Clears the
+  // overlays first, refuses to click a disabled control, and throws rather
+  // than letting a swallowed click be reported downstream as a server fault.
+  const clickAction = async (name, label = String(name)) => {
+    const closed = await dismissOverlays(label);
+    const button = page.getByRole('button', { name }).first();
+    await button.waitFor({ state: 'visible', timeout: 20000 });
+    // Playwright would wait for "enabled" inside click() and then time out
+    // with a generic message. Poll here instead so a control that is disabled
+    // for a real reason — no active lines, an expired licence — is reported as
+    // that rather than as a slow page.
+    for (let i = 0; i < 20 && (await button.isDisabled()); i += 1) await page.waitForTimeout(500);
+    if (await button.isDisabled()) throw new Error(`"${label}" is still disabled after 10s — not clicking it`);
+    await button.click({ timeout: 20000 });
+    return closed;
   };
 
   // ---- 0. the authority screen, before anything spends it -------------
@@ -369,12 +494,123 @@ try {
   let refunded;
   let disc;
   let expectDisc;
+  // Whether the KOT modal was deliberately put back in front of Bill, so
+  // check 3.0 knows whether it is testing the rail or merely describing a
+  // screen that happened to be clear.
+  let kotModalReopened = false;
   if (CLOSE_ONLY) {
     dbOrder = await orderRow();
     due = Math.round(dbOrder.paid * 100) / 100;
     refunded = Math.round(dbOrder.refunded * 100) / 100;
     log('CLOSE_ONLY — reusing the order already on the till',
       `${dbOrder.invoiceNumber} ₹${dbOrder.total}, took ₹${due}, returned ₹${refunded}`);
+  } else {
+  // Three ways in, one way through: a resumed order re-enters at billing,
+  // a fresh one is created first. Everything from step 3 down is the same
+  // code on both, which is the point — a resume that exercised a different
+  // billing path would prove nothing about the one that runs at the counter.
+  if (RESUME_ORDER) {
+  // ---- 1R. pick up the order that is already open ----------------------
+  // Everything downstream asserts against an order this run did not create,
+  // so the first job is to prove it is the order that was named, on the till
+  // this run was pointed at, and still standing exactly where the flow
+  // expects to re-enter. Each of these is a refusal, not a check: a run that
+  // adapts to whatever it finds is how a second payment gets recorded on
+  // somebody else's half-finished work.
+  const [row] = await q(`select o.id, b.code as till, o.status,
+                                o."discountType"::text as disc_type,
+                                o."discountValue"::float8 as disc_value,
+                                o."discountAmount"::float8 as disc_amount,
+                                o.subtotal::float8 as subtotal,
+                                o."taxAmount"::float8 as tax, o.total::float8 as total,
+                                o."discountApprovedById" as approver,
+                                o."invoiceNumber",
+                                (select count(*)::int from "Kot" k where k."orderId"=o.id) as kots,
+                                (select count(*)::int from "Payment" p where p."orderId"=o.id) as payments,
+                                (select count(*)::int from "OrderItem" i
+                                 where i."orderId"=o.id and i.status='ACTIVE') as lines
+                         from "Order" o join "Branch" b on b.id=o."branchId"
+                         where o.id='${RESUME_ORDER}'`);
+  if (!row) throw new Error(`no order ${RESUME_ORDER} exists`);
+  if (row.till !== TILL) {
+    throw new Error(`order ${RESUME_ORDER} is on ${row.till}, not ${TILL}`
+      + ' — refusing to write to a till this run was not pointed at');
+  }
+  if (row.status !== 'OPEN' || row.payments !== 0) {
+    throw new Error(`order ${RESUME_ORDER} is ${row.status} with ${row.payments} payment(s)`
+      + ` and ${row.kots} KOT(s) — it has moved on since this run was asked for. Stopping`
+      + ' rather than repeating a step that may already have been taken.');
+  }
+  pinnedOrderId = row.id;
+  log('RESUME — picking the order back up',
+    `${row.id} on ${row.till}: ${row.status}, ${row.lines} line(s), KOT×${row.kots}, ₹${row.total}`);
+
+  // Shape the discount facts exactly as the apply step would have left them,
+  // so every assertion below this point is the same code on the same fields
+  // whether the discount was applied by this run or by the one that died.
+  disc = [{
+    discountType: row.disc_type,
+    value: row.disc_value,
+    amount: row.disc_amount,
+    approver: row.approver,
+    subtotal: row.subtotal,
+    total: row.total,
+  }];
+  expectDisc = Math.round(disc[0].subtotal * 10) / 100;
+  check('1R.1 the resumed order still carries the 10% discount',
+    disc[0].discountType === 'PERCENT' && Number(disc[0].value) === 10,
+    `${disc[0].discountType} ${disc[0].value} = ₹${disc[0].amount}`);
+  check('1R.2 the discount held is still 10% of the subtotal',
+    Math.abs(disc[0].amount - expectDisc) < 0.01,
+    `₹${disc[0].amount} off ₹${disc[0].subtotal} (expected ₹${expectDisc})`);
+  check('1R.3 the KOT this order already sent is still its only one',
+    row.kots === 1, `${row.kots} KOT(s) — no further KOT will be sent`);
+
+  // The app's own resume path: Sell.jsx reads `?order=<id>` on mount and
+  // loads it through the same GET /orders/:id that the table board and the
+  // "Open orders" list call. It is the deep link those controls exist to
+  // produce, not a way around them.
+  await page.goto(`${BASE}/sell?order=${RESUME_ORDER}`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1800);
+  // The branch <select> only renders while no order is loaded, so its absence
+  // is the screen's own statement that it is holding an order — a stronger
+  // signal than a spinner going away.
+  const branchPickerGone = (await page.locator('#sell-branch').count()) === 0;
+  // fmtINR groups in the Indian style, so anything over ₹999 renders with a
+  // comma the database figure does not have. Strip them before comparing.
+  const panelText = (await page.locator('body').innerText()).replace(/,/g, '');
+  check('1R.4 the sell screen resumed an order rather than offering a new one',
+    branchPickerGone, branchPickerGone ? 'order panel is loaded' : 'still on the New order panel');
+  check('1R.5 the resumed screen shows this order\'s discount and total',
+    panelText.includes(disc[0].amount.toFixed(2)) && panelText.includes(row.total.toFixed(2)),
+    `looking for −₹${disc[0].amount.toFixed(2)} and ₹${row.total.toFixed(2)} on screen`);
+  dbOrder = await orderRow();
+  await page.screenshot({ path: `${OUT}/03r-resumed.png`, fullPage: true });
+
+  // ---- 2R. put the blocking modal back, deliberately -------------------
+  // The requirement is that the kitchen ticket can never block Bill again.
+  // A fresh browser has no modal up, so billing successfully here would prove
+  // nothing except that the problem did not recur on its own. So reopen the
+  // same modal and then bill THROUGH it. "Reprint KOTs" is read-only — it
+  // GETs /orders/:id/kots and renders the KOTs already sent — so this puts
+  // KotModal back on screen without creating a second KOT.
+  const reprint = page.getByRole('button', { name: /Reprint KOTs/ }).first();
+  if (await reprint.isVisible().catch(() => false)) {
+    await reprint.click();
+    await page.waitForTimeout(1200);
+    const kotEntry = page.getByRole('button', { name: /^KOT #\d/ }).first();
+    if (await kotEntry.isVisible().catch(() => false)) {
+      await kotEntry.click();
+      await page.waitForTimeout(900);
+    }
+    const up = await openOverlays();
+    kotModalReopened = up.some((o) => /Kitchen order ticket|KOTs on this order/i.test(o.title));
+    await page.screenshot({ path: `${OUT}/04r-kot-modal-blocking.png`, fullPage: true });
+    log('  kitchen ticket reopened on purpose', up.map((o) => o.title).join(', ') || 'nothing opened');
+  }
+  check('2R.1 the KOT modal is on screen, covering Bill, before billing',
+    kotModalReopened,
+    kotModalReopened ? 'Kitchen order ticket is up' : 'could not reopen it — the fix goes untested');
   } else {
   await policyScreen();
 
@@ -440,11 +676,11 @@ try {
   await page.locator('button[type="submit"]:has-text("Applying…")')
     .waitFor({ state: 'detached', timeout: 25000 }).catch(() => {});
   await page.waitForTimeout(800);
-  // The modal has no Cancel — it closes on its backdrop.
-  for (let i = 0; i < 4 && (await page.locator('div.fixed.inset-0.z-50').count()); i += 1) {
-    await page.mouse.click(5, 5);
-    await page.waitForTimeout(400);
-  }
+  // The modal has no Cancel — it closes on its backdrop, like every other
+  // overlay here. This was the hand-rolled original of dismissOverlays(); it
+  // is the shared one now, so the KOT ticket and the discount modal cannot
+  // drift apart in how reliably they get cleared.
+  await dismissOverlays('reading the discount back');
   await page.waitForTimeout(400);
 
   disc = await q(`select o."discountType", o."discountValue"::float8 as value,
@@ -489,16 +725,30 @@ try {
   await page.screenshot({ path: `${OUT}/03b-discount-applied.png`, fullPage: true });
 
   // ---- 2. KOT ---------------------------------------------------------
-  await page.getByRole('button', { name: /Send KOT/ }).first().click();
+  // Through the same rail: the discount modal was up a moment ago, and
+  // "dismissed it last time" is not a property the next run inherits.
+  await clickAction(/Send KOT/, 'Send KOT');
   await page.waitForTimeout(1500);
   const kot = await q(`select k.seq, k."createdAt" from "Kot" k where k."orderId"='${dbOrder.id}' order by k.seq`);
   check('2.1 KOT recorded against the order', kot.length === 1, kot.length ? `KOT #${kot[0].seq}` : 'none');
   const kotItems = await q(`select count(*)::int as n from "OrderItem" where "orderId"='${dbOrder.id}' and "kotId" is not null`);
   check('2.2 both lines carry the KOT sequence', kotItems[0].n === 2, `${kotItems[0].n} of 2 lines`);
   await page.screenshot({ path: `${OUT}/04-kot-sent.png`, fullPage: true });
+  } // end of the create → discount → KOT path (skipped when resuming)
 
   // ---- 3. bill --------------------------------------------------------
-  await page.getByRole('button', { name: /^Bill/ }).first().click();
+  // `Send KOT` has just left the kitchen ticket on screen, and its backdrop
+  // covers the Bill button. Clear it first and record WHAT was cleared: the
+  // run that died on 2026-09-23 clicked straight into that backdrop, billed
+  // nothing, and then read the order back as OPEN — which reads as a billing
+  // defect rather than as a modal nobody closed.
+  const clearedBeforeBill = await clickAction(/^Bill/, 'Bill');
+  // Only an assertion when there was something to dismiss. Under RESUME the
+  // ticket was reopened on purpose two steps up, so this is the real test of
+  // the rail; on a first run it records what happened to be up.
+  check('3.0 the kitchen ticket was cleared before Bill was pressed',
+    !kotModalReopened || clearedBeforeBill.some((t) => /Kitchen order ticket|KOTs on this order/i.test(t)),
+    clearedBeforeBill.length ? `dismissed first: ${clearedBeforeBill.join(', ')}` : 'no overlay was up');
   await page.waitForTimeout(2000);
   dbOrder = await orderRow();
   check('3.1 order is BILLED in the database', dbOrder.status === 'BILLED', dbOrder.status);
@@ -511,20 +761,72 @@ try {
   check('3.4 the billed total still carries the discount',
     Math.abs(dbOrder.total - (disc[0].subtotal - expectDisc + dbOrder.tax)) < 0.01,
     `₹${dbOrder.total} = ₹${disc[0].subtotal} − ₹${expectDisc} + tax ₹${dbOrder.tax}`);
+
+  // 3.5–3.7: the invoice's arithmetic, not just its total. A discount that is
+  // taken off AFTER tax is the defect that survives every "the total looks
+  // right" check — same headline figure only when the rate is uniform, and
+  // quietly wrong on the tax line, which is the number that gets filed. So
+  // assert the order of operations: GST is charged on the DISCOUNTED base.
+  const inv = await q(`select coalesce(sum(i."lineSubtotal"),0)::float8 as line_sub,
+                              coalesce(sum(i."discountShare"),0)::float8 as disc_share,
+                              coalesce(sum(i."lineTax"),0)::float8 as line_tax,
+                              coalesce(sum(i."lineTotal"),0)::float8 as line_total,
+                              min(i."taxRatePercent")::float8 as rate_min,
+                              max(i."taxRatePercent")::float8 as rate_max
+                       from "OrderItem" i
+                       where i."orderId"='${dbOrder.id}' and i.status='ACTIVE'`);
+  const taxable = Math.round((disc[0].subtotal - expectDisc) * 100) / 100;
+  const rateUniform = inv[0].rate_min === inv[0].rate_max;
+  const expectTax = Math.round(taxable * inv[0].rate_max) / 100;
+  check('3.5 GST is charged on the discounted base, not the gross',
+    rateUniform && Math.abs(dbOrder.tax - expectTax) < 0.02,
+    `₹${dbOrder.tax} tax on ₹${taxable} at ${inv[0].rate_max}% (expected ₹${expectTax}`
+    + `; on the undiscounted ₹${disc[0].subtotal} it would be ₹${Math.round(disc[0].subtotal * inv[0].rate_max) / 100})`);
+  check('3.6 the invoice total is the discounted base plus that tax',
+    Math.abs(dbOrder.total - (taxable + dbOrder.tax)) < 0.01,
+    `₹${taxable} + ₹${dbOrder.tax} = ₹${Math.round((taxable + dbOrder.tax) * 100) / 100} vs stored ₹${dbOrder.total}`);
+  // The header figures are a summary of the lines. If they disagree, one of
+  // them is being computed twice and the receipt and the report will diverge.
+  check('3.7 the invoice lines add up to the invoice header',
+    Math.abs(inv[0].line_total - dbOrder.total) < 0.02
+      && Math.abs(inv[0].disc_share - expectDisc) < 0.02
+      && Math.abs(inv[0].line_sub - disc[0].subtotal) < 0.01,
+    `lines: ₹${inv[0].line_sub} − ₹${inv[0].disc_share} + ₹${inv[0].line_tax} = ₹${inv[0].line_total}`);
   await page.screenshot({ path: `${OUT}/05-billed.png`, fullPage: true });
 
   // ---- 4. cash payment ------------------------------------------------
-  // Tender more than the total on purpose: change due is computed by the
-  // server, so an over-tender is the only version of this step that proves
-  // the calculation rather than echoing the amount back.
+  // On a first run, tender MORE than the total on purpose: change due is
+  // computed by the server, so an over-tender is the only version of this
+  // step that proves the calculation rather than echoing the amount back.
+  //
+  // When resuming, tender the exact amount instead. A resumed order is real
+  // trade that was interrupted, not a rehearsal — the job is to settle it for
+  // what it says and leave nothing outstanding, not to make change out of a
+  // drawer nobody is standing at.
   due = Math.round((dbOrder.total - dbOrder.paid) * 100) / 100;
-  const tendered = Math.ceil(due / 100) * 100 + 100;
+  const tendered = RESUME_ORDER ? due : Math.ceil(due / 100) * 100 + 100;
   const expectedChange = Math.round((tendered - due) * 100) / 100;
-  await page.getByRole('button', { name: /Record payment/ }).first().click();
-  await page.waitForTimeout(600);
+  log('  tendering', `₹${tendered} against ₹${due} due`
+    + (RESUME_ORDER ? ' (exact — resumed order)' : ` (over-tender, change ₹${expectedChange})`));
+
+  // Billing opens this modal itself — Sell.jsx billOrder() ends in
+  // setPayOpen(true). So do NOT press the panel's "Record payment · ₹x due"
+  // opener blind: it sits underneath that modal's own backdrop, so the click
+  // either spins until it times out or lands on the backdrop and closes the
+  // very modal the next line needs. Same class of defect as the KOT ticket,
+  // one step further down the flow. Open it only if billing did not.
+  const payModalUp = async () => (await openOverlays()).some((o) => /^Record payment$/i.test(o.title));
+  if (await payModalUp()) {
+    log('  payment modal', 'opened by billing itself, as the app does it');
+  } else {
+    await clickAction(/Record payment/, 'Record payment');
+    await page.waitForTimeout(600);
+  }
   await page.getByRole('button', { name: 'CASH', exact: true }).click();
   await page.fill('#pay-tendered', String(tendered));
   await page.getByRole('button', { name: /^Record payment$|^Recording…$/ }).last().click();
+  await page.locator('button:has-text("Recording…")')
+    .waitFor({ state: 'detached', timeout: 25000 }).catch(() => {});
   await page.waitForTimeout(2500);
   await page.screenshot({ path: `${OUT}/06-payment-recorded.png`, fullPage: true });
 
@@ -542,12 +844,22 @@ try {
   // that the figure the cashier is shown equals tendered minus the amount
   // actually recorded — an arithmetic claim made on screen, checked against
   // two stored numbers.
-  const changeShown = await page.locator('text=Change due').locator('xpath=following-sibling::*[1]')
-    .first().innerText().catch(() => '');
-  const changeNum = Number(String(changeShown).replace(/[^0-9.]/g, ''));
-  check('4.4 change shown on screen = tendered − amount recorded',
-    changeNum === expectedChange && expectedChange === Math.round((pay[0].tendered - pay[0].amount) * 100) / 100,
-    `screen ₹${changeNum}, db ₹${pay[0].tendered} − ₹${pay[0].amount} = ₹${expectedChange}`);
+  // The panel only renders when there is change to give (changeDue > 0), so
+  // an exact tender is asserted the other way round: the screen must NOT
+  // offer change, and the two stored figures must be equal.
+  if (expectedChange === 0) {
+    const noChangePanel = (await page.locator('text=Change due').count()) === 0;
+    check('4.4 an exact tender leaves no change, and none is offered',
+      noChangePanel && pay[0].tendered === pay[0].amount,
+      `tendered ₹${pay[0].tendered} = recorded ₹${pay[0].amount}, no change panel: ${noChangePanel}`);
+  } else {
+    const changeShown = await page.locator('text=Change due').locator('xpath=following-sibling::*[1]')
+      .first().innerText().catch(() => '');
+    const changeNum = Number(String(changeShown).replace(/[^0-9.]/g, ''));
+    check('4.4 change shown on screen = tendered − amount recorded',
+      changeNum === expectedChange && expectedChange === Math.round((pay[0].tendered - pay[0].amount) * 100) / 100,
+      `screen ₹${changeNum}, db ₹${pay[0].tendered} − ₹${pay[0].amount} = ₹${expectedChange}`);
+  }
 
   dbOrder = await orderRow();
   check('4.5 order is PAID and nothing is outstanding',
@@ -558,6 +870,9 @@ try {
   check('4.6 the screen agrees with the database', paidBadge, 'both say paid');
 
   // ---- 5. receipt, in print media -------------------------------------
+  // Clicked directly, NOT through clickAction: this button lives inside the
+  // payment modal's panel, so it is not covered by anything, and dismissing
+  // overlays first would close the modal that holds it.
   await page.getByRole('button', { name: /Order paid in full/ }).first().click();
   await page.waitForTimeout(2000);
   await page.screenshot({ path: `${OUT}/07-receipt-screen.png`, fullPage: true });
@@ -577,14 +892,30 @@ try {
   check('5.2 no horizontal clipping in the receipt', clipped <= 1, `overflow ${clipped} px`);
   // The customer's copy is where a discount has to be visible, or the shop
   // has taken money off without telling anybody on paper.
-  const receiptText = await page.locator('.print-area').first().innerText();
+  const receiptText = (await page.locator('.print-area').first().innerText()).replace(/,/g, '');
   check('5.3 the receipt shows the discount it gave',
     /Discount/i.test(receiptText) && receiptText.includes(expectDisc.toFixed(2)),
     `looking for -₹${expectDisc.toFixed(2)} on the printed copy`);
+  // The tax line is the other half of the same claim. A receipt that shows
+  // the discount but prints tax on the gross is a document that does not add
+  // up in the customer's hand, and it is the copy a tax officer reads.
+  check('5.3a the receipt prints the GST charged on the discounted base',
+    receiptText.includes(dbOrder.tax.toFixed(2)) && receiptText.includes(dbOrder.total.toFixed(2)),
+    `looking for tax ₹${dbOrder.tax.toFixed(2)} and total ₹${dbOrder.total.toFixed(2)} on the printed copy`);
+  check('5.3b the printed invoice number is this order\'s',
+    receiptText.includes(dbOrder.invoiceNumber), dbOrder.invoiceNumber);
   await page.locator('.print-area').first().screenshot({ path: `${OUT}/08-receipt-print.png` });
   await page.pdf({ path: `${OUT}/09-receipt.pdf`, width: '80mm', height: '200mm', printBackground: true });
   await page.emulateMedia({ media: null });
   log('  receipt PDF written', `${OUT}/09-receipt.pdf`);
+
+  // A resumed order is finished here. The refund and the report below belong
+  // to the first-run rehearsal: refunding real interrupted trade to exercise
+  // a code path would be inventing a return that no customer asked for, and
+  // the report's delta assertions are written around that refund existing.
+  if (RESUME_ORDER) {
+    log('RESUME — stopping after payment', 'no refund, no report delta, no closing');
+  } else {
 
   // ---- 5b. the refund --------------------------------------------------
   // PART of the bill, not all of it. A full refund leaves a drawer that
@@ -662,6 +993,7 @@ try {
       && Math.abs((rep.net - baseline.net) - grossWouldBe) > 0.01,
     `report ₹${rep.net} − ₹${baseline.net} before = ₹${Math.round((rep.net - baseline.net) * 100) / 100}`
     + `, order total ₹${dbOrder.total}, gross would have been ₹${grossWouldBe}`);
+  } // end of the refund + report legs (skipped when resuming)
   } // end of the sell/bill/pay/refund/report path (skipped under CLOSE_ONLY)
 
   // ---- 6. the closing -------------------------------------------------
@@ -728,8 +1060,15 @@ try {
   }
 
   // ---- 7. the page itself ---------------------------------------------
+  // Classified at capture time — see noteError() above for what "benign"
+  // means here and why it is decided by cause, not by status code.
+  const realErrors = consoleErrors.filter((e) => !e.benign);
+  const forgiven = consoleErrors.length - realErrors.length;
   check('7.1 no console or page errors during the billing path',
-    consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | ') || 'clean');
+    realErrors.length === 0,
+    realErrors.length
+      ? realErrors.slice(0, 3).map((e) => e.text).join(' | ')
+      : `clean (${forgiven} pre-login session probe${forgiven === 1 ? '' : 's'} ignored)`);
 
   const pass = results.filter((r) => r.ok).length;
   log('');
