@@ -1,9 +1,14 @@
 export class AppError extends Error {
-  constructor(status, code, message, field) {
+  constructor(status, code, message, field, details) {
     super(message);
     this.status = status;
     this.code = code;
     this.field = field;
+    // Optional machine-readable payload. Only for refusals the caller is
+    // meant to act on — a discount over the till operator's limit is a
+    // "fetch a manager", not a bug, and the screen needs the numbers to say
+    // so. Never carries anything the user is not already allowed to see.
+    this.details = details;
   }
 }
 
@@ -13,6 +18,15 @@ export const unauthorized = (message = 'Please sign in to continue') =>
 export const forbidden = (message = 'You do not have permission to perform this action') =>
   new AppError(403, 'POS_FORBIDDEN', message);
 export const notFound = (message = 'Not found') => new AppError(404, 'POS_NOT_FOUND', message);
+
+// 403 with its own code, because the screen has to tell these two apart. The
+// first says "this discount is above your limit, here is whose signature
+// would clear it" and opens the approval prompt; the second says the approval
+// itself was refused and must NOT re-open the prompt in a loop.
+export const discountDenied = (message, details) =>
+  new AppError(403, 'POS_DISCOUNT_NOT_PERMITTED', message, undefined, details);
+export const approvalRefused = (message, details) =>
+  new AppError(403, 'POS_DISCOUNT_APPROVAL_REFUSED', message, undefined, details);
 export const conflict = (message) => new AppError(409, 'POS_CONFLICT', message);
 
 // 501, not 403: the caller did nothing wrong and no permission would help.

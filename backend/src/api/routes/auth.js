@@ -10,6 +10,7 @@ import { currentLicense } from '../../lib/license.js';
 import { gatewayAvailable } from '../../lib/gateway/index.js';
 import { requirePosAuth } from '../../middleware/auth.js';
 import { loginLimiter } from '../../middleware/rateLimit.js';
+import { describeCeiling, resolveDiscountPolicy } from '../../lib/discountPolicy.js';
 
 const router = Router();
 
@@ -153,12 +154,34 @@ router.get(
           select: { id: true, name: true, code: true },
         })
       : null;
+
+    // What this operator may take off a bill, already resolved through
+    // company → branch → staff. The till uses it to decide which controls to
+    // offer; it is NOT the enforcement — every discount is re-decided
+    // server-side on the request that moves it. Sending it here just stops
+    // the screen offering a button that was always going to be refused.
+    const discountPolicy = req.user.companyId
+      ? await (async () => {
+          const merged = await resolveDiscountPolicy(prisma, {
+            companyId: req.user.companyId,
+            userId: req.user.id,
+            role: req.user.role,
+            branchId: req.user.branchId,
+          });
+          return { ...merged, ceiling: describeCeiling(merged), approvalCeiling: describeCeiling({
+            maxPctMilli: merged.maxApprovalPctMilli,
+            maxFlatPaise: merged.maxApprovalFlatPaise,
+          }) };
+        })()
+      : null;
+
     res.json({
       user: publicUser(req.user),
       company: publicCompany(req.user.company),
       branch,
       license: publicLicense(license),
       onlinePayment: onlinePayment(),
+      discountPolicy,
     });
   }),
 );

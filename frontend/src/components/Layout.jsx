@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Armchair,
   BadgeCheck,
+  BadgePercent,
   BarChart3,
   Building2,
   CalendarCheck,
@@ -117,6 +118,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
           <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" end />
           <NavItem to="/branches" icon={Store} label="Branches" />
           {isOwner ? <NavItem to="/team" icon={Users} label="Team" /> : null}
+          {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
         </>
       )}

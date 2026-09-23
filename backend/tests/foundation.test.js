@@ -45,6 +45,10 @@ const wipe = async () => {
   await prisma.posSession.deleteMany();
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
+  // Before the three tables it points at. DiscountPolicy's foreign keys are
+  // RESTRICT on purpose — a policy must not survive, or silently widen,
+  // because its branch or user went away — so it has to go first here.
+  await prisma.discountPolicy.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();

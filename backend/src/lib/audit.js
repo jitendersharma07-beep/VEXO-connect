@@ -24,6 +24,10 @@ export const audit = async (req, { action, entity, entityId, companyId, meta }) 
         companyId: companyId ?? req.user?.companyId ?? null,
         actorId: req.user?.id ?? null,
         actorEmail: req.user?.email ?? null,
+        // Stored, not joined. PosUser.role answers "what are they now"; an
+        // audit row has to answer "what were they then", and a promotion
+        // between the two would otherwise rewrite the past.
+        actorRole: req.user?.role ?? null,
         ip: clientIp(req),
         meta: meta ?? undefined,
       },

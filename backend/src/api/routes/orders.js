@@ -21,7 +21,9 @@ import {
   branchIdFilterFor,
 } from '../../middleware/auth.js';
 import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
-import { toPaise, toRupees } from '../../lib/money.js';
+import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
+import { guardDiscountChange } from '../../lib/discountGuard.js';
+import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber } from '../../lib/invoice.js';
 import {
   ORDER_INCLUDE,
@@ -74,6 +76,86 @@ const fullOrder = async (id) =>
 const assertOpen = (order) => {
   if (order.status !== 'OPEN') throw conflict('Order is not open');
 };
+
+// --- discount authority ------------------------------------------------------
+// Every route below that can move money off a bill measures the order twice —
+// as it stands and as the request would leave it — and hands both to the
+// guard. Twice, because the question is never "is this discount allowed" on
+// its own: a cashier must still be able to add a coffee to an order a manager
+// discounted 30%, and must not be able to void half the order under a fixed
+// ₹100 discount and turn it into 50% off. Only the before/after pair can tell
+// those apart. See src/lib/discountPolicy.js.
+//
+// Quantities and prices travel in paise here, matching money.js, so the figure
+// a limit is checked against is the figure that will be charged.
+
+const activeLines = (items) =>
+  items
+    .filter((i) => i.status === 'ACTIVE')
+    .map((i) => ({
+      id: i.id,
+      unitPrice: paiseOf(i.unitPrice),
+      qty: i.qty,
+      lineDiscount: paiseOf(i.lineDiscount),
+    }));
+
+const orderDiscountOf = (order) => {
+  if (!order.discountType) return null;
+  return order.discountType === 'FLAT'
+    ? { type: 'FLAT', value: paiseOf(order.discountValue) }
+    : { type: 'PERCENT', value: pctToMilli(String(order.discountValue)) };
+};
+
+// An approval block is optional on every one of these routes. It is only
+// looked at when the actor's own authority falls short, and it is never
+// stored — see the note at the top of discountGuard.js.
+const approvalSchema = z
+  .object({
+    approverEmail: z.string().trim().toLowerCase().email(),
+    password: z.string().min(1).max(200),
+    reason: reasonSchema,
+  })
+  .optional();
+
+// Requests that move a discount VALUE always restate who allowed the result:
+// the approver who just signed for it, or nobody. Requests that only move
+// quantities leave the existing record alone, because it is still true.
+const approvalStamp = (approver, reason) =>
+  approver
+    ? {
+        discountApprovedById: approver.id,
+        discountApprovedAt: new Date(),
+        discountReason: reason,
+      }
+    : { discountApprovedById: null, discountApprovedAt: null, discountReason: null };
+
+// `policy` is the limit that was in force for this actor at this instant, and
+// it is written onto allowed discounts too — not just refused ones. Read back
+// months later, "cashier took 30% off" means nothing without it: the policy row
+// it was measured against is editable, so reconstructing the limit from today's
+// settings would judge a past action by a rule that did not exist yet.
+const discountAudit = (policy, before, after, approver, reason) => ({
+  actorLimit: limitForAudit(policy),
+  before: {
+    grossPaise: before.grossPaise,
+    combinedDiscountPaise: before.combinedPaise,
+    combinedPctMilli: combinedPctMilli(before.combinedPaise, before.grossPaise),
+  },
+  after: {
+    grossPaise: after.grossPaise,
+    combinedDiscountPaise: after.combinedPaise,
+    combinedPctMilli: combinedPctMilli(after.combinedPaise, after.grossPaise),
+  },
+  approvedBy: approver
+    ? {
+        id: approver.id,
+        email: approver.email,
+        role: approver.role,
+        selfApproved: approver.selfApproved,
+      }
+    : null,
+  approvalReason: approver ? reason : null,
+});
 
 // Snapshots product/variant/tax at add time — later catalog edits never touch
 // an existing order line.
@@ -201,11 +283,33 @@ router.post(
         productId: z.string().min(1),
         variantId: z.string().min(1).optional(),
         qty: z.number().int().min(1).max(999).default(1),
+        approval: approvalSchema,
       })
       .parse(req.body);
-    const order = await loadOrder(req);
+    const order = await loadOrder(req, { items: true });
     assertOpen(order);
     const line = await resolveCatalogLine(req.companyScope.id, body);
+
+    // Adding to the order leaves a percentage discount at the same
+    // percentage, so a percentage ceiling has nothing to say here. A cash
+    // ceiling does: under a percentage discount, a bigger bill is a bigger
+    // discount in rupees, and that is the number a cash ceiling exists to
+    // bound. Guarded for that case alone, and it passes silently otherwise.
+    const lines = activeLines(order.items);
+    const orderDiscount = orderDiscountOf(order);
+    const before = exposureOf(lines, orderDiscount);
+    const after = exposureOf(
+      [...lines, { id: '__new__', unitPrice: paiseOf(line.unitPrice), qty: line.qty, lineDiscount: 0 }],
+      orderDiscount,
+    );
+    const { policy, approver, reason } = await guardDiscountChange(req, {
+      order,
+      before,
+      after,
+      shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
+      approval: body.approval,
+      action: 'ORDER_ITEM_ADD',
+    });
 
     await prisma.$transaction(async (tx) => {
       const existing = await tx.orderItem.findFirst({
@@ -223,6 +327,12 @@ router.post(
       } else {
         await tx.orderItem.create({ data: { orderId: order.id, ...line } });
       }
+      // Only written when somebody actually had to sign for this add. An add
+      // that stayed inside the operator's own limit leaves any earlier
+      // approval standing, because that approval is still the one in force.
+      if (approver) {
+        await tx.order.update({ where: { id: order.id }, data: approvalStamp(approver, reason) });
+      }
       await recomputeOrder(tx, order.id);
     });
 
@@ -231,7 +341,13 @@ router.post(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { productId: line.productId, variantId: line.variantId, qty: line.qty },
+      meta: {
+        productId: line.productId,
+        variantId: line.variantId,
+        qty: line.qty,
+        branchId: order.branchId,
+        ...discountAudit(policy, before, after, approver, reason),
+      },
     });
     res.json({ order: await fullOrder(order.id) });
   }),
@@ -258,12 +374,13 @@ router.patch(
           .max(99999999)
           .refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-6, 'Amounts allow at most 2 decimals')
           .optional(),
+        approval: approvalSchema,
       })
       .refine((b) => (b.qty === undefined) !== (b.lineDiscount === undefined), {
         message: 'Send exactly one of qty or lineDiscount',
       })
       .parse(req.body);
-    const order = await loadOrder(req);
+    const order = await loadOrder(req, { items: true });
     assertOpen(order);
     const item = await loadItem(req, order);
     if (item.status !== 'ACTIVE') throw conflict('Line is voided');
@@ -279,6 +396,31 @@ router.patch(
       }
     }
 
+    // A quantity change moves the gross, which moves what the existing
+    // discount is worth as a share of the bill — so this is guarded whether
+    // or not the request names a discount at all.
+    const newLineDiscount =
+      body.lineDiscount !== undefined ? toPaise(body.lineDiscount) : paiseOf(item.lineDiscount);
+    const lines = activeLines(order.items);
+    const orderDiscount = orderDiscountOf(order);
+    const before = exposureOf(lines, orderDiscount);
+    const after = exposureOf(
+      lines.map((l) => (l.id === item.id ? { ...l, qty, lineDiscount: newLineDiscount } : l)),
+      orderDiscount,
+    );
+    const { policy, approver, reason } = await guardDiscountChange(req, {
+      order,
+      before,
+      after,
+      shape: {
+        raisesLineDiscount:
+          body.lineDiscount !== undefined && newLineDiscount > paiseOf(item.lineDiscount),
+        raisesOrderDiscount: false,
+      },
+      approval: body.approval,
+      action: 'ORDER_ITEM_UPDATE',
+    });
+
     await prisma.$transaction(async (tx) => {
       await tx.orderItem.update({
         where: { id: item.id },
@@ -287,6 +429,12 @@ router.patch(
           ...(body.lineDiscount !== undefined ? { lineDiscount: body.lineDiscount.toFixed(2) } : {}),
         },
       });
+      // Only a request that moved a discount value restates who allowed it.
+      // A quantity edit leaves an earlier approval standing, because the
+      // approval it recorded is still the one in force.
+      if (body.lineDiscount !== undefined) {
+        await tx.order.update({ where: { id: order.id }, data: approvalStamp(approver, reason) });
+      }
       await recomputeOrder(tx, order.id);
     });
 
@@ -295,7 +443,13 @@ router.patch(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { itemId: item.id, ...body },
+      meta: {
+        itemId: item.id,
+        ...(body.qty !== undefined ? { qty: body.qty } : {}),
+        ...(body.lineDiscount !== undefined ? { lineDiscount: body.lineDiscount } : {}),
+        branchId: order.branchId,
+        ...discountAudit(policy, before, after, approver, reason),
+      },
     });
     res.json({ order: await fullOrder(order.id) });
   }),
@@ -305,14 +459,37 @@ router.delete(
   '/:id/items/:itemId',
   ...operate,
   asyncHandler(async (req, res) => {
-    const order = await loadOrder(req);
+    const body = z.object({ approval: approvalSchema }).parse(req.body ?? {});
+    const order = await loadOrder(req, { items: true });
     assertOpen(order);
     const item = await loadItem(req, order);
     if (item.status !== 'ACTIVE') throw conflict('Line is voided');
     if (item.kotId) throw conflict('Line is already sent to the kitchen; void it instead');
 
+    // Taking a line off shrinks the bill the discount is measured against.
+    // Under a fixed discount that is how an in-limit 10% becomes an
+    // out-of-limit 50% without anybody touching the discount field.
+    const lines = activeLines(order.items);
+    const orderDiscount = orderDiscountOf(order);
+    const before = exposureOf(lines, orderDiscount);
+    const after = exposureOf(
+      lines.filter((l) => l.id !== item.id),
+      orderDiscount,
+    );
+    const { policy, approver, reason } = await guardDiscountChange(req, {
+      order,
+      before,
+      after,
+      shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
+      approval: body.approval,
+      action: 'ORDER_ITEM_REMOVE',
+    });
+
     await prisma.$transaction(async (tx) => {
       await tx.orderItem.delete({ where: { id: item.id } });
+      if (approver) {
+        await tx.order.update({ where: { id: order.id }, data: approvalStamp(approver, reason) });
+      }
       await recomputeOrder(tx, order.id);
     });
 
@@ -321,7 +498,12 @@ router.delete(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { itemId: item.id, name: item.name },
+      meta: {
+        itemId: item.id,
+        name: item.name,
+        branchId: order.branchId,
+        ...discountAudit(policy, before, after, approver, reason),
+      },
     });
     res.json({ order: await fullOrder(order.id) });
   }),
@@ -331,18 +513,41 @@ router.post(
   '/:id/items/:itemId/void',
   ...managerUp,
   asyncHandler(async (req, res) => {
-    const { reason } = z.object({ reason: reasonSchema }).parse(req.body);
-    const order = await loadOrder(req);
+    const body = z.object({ reason: reasonSchema, approval: approvalSchema }).parse(req.body);
+    const order = await loadOrder(req, { items: true });
     assertOpen(order);
     const item = await loadItem(req, order);
     if (item.status !== 'ACTIVE') throw conflict('Line is already voided');
     if (!item.kotId) throw conflict('Line was never sent to the kitchen; delete it instead');
 
+    // Same shrinking bill as a line removal, so the same guard.
+    const lines = activeLines(order.items);
+    const orderDiscount = orderDiscountOf(order);
+    const before = exposureOf(lines, orderDiscount);
+    const after = exposureOf(
+      lines.filter((l) => l.id !== item.id),
+      orderDiscount,
+    );
+    const { policy, approver, reason: approvalReason } = await guardDiscountChange(req, {
+      order,
+      before,
+      after,
+      shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
+      approval: body.approval,
+      action: 'ORDER_ITEM_VOID',
+    });
+
     await prisma.$transaction(async (tx) => {
       await tx.orderItem.update({
         where: { id: item.id },
-        data: { status: 'VOIDED', voidReason: reason, voidedById: req.user.id },
+        data: { status: 'VOIDED', voidReason: body.reason, voidedById: req.user.id },
       });
+      if (approver) {
+        await tx.order.update({
+          where: { id: order.id },
+          data: approvalStamp(approver, approvalReason),
+        });
+      }
       await recomputeOrder(tx, order.id);
     });
 
@@ -351,7 +556,13 @@ router.post(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: { itemId: item.id, name: item.name, reason },
+      meta: {
+        itemId: item.id,
+        name: item.name,
+        reason: body.reason,
+        branchId: order.branchId,
+        ...discountAudit(policy, before, after, approver, approvalReason),
+      },
     });
     res.json({ order: await fullOrder(order.id) });
   }),
@@ -422,9 +633,9 @@ router.post(
   ...operate,
   asyncHandler(async (req, res) => {
     const body = z
-      .object({ type: z.enum(['FLAT', 'PERCENT']), value: money2 })
+      .object({ type: z.enum(['FLAT', 'PERCENT']), value: money2, approval: approvalSchema })
       .parse(req.body);
-    const order = await loadOrder(req);
+    const order = await loadOrder(req, { items: true });
     assertOpen(order);
     if (body.type === 'PERCENT' && body.value > 100) {
       throw badRequest('PERCENT discount cannot exceed 100', 'value');
@@ -433,10 +644,32 @@ router.post(
       throw badRequest('FLAT discount cannot exceed the subtotal', 'value');
     }
 
+    const lines = activeLines(order.items);
+    const before = exposureOf(lines, orderDiscountOf(order));
+    const after = exposureOf(lines, {
+      type: body.type,
+      value: body.type === 'FLAT' ? toPaise(body.value) : pctToMilli(body.value),
+    });
+    const { policy, approver, reason } = await guardDiscountChange(req, {
+      order,
+      before,
+      after,
+      shape: {
+        raisesLineDiscount: false,
+        raisesOrderDiscount: after.orderDiscountPaise > before.orderDiscountPaise,
+      },
+      approval: body.approval,
+      action: 'ORDER_DISCOUNT_SET',
+    });
+
     await prisma.$transaction(async (tx) => {
       await tx.order.update({
         where: { id: order.id },
-        data: { discountType: body.type, discountValue: body.value.toFixed(2) },
+        data: {
+          discountType: body.type,
+          discountValue: body.value.toFixed(2),
+          ...approvalStamp(approver, reason),
+        },
       });
       await recomputeOrder(tx, order.id);
     });
@@ -446,7 +679,12 @@ router.post(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
-      meta: body,
+      meta: {
+        type: body.type,
+        value: body.value,
+        branchId: order.branchId,
+        ...discountAudit(policy, before, after, approver, reason),
+      },
     });
     res.json({ order: await fullOrder(order.id) });
   }),
@@ -456,12 +694,28 @@ router.delete(
   '/:id/discount',
   ...operate,
   asyncHandler(async (req, res) => {
-    const order = await loadOrder(req);
+    const order = await loadOrder(req, { items: true });
     assertOpen(order);
+
+    // Removing a discount takes nothing further off the bill, so the guard
+    // always clears it — but it still runs, so that the trail shows who
+    // removed it and what the order looked like on either side.
+    const lines = activeLines(order.items);
+    const before = exposureOf(lines, orderDiscountOf(order));
+    const after = exposureOf(lines, null);
+    const { policy } = await guardDiscountChange(req, {
+      order,
+      before,
+      after,
+      shape: { raisesLineDiscount: false, raisesOrderDiscount: false },
+      approval: undefined,
+      action: 'ORDER_DISCOUNT_CLEAR',
+    });
+
     await prisma.$transaction(async (tx) => {
       await tx.order.update({
         where: { id: order.id },
-        data: { discountType: null, discountValue: null },
+        data: { discountType: null, discountValue: null, ...approvalStamp(null, null) },
       });
       await recomputeOrder(tx, order.id);
     });
@@ -470,6 +724,7 @@ router.delete(
       entity: 'Order',
       entityId: order.id,
       companyId: req.companyScope.id,
+      meta: { branchId: order.branchId, ...discountAudit(policy, before, after, null, null) },
     });
     res.json({ order: await fullOrder(order.id) });
   }),

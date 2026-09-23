@@ -42,6 +42,9 @@ const wipe = async () => {
   await prisma.posSession.deleteMany();
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
+  // DiscountPolicy's foreign keys are RESTRICT, so it goes before the branch,
+  // user and company rows it points at.
+  await prisma.discountPolicy.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -92,6 +95,24 @@ beforeAll(async () => {
   await mk({ email: 'cashier.a1@test.local', fullName: 'Cashier A1', role: 'CASHIER', companyId: companyA.id, branchId: branchA1.id });
   await mk({ email: 'owner.b@test.local', fullName: 'Owner B', role: 'CUSTOMER_OWNER', companyId: companyB.id });
   await mk({ email: 'owner.c@test.local', fullName: 'Owner C', role: 'CUSTOMER_OWNER', companyId: companyC.id });
+
+  // Alpha Cafe's admin has configured a company discount default. Without a
+  // row like this nobody below the owner may discount anything, which is the
+  // product's deny-by-default floor — Bravo Cafe is deliberately left with no
+  // rows at all so that floor stays under test. The §6 worked example below
+  // takes 13.7% combined, comfortably inside this.
+  await prisma.discountPolicy.create({
+    data: {
+      companyId: companyA.id,
+      level: 'COMPANY',
+      scopeKey: 'company',
+      allowLineDiscount: true,
+      allowOrderDiscount: true,
+      maxPercent: '20.000',
+      maxFlatPaise: 50000,
+      note: 'Company default',
+    },
+  });
 
   tokens.atc = await login('atc@test.local');
   tokens.ownerA = await login('owner.a@test.local');

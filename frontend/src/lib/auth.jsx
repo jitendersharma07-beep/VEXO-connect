@@ -13,7 +13,14 @@ export const useAuth = () => useContext(AuthContext);
 // that does not mention it — an older one, or one mid-deploy — hides online
 // payment rather than offering a button that cannot work.
 const NO_GATEWAY = { available: false, provider: null };
-const EMPTY = { user: null, company: null, branch: null, license: null, onlinePayment: NO_GATEWAY };
+const EMPTY = {
+  user: null,
+  company: null,
+  branch: null,
+  license: null,
+  onlinePayment: NO_GATEWAY,
+  discountPolicy: null,
+};
 
 const sessionOf = (data) => ({
   user: data.user,
@@ -21,6 +28,10 @@ const sessionOf = (data) => ({
   branch: data.branch,
   license: data.license,
   onlinePayment: data.onlinePayment ?? NO_GATEWAY,
+  // What this operator may take off a bill, resolved through company → branch
+  // → staff. Null from a server that does not send it; the screen then says
+  // nothing about limits rather than guessing at one.
+  discountPolicy: data.discountPolicy ?? null,
 });
 
 export function AuthProvider({ children }) {
