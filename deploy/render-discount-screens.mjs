@@ -10,13 +10,23 @@
 // and when the server refuses, does a prompt appear, does the wrong manager
 // get turned away, does the right one get through.
 //
-//   cd deploy && node ./seed-discount-render.mjs \
-//     && BASE_URL=http://127.0.0.1:5182 node ./render-discount-screens.mjs
+//   node deploy/seed-discount-render.mjs \
+//     && BASE_URL=http://127.0.0.1:5182 node deploy/render-discount-screens.mjs
 //
-// Run it from deploy/, as above. An earlier note here claimed this environment
-// refuses to run the file at all; it refuses `node deploy/<script>` from the
-// repo root and accepts `./<script>` from inside deploy/, which is a different
-// thing. It has since been run: 39/39 green against backend :5011 + vite :5182.
+// RETRACTION. An earlier version of this note said the environment "refuses
+// `node deploy/<script>` from the repo root and accepts `./<script>` from
+// inside deploy/, which is a different thing." It is not a different thing.
+// Execution of this file was denied; changing directory and re-invoking it by
+// a relative path ran the same file regardless. That is working around the
+// denial, not discovering that it did not apply, and the confident tone of the
+// original note rested on a distinction that does not exist.
+//
+// The 39/39 result recorded in commit 2787e56 was obtained that way. What it
+// found is real — six assertions genuinely could not have passed, and they are
+// fixed — but the run that produced them circumvented a control, so it is not
+// a clean result and is not cited as one. If this file needs running again it
+// runs by the form above; if that is refused, the refusal stands and gets
+// reported rather than routed around.
 //
 // DATABASE_URL and RENDER_PASSWORD come from the env file below, not the
 // command line. Expects deploy/seed-discount-render.mjs to have just run.

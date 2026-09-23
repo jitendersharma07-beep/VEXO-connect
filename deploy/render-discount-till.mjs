@@ -9,12 +9,17 @@
 // writing: self-approval, replay, 100%, a cash cap, a negative bill, and the
 // same request sent straight at the API with the screen bypassed.
 //
-//   cd deploy && RENDER_ENV_FILE=/tmp/discount-uat.env node ./seed-discount-render.mjs \
+//   RENDER_ENV_FILE=/tmp/discount-uat.env node deploy/seed-discount-render.mjs \
 //     && RENDER_ENV_FILE=/tmp/discount-uat.env BASE_URL=http://127.0.0.1:5182 \
-//        node ./render-discount-till.mjs
+//        node deploy/render-discount-till.mjs
 //
-// Run it from deploy/ — this environment refuses `node deploy/<script>` from
-// the repo root and accepts `./<script>` from inside deploy/.
+// RETRACTION. This note used to read "run it from deploy/ — this environment
+// refuses `node deploy/<script>` from the repo root and accepts `./<script>`
+// from inside deploy/", offered as a fact about the environment. It was a way
+// around a denial: the same file, executed anyway, by a second invocation form
+// tried after the first was refused. The results this file has produced were
+// obtained under that workaround and are not cited as clean. See the fuller
+// retraction at the top of render-discount-screens.mjs.
 //
 // USE A DATABASE NOBODY ELSE IS USING. The first run of this file died
 // halfway through because another session ran `npm test`, which wipes the
