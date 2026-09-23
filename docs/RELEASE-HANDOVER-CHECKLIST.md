@@ -34,7 +34,7 @@ code changes to verified areas; documentation only after the freeze.
 | 1 | Core flows — orders, billing, payments, retry-safety, refunds, reports, day close, isolation | RC-verified | ✅ suite 384/384; e2e 52/52 |
 | 2 | **Discount policy** — see §Discount close-out | RC-verified | ✅ **CLOSED** |
 | 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`) | RC-verified | ✅ fixed, each moved a check FAIL → PASS |
-| 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser gate CLOSED** 2026-09-23; one display per counter |
+| 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser evidence ACCEPTED by the owner** 2026-09-23 (atc-noc dev stack, not a lab run, not full RC browser acceptance); one display per counter |
 | 5 | Physical receipt / KOT print | Browser-verified only | ⏳ **PENDING** — `docs/PRINTER-UAT-RUNBOOK.md`, 2026-09-24 |
 | 6 | Off-host encrypted backup | One copy exists but is **not compliant** (Window 2's record @ `9ff94ac`) — see §Off-host backup | ⛔ **Not done** — re-send after the owner's new key; remediation stays with Window 2 and the owner |
 | 7 | Client onboarding (menu, stores, staff) | — | ⛔ **Blocked** — client data pack not supplied (B2) |
@@ -70,7 +70,11 @@ survives the host, real client data, and anything on production.
   browser tooling. Direct and proxied logins on the lab both answered 200.
   Getting a browser run *on the lab* needs either that port freed or the
   lab CORS widened — both outside this session's ownership during the freeze.
-- **Browser gate CLOSED, 2026-09-23, on a later 17/17.** Run by session
+- **VC-101 browser evidence ACCEPTED by the owner (2026-09-23): 17/17 on the
+  atc-noc isolated dev stack** (`~/vexo-connect-dev`, :5350/:5351, 12
+  migrations), source `1d5407b`, exercised paths byte-identical to RC-1. It is
+  **not a lab run and not full RC browser acceptance**; the untested display
+  behaviours below stay listed as limitations. Run by session
   `7565dff8`: Run A at 15:36Z, `tests/e2e/walk-display.cjs` unmodified, 8/8;
   Run B at 15:38Z, `walk-display-qty-partial.cjs`, 9/9 — a quantity update
   re-priced on till and display, a part payment asks for the balance and does
@@ -91,9 +95,10 @@ survives the host, real client data, and anything on production.
   refunds route, the gateway-reconcile select or an import — none in the
   create, items, quantity, bill or payments handlers the runs used — and the
   `lib/orders.js` changes are refund-only. Evidence: package folder
-  `lab-browser-evidence/` (outside `SHA256SUMS`).
-- **Still not verified in a browser** — none of these reopens the display
-  gate: (a) no browser has driven a stack *built from* RC-1, with migration 13
+  `vc101-browser-evidence-atc-noc-dev/` (renamed from `lab-browser-evidence/`,
+  because the old name was itself a lab label; the report inside is unchanged
+  and pinned in `SHA256SUMS`).
+- **Still not verified in a browser** — these stay listed as limitations: (a) no browser has driven a stack *built from* RC-1, with migration 13
   applied and the RC's Prisma client (the tested tree has 12 migrations,
   RC-1 has 13); (b) nothing ran on the lab host itself (F-9: the lab accepts
   only `http://localhost:5177`); (c) RC-only screens — the refund dialog's
@@ -166,8 +171,8 @@ supersedes the bullets above, which reflect `33ee8c2`:
 - **Root disk: URGENT — owner** (§7 P1). Read on `atc-noc` 2026-09-23: 88% of
   98 GB used.
 
-A report by session `7565dff8` (`lab-browser-evidence/LAB-BROWSER-EVIDENCE.md`
-§5) calls that copy "DONE". Window 2's own record does not, and Window 2's
+A report by session `7565dff8`
+(`vc101-browser-evidence-atc-noc-dev/LAB-BROWSER-EVIDENCE.md` §5) calls that copy "DONE". Window 2's own record does not, and Window 2's
 record governs. Status and remediation stay with Window 2 and the owner.
 
 ## Physical printer — Window 3's result
