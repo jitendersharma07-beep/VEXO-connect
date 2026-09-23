@@ -33,6 +33,12 @@ cannot reach the artefact; that is proved, not assumed, below. Either is
 taggable — `91f3fac` is the one to tag if the hardware recommendation should
 ship with the release.
 
+**Tag the branch head.** Commits after `91f3fac` touch only top-level `docs/`,
+and the two build contexts are `./backend` and `./frontend` — so top-level
+`docs/` is inside neither, and no later doc commit can move the table below.
+Read the candidate as "head of `phase2-integration`"; this file cannot name its
+own hash.
+
 ### Why two hashes, and why that is not a discrepancy
 
 Production was built at 02:22:35Z, between `847423d` (02:13:11Z) and `40c4e91`
