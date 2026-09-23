@@ -1,0 +1,51 @@
+-- Manual payments carry the key the till recorded them under, so a retry
+-- returns the first payment instead of taking the money a second time.
+--
+-- The gateway path has had this since 20260921080000 (PaymentIntent and Refund
+-- both key their requests). The manual path — which is every payment on every
+-- deployment today, because no provider is configured anywhere — never did.
+--
+-- Why the existing guards were not enough. POST /orders/:id/payments refuses a
+-- repeat when the order is already PAID or has nothing due. That covers a
+-- retried payment for the FULL amount, which is why the gap looked closed. A
+-- PARTIAL payment leaves the order BILLED with money still due, so a retry
+-- clears both guards and inserts again.
+--
+-- Measured, not reasoned about. On the deployed build, order
+-- BSC-CP/26-27/00011: the response to a ₹47.25 CARD payment was discarded
+-- after the server had committed it — the request reached the server, only the
+-- answer was lost — the cashier pressed Record payment again, and the ₹94.50
+-- bill came out PAID on two ₹47.25 rows 1.2 s apart for one swipe. At day
+-- close the drawer is ₹47.25 short with nothing on screen to explain it. Split
+-- tenders are ordinary café behaviour, so this is the common case.
+--
+-- Nullable, with no backfill, because there is nothing true to backfill with.
+-- A key identifies one attempt by one till; inventing one for a historical row
+-- would assert a retry relationship that was never observed. NULL is the
+-- honest value for "recorded before the till sent keys", and Postgres treats
+-- NULLs as distinct under a unique index, so any number of them coexist on one
+-- order. Gateway payments stay NULL too — their deduplication is the unique
+-- intentId, one row back.
+--
+-- Row counts taken 2026-09-23 before writing this, so "no backfill" is a
+-- measurement rather than an assumption:
+--
+--   prod (pos-prod-postgres-1, atc_pos):  "Payment" 10 rows, 0 GATEWAY,
+--                                         no idempotencyKey column.
+--   dev  (atc-pos-dev-db, atc_pos):       "Payment" 10 rows, 1 GATEWAY,
+--                                         no idempotencyKey column.
+--   test (atc-pos-dev-db, atc_pos_test):  "Payment" 0 rows.
+--
+-- Every one of those 20 rows keeps NULL and keeps working; the column changes
+-- behaviour only for a request that sends a key.
+--
+-- Scoped to the order, not globally unique. A globally unique key would let a
+-- till that reuses one — a clock reset, a cloned device image, a duplicated
+-- browser profile — suppress a genuine payment on a different bill, which is
+-- the same money lost in the opposite direction.
+
+-- AlterTable
+ALTER TABLE "Payment" ADD COLUMN "idempotencyKey" TEXT;
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Payment_orderId_idempotencyKey_key" ON "Payment"("orderId", "idempotencyKey");

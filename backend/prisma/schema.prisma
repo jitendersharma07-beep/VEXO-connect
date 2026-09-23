@@ -561,8 +561,31 @@ model Payment {
   // gateway payment cannot be refunded at all. Null for MANUAL, and for any
   // provider that names the attempt and the charge with one id.
   providerRef  String?        @unique
+  // Makes a RETRIED manual payment return the first one instead of collecting
+  // the bill twice — the same job PaymentIntent.idempotencyKey does for the
+  // gateway, which the manual path never had.
+  //
+  // It is needed because the guards on the payments route cannot see this case.
+  // They refuse a second payment once the order is PAID or nothing is due, which
+  // happens to cover a retried payment for the FULL amount — and so the hole
+  // looked closed. A PARTIAL payment leaves the order BILLED with money still
+  // due, so a retry passes both guards and is written again. Proven on the
+  // deployed build against BSC-CP/26-27/00011: the response to a ₹47.25 card
+  // payment was dropped after the server had committed it, the cashier pressed
+  // Record payment again, and a ₹94.50 bill came out PAID on two ₹47.25 rows
+  // for one swipe. Split bills are ordinary in a café, so this is the common
+  // case, not the exotic one.
+  //
+  // Nullable, and unique only per order: gateway payments and every row written
+  // before this column existed carry NULL, and Postgres treats NULLs as distinct
+  // so any number of them coexist. Scoping to the order rather than making it
+  // globally unique means a till that reuses a key across orders — a clock reset,
+  // a cloned device — cannot suppress a real payment on a different bill.
+  idempotencyKey String?
+
   createdAt    DateTime       @default(now())
 
+  @@unique([orderId, idempotencyKey])
   @@index([orderId])
   @@index([createdAt])
 }

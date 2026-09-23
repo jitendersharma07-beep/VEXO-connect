@@ -180,6 +180,19 @@ function VariantModal({ product, onPick, onClose }) {
   );
 }
 
+// One value per tender attempt, sent with the payment and held across retries.
+// It has to be random rather than derived from the order and the amount: two
+// guests splitting a bill down the middle produce two genuinely different
+// payments with identical fields, and a derived key would make the second look
+// like a retry of the first and silently drop it.
+//
+// randomUUID needs a secure context, which /pos (https) and localhost both
+// are; the fallback is there so a plain-http staging host degrades to a
+// slightly weaker key instead of throwing in the middle of taking money.
+const newPaymentKey = () =>
+  globalThis.crypto?.randomUUID?.() ??
+  `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+
 // Records a MANUAL payment (contract §5.3). Change due comes from the server
 // response — never computed here.
 function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
@@ -190,6 +203,7 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null); // { payment, changeDue, orderStatus }
+  const [payKey, setPayKey] = useState(newPaymentKey);
 
   useEffect(() => {
     if (open && order) {
@@ -200,8 +214,22 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
       setError('');
       setBusy(false);
       setResult(null);
+      setPayKey(newPaymentKey());
     }
   }, [open, order?.id]);
+
+  // Editing the tender makes it a different tender, so it gets a different
+  // key. Without this, a cashier who retries after a failure with a corrected
+  // amount would be sending the new figure under the old key, and if the
+  // original had in fact landed the server would refuse the correction as a
+  // mismatched replay instead of judging it on the amount still due.
+  //
+  // This does NOT cover starting a second tender with identical fields — the
+  // even split — because nothing changes for it to react to. startAnother
+  // rolls the key itself for that case.
+  useEffect(() => {
+    setPayKey(newPaymentKey());
+  }, [method, tendered, amount, note]);
 
   if (!open || !order) return null;
 
@@ -214,8 +242,13 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
     try {
       const payload =
         method === 'CASH'
-          ? { method, tendered: Number(tendered) }
-          : { method, amount: Number(amount), ...(note.trim() ? { note: note.trim() } : {}) };
+          ? { method, tendered: Number(tendered), idempotencyKey: payKey }
+          : {
+              method,
+              amount: Number(amount),
+              idempotencyKey: payKey,
+              ...(note.trim() ? { note: note.trim() } : {}),
+            };
       const { data } = await api.post(`/orders/${order.id}/payments`, payload);
       onOrder(data.order);
       setResult({ payment: data.payment, changeDue: data.changeDue, orderStatus: data.order.status });
@@ -233,6 +266,11 @@ function PaymentModal({ open, order, onClose, onOrder, onPaid }) {
     setNote('');
     setError('');
     setResult(null);
+    // Explicit, not left to the effect above: on an evenly split bill the
+    // second half is CASH for the same figure as the first, nothing in the
+    // form changes, and reusing the key would make the server answer with the
+    // first payment and pocket nothing for the second.
+    setPayKey(newPaymentKey());
   };
 
   return (
