@@ -20,14 +20,24 @@ export const REDACT = [
   '*.licenseKey',
   // The discount-approval block is the one place a password legitimately
   // rides inside a request BODY: { approval: { approverEmail, password,
-  // reason } }. No log path serialises bodies today — pino-http's default
-  // req serializer carries no body, and the error handler logs { err, url }
-  // only — but '*.password' reaches exactly one level deep, so the day a
-  // call site logs { body: req.body } the password would sit two levels down
-  // and sail straight through. These two paths make that future call site
-  // leak nothing on the day it is written.
-  '*.approval.password',
-  'req.body.approval.password',
+  // reason } }. That puts it two levels down, and `*` above reaches exactly
+  // ONE level, so nothing in this list reached it: a deliberate
+  // `logger.info({ body: req.body })` wrote the password out in full, in
+  // plain text, with the list as it stood.
+  //
+  // No log path serialises bodies today — pino-http's default req serializer
+  // carries no body, and the error handler logs { err, url } only — so this
+  // is depth rather than a live hole. But it is the layer everyone assumes
+  // is covering them while they add the log line that needs it.
+  //
+  // fast-redact has no arbitrary-depth wildcard, so the depths are spelled
+  // out. Keyed on depth rather than on the name `approval`, because the
+  // defect is "a password nested deeper than one level" and `approval` is
+  // only today's instance of it — a later `{ body: { manager: { password } } }`
+  // is the same bug and is already covered here.
+  '*.*.password',
+  '*.*.*.password',
+  '*.*.*.*.password',
 ];
 
 // A whitelist, where REDACT is a denylist: pino-http logs every response
