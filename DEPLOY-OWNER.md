@@ -75,10 +75,46 @@ session, that session still owns it.
 - no trade since the 05:52:35Z backup — payments still 10 / ₹1695.23, so that
   dump remains a valid restore point
 
-**Outstanding:** the two behavioural checks (receipt/KOT modal pagination and
-partial-payment retry) have NOT been driven against production. Both need an
-authenticated session on the demo tenant, and the two `LOGIN_FAILED` audit rows
-at 12:37:40 and 12:37:54 are the previous owner hitting the same wall.
+## The two behavioural checks — DONE against production, 12:55–13:10Z
+
+Recorded by `896234f0`. The section above listed both as outstanding; that was
+written while they were still running. Neither needs re-running, and both left
+their artefacts on disk.
+
+Two corrections to the note that stood here:
+
+- The `LOGIN_FAILED` rows at 12:37:40 and 12:37:54 are **not** a session that
+  could not sign in. They are `deploy/prod-verify.mjs` step 8, *"wrong
+  credentials → 401"* — a negative control that is supposed to fail, fired once
+  on loopback 8110 and once on the public mount. Reading a deliberate failure
+  as a blocker is how a working path gets reported as broken.
+- Signing in was never the wall. `prod-verify.mjs` asks for its password on a
+  TTY and cannot be driven from a pipe (8/9 by design, both origins); the demo
+  credentials file the other harnesses already use is at
+  `/home/atc-noc/pos-demo-creds-20260921.txt`.
+
+**Receipt/KOT pagination — the real modal, not the bare view.** `uat-render`
+renders the receipt on its own page with nothing behind it, so it cannot see
+this defect at all. Driven instead through the signed-in SPA on a 12-line order
+(1310 px of document behind a 768 px viewport), printing through Chromium with
+`preferCSSPageSize`: **KOT 1 page, receipt 1 page**, complete header-to-footer,
+and in print media every sibling of `[data-print-root]` is `display:none`.
+Negative control — the pre-fix rule re-applied in the same browser gives **9
+pages** for the KOT and **5** for the receipt, so the page counter does detect
+the defect it is claimed to rule out. 8/8.
+
+**Partial-payment retry.** One partial CASH tender sent 5 times on one order —
+twice sequentially, twice concurrently — under a single idempotency key:
+**one** payment row, every retry `HTTP 200 replayed=true` returning that same
+row, ₹173.25 collected once. Same key with a different amount is refused 409.
+Two genuine equal-value CARD tenders under different keys stayed **two** rows,
+and two keyless equal tenders stayed two as well (NULLs distinct under the
+index). The order was BILLED, never PAID, throughout — a full tender would have
+been caught by the old status guard and proved nothing. 9/9.
+
+Both runs cleaned up through the app: every tender refunded to net zero, then
+the order voided. Nothing deleted. Orders `BSC-CP/26-27/00013` (opened and
+voided unused), `00014` and `00015` are those test orders and are all VOID.
 
 ## State at time of claim
 

@@ -222,8 +222,34 @@ Submit once.
 |---|---|
 | Physical receipt / KOT printing | no printer attached to this deployment |
 | Razorpay checkout, webhook, refund | gateway off for a billing-only pilot; another lane owns it |
-| Any screen below 768 px | no navigation exists there yet — `WORK-ORDER-MOBILE-NAV.md` |
 | Day-close correction chain | would file a second permanent record; covered by the vitest suite |
+
+Below 768 px used to sit in that table as "no navigation exists there yet".
+That has been untrue since `543a220` shipped the drawer on 2026-09-22, and
+leaving it there told a tester to skip the one width the drawer exists for.
+`WORK-ORDER-MOBILE-NAV.md` is discharged.
+
+`SidebarBody` (`frontend/src/components/Layout.jsx:59`) is the single nav
+definition, rendered from the same `navProps` at line 268 (md+ sidebar) and
+line 302 (below-md drawer). The work order's real worry was a hand-copied link
+list drifting until the drawer handed a cashier the owner's links; one
+definition is what rules that out, so that is the thing to check if the file is
+ever touched.
+
+Measured on the deployed v1.0.1 bundle by `deploy/render-nav-widths.mjs` — no
+credentials, no writes, `/api/auth/me` intercepted per role — **33/33**:
+
+| Width | Cashier | Owner | Overflow |
+|---|---|---|---|
+| 430 px (drawer) | 4 links | 13 links | 0 |
+| 767 px (drawer) | 4 links | 13 links | 0 |
+| 768 px (sidebar) | 4 links | 13 links | 0 |
+
+The cashier sees strictly fewer links than the owner at every width and no
+owner-only link at any of them; the sidebar/drawer swap lands exactly on the
+768 px boundary. Re-run that script rather than eyeballing a phone — the
+assertion that fails on a hardcoded link list is the cashier-vs-owner
+comparison, and that failure is a permissions leak, not a layout bug.
 
 ## If a step fails
 
