@@ -2,10 +2,36 @@
 # stack: compose derives container names, image tags and volume names from it.
 name: pos-prod
 
+# Docker's json-file driver keeps EVERY line forever unless told otherwise, and
+# the daemon has no host-wide default here (no /etc/docker/daemon.json). One
+# container's log therefore grows without limit on the same 98 GB volume that
+# holds /var/lib/docker and the Postgres data directory — and this box was at
+# 83% before this block existed. A full disk does not degrade the POS, it
+# crash-loops Postgres and zeroes files mid-write.
+#
+# An anchor rather than three copies: a service that silently MISSES the block
+# is exactly the failure this is meant to prevent, and a missing `logging:` key
+# looks identical to a present one until the disk fills.
+#
+# 10m x 5 is a hard 50 MB ceiling per container, 150 MB for the stack — bounded
+# and predictable, which matters more than retention depth. At the backend's
+# observed ~10 MB/day that is roughly five days of history; the durable record
+# of what happened is the audit table and the nightly dump, not stdout.
+#
+# Deliberately scoped to this compose project instead of /etc/docker/daemon.json:
+# a daemon default would silently re-log every other stack on this host and
+# needs a daemon restart to apply.
+x-logging: &pos-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *pos-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -25,6 +51,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *pos-logging
     env_file:
       - .env
     environment:
@@ -76,6 +103,7 @@ services:
         # edit. Default is the root-domain case.
         VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
     restart: unless-stopped
+    logging: *pos-logging
     ports:
       # Loopback only: the host nginx is the sole way in.
       - "127.0.0.1:${HTTP_PORT:-8110}:80"
