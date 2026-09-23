@@ -797,6 +797,32 @@ describe('transitions, refunds and voids', () => {
       expect((await prisma.payment.findMany({ where: { orderId: o2.id } })).length).toBe(1);
     });
 
+    // The key is stored per order, not per tenant, so the isolation has to come
+    // from the order lookup — and that is worth proving rather than reading.
+    // A neighbouring company presenting company A's order id and A's key must
+    // be refused at the door. The dangerous failure is not a 500: it is a 200
+    // carrying A's payment row, which would hand one tenant another tenant's
+    // takings and the customer's tender with it.
+    it('a neighbouring tenant cannot use the key to read a payment', async () => {
+      const o = await takeaway();
+      const total = Number((await bill(o.id)).total);
+      const key = 'cross-tenant-probe-01';
+      const mine = await pay(o.id, { method: 'CARD', amount: total, idempotencyKey: key });
+      expect(mine.status).toBe(201);
+
+      const theirs = await request(app)
+        .post(`/api/orders/${o.id}/payments`)
+        .set(auth(tokens.ownerB))
+        .send({ method: 'CARD', amount: total, idempotencyKey: key });
+
+      expect(theirs.status).toBe(404);
+      expect(JSON.stringify(theirs.body)).not.toContain(mine.body.payment.id);
+      // and company A's money is untouched by the attempt
+      const rows = await prisma.payment.findMany({ where: { orderId: o.id } });
+      expect(rows.length).toBe(1);
+      expect(Number(rows[0].amount)).toBeCloseTo(total, 2);
+    });
+
     // A replay collected nothing, so it must not leave a row that a report
     // would add up as a collection. The retry is still recorded — a till
     // retrying is worth seeing — under an action of its own.
