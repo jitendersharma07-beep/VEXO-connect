@@ -28,6 +28,18 @@ if (allowFixedPasswords && process.env.NODE_ENV === 'production') {
   process.exit(1);
 }
 
+// A typo here mints an operator nobody can sign in as and no API can delete,
+// so the address is checked before it reaches the database.
+const platformAdminEmail = () => {
+  const raw = process.env.POS_SEED_ADMIN_EMAIL?.trim().toLowerCase();
+  if (!raw) return 'pos.admin@atcinfocom.in';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+    console.error(`POS_SEED_ADMIN_EMAIL is not a valid email address: ${raw}`);
+    process.exit(1);
+  }
+  return raw;
+};
+
 const issued = [];
 
 const ensureUser = async ({ email, fullName, role, companyId = null, branchId = null, passwordEnv }) => {
@@ -53,9 +65,15 @@ const ensureUser = async ({ email, fullName, role, companyId = null, branchId = 
 
 const main = async () => {
   // --- ATC platform operator -------------------------------------------------
+  // This is the one account no API can mint: /api/users excludes
+  // POS_SUPER_ADMIN from its assignable roles on purpose, and nothing under
+  // /api/atc creates operators either. So the address has to be settable here,
+  // or a deployment is stuck with the built-in name and can never hold a
+  // second operator to fall back on if the first one is lost. Re-running with
+  // a different POS_SEED_ADMIN_EMAIL adds one rather than replacing it.
   await ensureUser({
-    email: 'pos.admin@atcinfocom.in',
-    fullName: 'ATC POS Platform Admin',
+    email: platformAdminEmail(),
+    fullName: process.env.POS_SEED_ADMIN_NAME?.trim() || 'ATC POS Platform Admin',
     role: 'POS_SUPER_ADMIN',
     passwordEnv: 'POS_SEED_ADMIN_PASSWORD',
   });
