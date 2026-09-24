@@ -22,7 +22,7 @@ exists so the fix is a decision W1 makes with the evidence in hand.
 | D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
 | D-3 | Phone orders cannot sell a product with a REQUIRED modifier group | Such products are refused on the phone path with "Choose at least N"; the caller cannot complete the order | Medium — fails CLOSED, so no mispricing; a catalogue subset is simply unsellable by phone | `backend/src/api/routes/orders.js` `resolveCatalogLine` minSelect loop, called from `phoneOrders.js` |
 | D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
-| D-5 | The catalog API can leave a required modifier group permanently unsatisfiable | The product becomes unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it is reachable by an ordinary catalogue edit | `backend/src/api/routes/catalog.js:585` and `:644–675` |
+| D-5 | ~~The catalog API can leave a required modifier group permanently unsatisfiable~~ **FIXED 09-24** | The product became unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it was reachable by an ordinary catalogue edit | Fix: `assertSatisfiable` in `backend/src/api/routes/catalog.js`, three call sites |
 | D-6 | Archiving a promotion permanently burns its code | The code cannot be republished, edited, or reused by a new promotion — the offer is unrecoverable and the till's code stops working for good | Medium — fails CLOSED, no mispricing; one code per mistake, not the catalogue | `backend/src/api/routes/promotions.js:353` with `:196`, `:229`, `:281`, `:167–172` |
 
 §3 is the part worth reading first: **the phone-order suite already builds D-1's
@@ -36,7 +36,11 @@ this is where a VC-104 reader will look, not because W2's browser QA found them.
 the first HTTP-level tests for the modifier catalog routes
 (`backend/tests/catalogModifiers.test.js`). It is filed here because it is the
 other half of D-3's question — *what should happen when a required modifier
-group cannot be satisfied* — and the two are best answered once, together.
+group cannot be satisfied* — and the two looked best answered once, together.
+**D-5 was then fixed the same day** on the owner's instruction; D-3 was not, and
+remains open. The full account is kept rather than deleted, because implementing
+the fix turned up two more ways into the bad state than the investigation had
+found, which is worth knowing next time.
 
 **D-6 was found by looking for D-5's shape elsewhere** (09-24, after D-5 was
 closed): a route with no frontend caller *and* no HTTP test, so that nothing —
@@ -299,7 +303,13 @@ the VC-105 row of the UI acceptance table is **owed, not passed**.
 
 ---
 
-## D-5 — the catalog API can make a product unsellable and does not say so
+## D-5 — the catalog API could make a product unsellable and did not say so
+
+> **FIXED 09-24**, on the owner's instruction, by option 1 below. The account
+> that follows is left in the past tense as written, because the reasoning is
+> what makes the fix reviewable. What changed is in **"The fix, as applied"** at
+> the end of this section — including **two further ways in that only came to
+> light while implementing it**, which the original write-up missed.
 
 Found 09-24 while writing `backend/tests/catalogModifiers.test.js`, the first
 tests to reach the modifier catalog routes over HTTP at all. Not created by any
@@ -338,11 +348,13 @@ Two ordinary edits reach it, neither of which looks dangerous:
    nothing compares `minSelect` against the option count. `minSelect: 3` on a
    group with two options is accepted.
 
-### Observed
+### Observed (before the fix)
 
-Both paths are pinned in `backend/tests/catalogModifiers.test.js`, in the
-`D-5 tripwires` describe. Each test first **sells the product successfully**, so
-the later refusal is attributable to the edit and not to a broken fixture:
+Both paths were pinned in `backend/tests/catalogModifiers.test.js`, in a
+`D-5 tripwires` describe that no longer exists under that name — those two tests
+are now the refusal tests described below, which is what a tripwire is for. Each
+first **sold the product successfully**, so the later refusal was attributable to
+the edit and not to a broken fixture:
 
 ```
 TRIPWIRE: archiving the last active option of a required group makes the product unsellable
@@ -379,11 +391,7 @@ product sells again. So the product is recoverable, by someone who knows that
 archiving the group is different from archiving its last option. Nothing in the
 API, the error, or any document said so before this one.
 
-### Suggested fixes — not applied, because this is a product decision
-
-Deliberately left unfixed. The tripwire tests assert today's behaviour so that
-behaviour is at least written down; **fixing D-5 is meant to break them**, and
-that is the signal, not a regression.
+### The options that were on the table
 
 1. **Refuse the edit** — 409 on archiving the last active option of a group with
    `minSelect >= 1`, and on raising `minSelect` above the active-option count,
@@ -398,9 +406,113 @@ that is the signal, not a regression.
 3. **Warn without blocking** — allow the edit, return the product with a flag
    the catalogue screen renders. Needs a UI that does not exist yet (see below).
 
-(1) matches how the rest of this codebase behaves. It is still W1's/the owner's
-call, and it pairs naturally with D-3: both ask *what should happen when a
-required modifier group cannot be satisfied*, and one answer should cover both.
+**The owner chose (1)** on 09-24. It matches how the rest of this codebase
+behaves, and it is the only one of the three that puts the message in front of
+the person who can still change their mind.
+
+### The fix, as applied
+
+`backend/src/api/routes/catalog.js`. One helper, `assertSatisfiable`, holding one
+invariant:
+
+> **An ACTIVE modifier group must have at least `minSelect` ACTIVE options.**
+
+Three properties of how it is written matter more than the rule itself:
+
+- **It is checked against the RESULT of the write, not the payload.** Three of
+  the four paths in send a body that is perfectly valid on its own and only goes
+  wrong against what is already stored. That is exactly why a zod `.refine`
+  cannot express this and the check is written longhand in each route.
+- **409, not 400.** Nothing about the input is malformed; the request conflicts
+  with the state of the group. `POS_CONFLICT`.
+- **Every message names the remedy**, and a different one per route, because the
+  way out is not guessable — archiving the *group* is fine and archiving its last
+  *option* is not, and until now nothing in the API said so.
+
+```
+"Milk" would require 1 choice but only 0 are available, so the product could not
+be sold. Archive the whole group instead, or lower its minimum first.
+```
+
+#### Four ways in, not two
+
+Implementing the guard surfaced two paths the original write-up above missed.
+Both were live. The count is now four, and all four are pinned by tests:
+
+| # | Route | How you get there | In the original write-up? |
+|---|-------|-------------------|---------------------------|
+| 1 | `POST .../modifier-groups` | `minSelect >= 1` on creation — **a group is born with no options**, so the very first write is already unsatisfiable | **No** |
+| 2 | `PATCH .../options/:optionId` | `{"status":"ARCHIVED"}` on the last active option | Yes |
+| 3 | `PATCH .../:groupId` | `minSelect` raised above the active-option count | Yes |
+| 4 | `PATCH .../:groupId` | `{"status":"ACTIVE"}` on a group whose options were all archived while it was away | **No** |
+
+Path 1 is the awkward one, because it makes creating a required group a
+**three-step job**: create it with no minimum, add the options, then raise the
+minimum. That is a real cost to a legitimate workflow and the error message says
+so explicitly, otherwise it reads as "required groups are banned". The test
+helper `makeRequiredGroup` does those three steps, and the fact that it needed
+writing is the honest measure of the friction added.
+
+`POST .../options` needs no guard at all: it only ever raises the active count.
+
+#### Deliberately strict about data that is already broken
+
+A group that is *already* unsatisfiable — rows written by the old code — refuses
+unrelated edits too, including a plain rename. This is intentional. Those rows
+exist and nothing else will ever mention them; a refusal at the next edit is the
+only moment anyone is looking. All four repairs stay open, because each ends in
+a state that satisfies the rule:
+
+- archive the group,
+- lower `minSelect`,
+- restore an archived option (the rule must never refuse the repair for the
+  breakage it is reporting), or
+- add a new option.
+
+Each of those four is a separate test in
+`describe('a group that was already broken before the guard existed')`.
+
+#### Finding pre-existing violations
+
+The guard stops new ones; it does not clean up old ones. This finds them:
+
+```sql
+SELECT p.id AS product_id, p.name AS product, g.id AS group_id, g.name AS "group",
+       g."minSelect", count(o.id) FILTER (WHERE o.status = 'ACTIVE') AS active_options
+FROM "ModifierGroup" g
+JOIN "Product" p ON p.id = g."productId"
+LEFT JOIN "ModifierOption" o ON o."groupId" = g.id
+WHERE g.status = 'ACTIVE' AND g."minSelect" > 0
+GROUP BY p.id, p.name, g.id, g.name, g."minSelect"
+HAVING g."minSelect" > count(o.id) FILTER (WHERE o.status = 'ACTIVE');
+```
+
+Every row it returns is a product that cannot currently be sold. **Not yet run
+against any live database** — that is a production read and this lane does not
+touch production.
+
+#### How the fix was verified
+
+`backend/tests/catalogModifiers.test.js` went 40 → 51 tests; the whole backend
+suite 628 → 639, all green, no other file's count moved. Green on the first run
+is a claim, not evidence, so the guard was inverted three ways in a scratch
+worktree:
+
+| Control | Perturbation | Tests that caught it |
+|---------|--------------|----------------------|
+| 1 | `assertSatisfiable` made a no-op | 6 |
+| 2 | `countActive` counts ARCHIVED options too — the most plausible wrong implementation | 3 |
+| 3 | the availability count hardcoded in the message | 1 |
+
+Control 2 is the one that matters: it proves the tests distinguish ACTIVE from
+merely-existing options, which is the entire content of the bug.
+
+#### What this does not settle
+
+D-3 is still open. It asks the neighbouring question — *what should happen when a
+required group cannot be satisfied **by a particular channel***  — and this fix
+does not answer it. A group with two active options is perfectly satisfiable and
+still unsellable by phone.
 
 ### Note on how this went unnoticed
 
@@ -638,17 +750,23 @@ acceptance table is **OWED, not passed**. The 48/48 that appeared on `main`
 later on 09-24 does not change that — see the update under D-4 for why the
 missing `at` field settles its provenance.
 
-D-5 is **unfixed on purpose**, and is the one entry here that *is* pinned by
-assertions — two of them, labelled TRIPWIRE in
-`backend/tests/catalogModifiers.test.js`. They assert today's behaviour so it
-cannot change unnoticed; they are not an endorsement of it. A fix to D-5 should
-break exactly those two tests and nothing else in that file.
+D-5 is **FIXED** (09-24, owner's instruction, option 1). It is also the only
+entry here whose history can be read off the test file: it was pinned by two
+TRIPWIRE assertions recording the broken behaviour, the fix broke both, and they
+were rewritten as the refusal tests they were always meant to become. The four
+paths in are now all refused with a 409 that names the remedy, verified by three
+separate inversions of the guard rather than by the fact that the suite went
+green. Full account, including the two paths the original investigation missed,
+is in the D-5 section.
 
 What the new test file does **not** claim: it proves the four modifier catalog
 routes behave as written, not that the behaviour is the product anyone asked
 for. There is no modifier management UI to compare them against, and no
-acceptance criterion in the contract beyond §5.1's one line. Where a test simply
-records what the code does rather than what it should do, it says TRIPWIRE.
+acceptance criterion in the contract beyond §5.1's one line. One tripwire
+remains, and says so at the assertion. The D-5 fix has a **workflow cost** that
+no test can judge: creating a required modifier group is now three API calls
+instead of one, and if that turns out to be wrong for real menu maintenance, it
+is option 3 in the D-5 section that should be revisited, not this guard.
 
 D-6 is **unfixed and unpinned**. It is the one entry here with no test of any
 kind behind it — see "Status of the claim" under D-6 for what that does and does
