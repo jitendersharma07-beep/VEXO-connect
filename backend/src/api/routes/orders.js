@@ -181,7 +181,17 @@ const discountAudit = (policy, before, after, approver, reason) => ({
 // shares and the promotion eligible base — sees the modifier-inclusive price
 // by construction (spec VC-102 modifier treatment). The rows returned in
 // `modifiers` are the printed breakdown of that fold.
-const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifierOptionIds }) => {
+//
+// Exported for LANE vc104-api: the phone-order centre snapshots catalog lines
+// the same way the till does. Exporting beats copying — a second copy would
+// drift the day this gains modifiers, and both paths must price identically.
+// That day is this merge. vc104 wrote its caller against the pre-modifier
+// signature and passes no modifierOptionIds; `?? []` below keeps that safe for
+// products whose groups are all optional, but the minSelect loop still runs,
+// so a product with a REQUIRED group is refused on the phone path with
+// "Choose at least N". See docs/VC104-BACKEND-DEFECTS.md D-3 — the phone-order
+// API needs a modifier field before such products can be sold over the phone.
+export const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifierOptionIds }) => {
   const product = await prisma.product.findFirst({
     where: { id: productId, companyId, status: 'ACTIVE' },
     include: {
