@@ -18,7 +18,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
-import { treeStamp } from './tree-stamp.mjs';
+import { treeStamp, runtimeStamp } from './tree-stamp.mjs';
 
 const UI = process.env.QA_UI || 'http://127.0.0.1:5387';
 const API = process.env.QA_API || 'http://127.0.0.1:5386';
@@ -376,6 +376,7 @@ const passed = results.filter((r) => r.pass).length;
 // That is D-4: this exact file, 48/48 and green, reached main as a merge
 // resolution and was evidence about a tree with no VC-104 in it. See
 // qa/tree-stamp.mjs and docs/VC104-BACKEND-DEFECTS.md.
-writeFileSync(join(OUT, 'results-vc105.json'), JSON.stringify({ ui: UI, api: API, at: new Date().toISOString(), ...treeStamp(import.meta.url), passed, total: results.length, results }, null, 2));
+const tree = treeStamp(import.meta.url);
+writeFileSync(join(OUT, 'results-vc105.json'), JSON.stringify({ ui: UI, api: API, at: new Date().toISOString(), ...tree, runtime: runtimeStamp(API, tree.tree), passed, total: results.length, results }, null, 2));
 console.log(`\n${passed}/${results.length} browser checks passed`);
 process.exit(passed === results.length ? 0 : 1);

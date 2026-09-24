@@ -21,7 +21,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { treeStamp } from './tree-stamp.mjs';
+import { treeStamp, runtimeStamp } from './tree-stamp.mjs';
 
 // puppeteer-core is a QA-only dependency; resolve it from this lane if
 // installed, else borrow the sibling vc105-ui lane's copy (same repo, same
@@ -84,8 +84,10 @@ const writeResults = () => {
   resultsWritten = true;
   const passed = results.filter((r) => r.pass).length;
   const skipped = results.filter((r) => r.skipped).length;
+  const tree = treeStamp(import.meta.url);
   writeFileSync(join(OUT, 'results-vc104.json'), JSON.stringify({
-    ui: UI, api: API, at: new Date().toISOString(), ...treeStamp(import.meta.url),
+    ui: UI, api: API, at: new Date().toISOString(), ...tree,
+    runtime: runtimeStamp(API, tree.tree),
     passed, skipped, total: results.length, results,
   }, null, 2));
   console.log(`\n${passed}/${results.length} browser checks passed (${skipped} skipped)`);
