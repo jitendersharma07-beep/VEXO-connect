@@ -337,6 +337,68 @@ describe('printed documents carry the truth (pre-hardware checklist)', () => {
     expect(doc.refunds).toEqual([]);
   });
 
+  // The zero-state half of the test above is the control for this one: the same
+  // four fields, asserted empty when no money has moved. Together they show the
+  // document reports collection rather than defaulting to either shape.
+  it('a paid receipt document carries each tender, its change, and the refund', async () => {
+    const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
+      .send({ type: 'TAKEAWAY', items: [{ productId: burgerId, qty: 2 }, { productId: saladId, qty: 1 }] });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const orderId = created.body.order.id;
+    const bill = await request(app).post(`/api/orders/${orderId}/bill`)
+      .set(auth(tokens.cashier)).send({});
+    expect(bill.status, JSON.stringify(bill.body)).toBe(200);
+    expect(bill.body.order.total).toBe(315); // 300 + 5% GST, no discount
+
+    // Split deliberately: CARD stores no tendered, CASH does. They are the two
+    // branches of the receipt's change-due calculation, and change printed wrong
+    // is a dispute at the counter.
+    const card = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'CARD', amount: 115 });
+    expect(card.status, JSON.stringify(card.body)).toBe(201);
+    const cash = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'CASH', tendered: 250 });
+    expect(cash.status, JSON.stringify(cash.body)).toBe(201);
+    expect(cash.body.order.status).toBe('PAID');
+    expect(cash.body.changeDue).toBe(50); // 250 handed over against 200 still due
+
+    // Split bills have no single tender to infer, so the method is explicit.
+    const refund = await request(app).post(`/api/orders/${orderId}/refunds`)
+      .set(auth(tokens.owner)).send({ amount: 40, reason: 'salad sent back', method: 'CASH' });
+    expect(refund.status, JSON.stringify(refund.body)).toBe(201);
+
+    const res = await enqueue({ orderId, kind: 'RECEIPT' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const row = await prisma.printJob.findUnique({ where: { id: res.body.jobs[0].id } });
+    const doc = row.document;
+
+    // Found by method, not by index: payments are ordered on createdAt alone,
+    // with no id tie-break, so two tenders inside one millisecond have no
+    // defined print order.
+    expect(doc.payments).toHaveLength(2);
+    expect(doc.payments.find((p) => p.method === 'CARD')).toEqual({
+      method: 'CARD', channel: 'MANUAL', amount: 115, tendered: null, changeDue: null,
+      label: 'MANUAL PAYMENT RECORD — not gateway-verified',
+    });
+    expect(doc.payments.find((p) => p.method === 'CASH')).toEqual({
+      method: 'CASH', channel: 'MANUAL', amount: 200, tendered: 250, changeDue: 50,
+      label: 'MANUAL PAYMENT RECORD — not gateway-verified',
+    });
+    expect(doc.amountPaid).toBe(315);
+
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: 40, reason: 'salad sent back', status: 'SUCCEEDED', channel: 'MANUAL',
+      label: 'REFUND HANDED BACK — recorded by staff',
+    });
+
+    // Not 275. amountDue is what is still owed on the bill, and the bill was
+    // settled in full; the ₹40 back is its own line. Netting the refund in here
+    // would print a balance the customer does not owe.
+    expect(doc.amountDue).toBe(0);
+    expect(doc.total).toBe(315);
+  });
+
   it('a KOT document carries the order note and per-line notes', async () => {
     const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
       .send({ type: 'TAKEAWAY', note: 'serve together',
