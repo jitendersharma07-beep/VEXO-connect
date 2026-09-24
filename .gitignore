@@ -1,4 +1,12 @@
+# Both forms on purpose. The trailing slash matches a DIRECTORY only, and in a
+# repo with ~18 worktrees it is normal to symlink one lane's node_modules into
+# another rather than re-install 500 MB. A symlink is not a directory, so
+# `node_modules/` alone does NOT ignore it: 2026-09-24 the consolidation
+# worktree showed `?? frontend/node_modules` for a symlink into the foundation
+# lane, one `git add -A` away from committing an absolute path that exists on
+# no other machine. The bare line below catches the symlink too.
 node_modules/
+node_modules
 dist/
 .env
 .env.local
