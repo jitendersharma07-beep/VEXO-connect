@@ -22,7 +22,12 @@ if curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
 fi
 
 docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -qc "CREATE DATABASE $DB OWNER atc_pos"
-URL="postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/$DB?schema=public"
+# Read the password out of the container that just answered, rather than
+# keeping a copy here: this file is committed, that environment is not.
+PW="$(docker exec atc-pos-dev-db printenv POSTGRES_PASSWORD 2>/dev/null)"
+[ -n "$PW" ] || { echo "FAIL: could not read POSTGRES_PASSWORD from atc-pos-dev-db"; exit 1; }
+URL="postgresql://atc_pos:${PW}@127.0.0.1:5439/$DB?schema=public"
+unset PW
 SECRET=$(openssl rand -hex 32)
 pw() { openssl rand -hex 12; }
 export POS_SEED_ADMIN_PASSWORD="$(pw)" POS_SEED_OWNER_PASSWORD="$(pw)"
