@@ -21,10 +21,17 @@ import {
   branchIdFilterFor,
 } from '../../middleware/auth.js';
 import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
+import {
+  loadPermissionContext,
+  requireAction,
+  resolveStoreInScope,
+} from '../../middleware/permissions.js';
+import { deviceContext, assertDeviceStore, deviceStamp } from '../../middleware/device.js';
+import { evaluatePromotion, stackingRefusal } from '../../lib/promotions.js';
 import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
 import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
-import { nextInvoiceNumber } from '../../lib/invoice.js';
+import { nextInvoiceNumber, sellerOfRecord, billingSnapshot } from '../../lib/invoice.js';
 import {
   ORDER_INCLUDE,
   SUMMARY_INCLUDE,
@@ -47,7 +54,10 @@ import {
 } from '../../lib/orders.js';
 
 const router = Router();
-router.use(requirePosAuth, resolveCompanyScope);
+// deviceContext AFTER resolveCompanyScope — a device token can only be judged
+// once the tenant it must belong to is known. It is optional: a browser till
+// that sends no token passes straight through and attributes less.
+router.use(requirePosAuth, resolveCompanyScope, deviceContext);
 
 const operate = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER', 'CASHIER'), requireUsableLicense];
 const managerUp = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER'), requireUsableLicense];
@@ -68,6 +78,11 @@ const loadOrder = async (req, include = undefined) => {
   if (isBranchPinned(req.user) && order.branchId !== req.user.branchId) {
     throw forbidden('Your role is limited to your own branch');
   }
+  // Every route in this file that touches an existing order comes through here,
+  // so the device's store scope is enforced once rather than remembered twenty
+  // times. A device at one store cannot add items to, bill, collect on, refund
+  // or void an order belonging to another — even with a valid user session.
+  assertDeviceStore(req, order.branchId);
   return order;
 };
 
@@ -158,12 +173,21 @@ const discountAudit = (policy, before, after, approver, reason) => ({
   approvalReason: approver ? reason : null,
 });
 
-// Snapshots product/variant/tax at add time — later catalog edits never touch
-// an existing order line.
-const resolveCatalogLine = async (companyId, { productId, variantId, qty }) => {
+// Snapshots product/variant/modifier/tax at add time — later catalog edits
+// never touch an existing order line. Chosen modifiers are validated against
+// the product's groups (minSelect..maxSelect) and their per-unit prices are
+// FOLDED INTO unitPrice, so every downstream reader — totals, taxes, discount
+// shares and the promotion eligible base — sees the modifier-inclusive price
+// by construction (spec VC-102 modifier treatment). The rows returned in
+// `modifiers` are the printed breakdown of that fold.
+const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifierOptionIds }) => {
   const product = await prisma.product.findFirst({
     where: { id: productId, companyId, status: 'ACTIVE' },
-    include: { taxRate: true, variants: true },
+    include: {
+      taxRate: true,
+      variants: true,
+      modifierGroups: { include: { options: true } },
+    },
   });
   if (!product) throw badRequest('Unknown or archived product', 'productId');
   let variant = null;
@@ -171,16 +195,71 @@ const resolveCatalogLine = async (companyId, { productId, variantId, qty }) => {
     variant = product.variants.find((v) => v.id === variantId && v.status === 'ACTIVE') ?? null;
     if (!variant) throw badRequest('Unknown or archived variant', 'variantId');
   }
+
+  const chosenIds = [...new Set(modifierOptionIds ?? [])];
+  const activeGroups = product.modifierGroups.filter((g) => g.status === 'ACTIVE');
+  const optionIndex = new Map();
+  for (const g of activeGroups) {
+    for (const m of g.options) {
+      if (m.status === 'ACTIVE') optionIndex.set(m.id, { group: g, option: m });
+    }
+  }
+  const modifiers = [];
+  const perGroup = new Map();
+  for (const id of chosenIds) {
+    const hit = optionIndex.get(id);
+    if (!hit) throw badRequest('Unknown or archived modifier option', 'modifierOptionIds');
+    perGroup.set(hit.group.id, (perGroup.get(hit.group.id) ?? 0) + 1);
+    modifiers.push({
+      optionId: hit.option.id,
+      groupName: hit.group.name,
+      name: hit.option.name,
+      price: hit.option.price,
+    });
+  }
+  for (const g of activeGroups) {
+    const count = perGroup.get(g.id) ?? 0;
+    if (count < g.minSelect) {
+      throw badRequest(`Choose at least ${g.minSelect} from "${g.name}"`, 'modifierOptionIds');
+    }
+    if (g.maxSelect !== null && count > g.maxSelect) {
+      throw badRequest(`Choose at most ${g.maxSelect} from "${g.name}"`, 'modifierOptionIds');
+    }
+  }
+
+  const basePaise = paiseOf(variant ? variant.price : product.basePrice);
+  const modifierPaise = modifiers.reduce((a, m) => a + paiseOf(m.price), 0);
   return {
     productId: product.id,
     variantId: variant?.id ?? null,
     name: variant ? `${product.name} (${variant.name})` : product.name,
-    unitPrice: variant ? variant.price : product.basePrice,
+    unitPrice: ((basePaise + modifierPaise) / 100).toFixed(2),
     qty,
     taxRateName: product.taxRate?.name ?? null,
     taxRatePercent: product.taxRate?.ratePercent ?? null,
+    modifiers,
   };
 };
+
+// A line only merges with another line carrying the SAME modifier choice.
+const modifierKeyOf = (mods) => (mods ?? []).map((m) => m.optionId).sort().join(',');
+
+const createLineData = ({ modifiers, ...line }, orderId) => ({
+  ...line,
+  orderId,
+  ...(modifiers.length
+    ? {
+        modifiers: {
+          create: modifiers.map((m) => ({
+            optionId: m.optionId,
+            groupName: m.groupName,
+            name: m.name,
+            price: m.price,
+          })),
+        },
+      }
+    : {}),
+});
 
 // --- create -----------------------------------------------------------------
 
@@ -195,6 +274,7 @@ const createSchema = z.object({
         productId: z.string().min(1),
         variantId: z.string().min(1).optional(),
         qty: z.number().int().min(1).max(999).default(1),
+        modifierOptionIds: z.array(z.string().min(1)).max(30).optional(),
       }),
     )
     .min(1),
@@ -213,6 +293,10 @@ router.post(
     });
     if (!branch) throw notFound('Branch not found');
     if (branch.status !== 'ACTIVE') throw conflict('Branch is closed');
+    // A device credential is scoped to one store. Checked here, server-side,
+    // against the branch the route actually resolved — not against whatever the
+    // body claimed.
+    assertDeviceStore(req, branch.id);
 
     if (data.type === 'TAKEAWAY' && data.tableId) {
       throw badRequest('tableId is not allowed for TAKEAWAY orders', 'tableId');
@@ -231,10 +315,10 @@ router.post(
       if (occupied) throw conflict(`Table "${table.name}" already has an open order`);
     }
 
-    // Merge duplicate product+variant entries into one line.
+    // Merge duplicate product+variant+modifier entries into one line.
     const merged = new Map();
     for (const item of data.items) {
-      const key = `${item.productId}|${item.variantId ?? ''}`;
+      const key = `${item.productId}|${item.variantId ?? ''}|${[...new Set(item.modifierOptionIds ?? [])].sort().join(',')}`;
       const cur = merged.get(key);
       if (cur) cur.qty += item.qty;
       else merged.set(key, { ...item });
@@ -253,11 +337,17 @@ router.post(
           tableId: data.type === 'DINE_IN' ? data.tableId : null,
           note: data.note ?? null,
           openedById: req.user.id,
+          // Where the order was OPENED. Not re-stamped at bill or payment time:
+          // each payment carries its own till, so a bill started on a handheld
+          // and settled at the counter records both truthfully instead of one
+          // overwriting the other.
+          ...deviceStamp(req),
         },
       });
-      await tx.orderItem.createMany({
-        data: lines.map((l) => ({ orderId: order.id, ...l })),
-      });
+      // Nested modifier snapshots rule out createMany; still one transaction.
+      for (const l of lines) {
+        await tx.orderItem.create({ data: createLineData(l, order.id) });
+      }
       await recomputeOrder(tx, order.id);
       return order;
     });
@@ -284,6 +374,7 @@ router.post(
         productId: z.string().min(1),
         variantId: z.string().min(1).optional(),
         qty: z.number().int().min(1).max(999).default(1),
+        modifierOptionIds: z.array(z.string().min(1)).max(30).optional(),
         approval: approvalSchema,
       })
       .parse(req.body);
@@ -314,7 +405,7 @@ router.post(
       approval: body.approval,
       action: 'ORDER_ITEM_ADD',
       apply: async (tx, { approver: signer, reason: signedReason }) => {
-        const existing = await tx.orderItem.findFirst({
+        const candidates = await tx.orderItem.findMany({
           where: {
             orderId: order.id,
             productId: line.productId,
@@ -322,12 +413,17 @@ router.post(
             status: 'ACTIVE',
             kotId: null,
           },
+          include: { modifiers: true },
         });
+        // Same modifier choice merges; a different choice is its own line.
+        const existing = candidates.find(
+          (c) => modifierKeyOf(c.modifiers) === modifierKeyOf(line.modifiers),
+        );
         if (existing) {
           const qty = Math.min(existing.qty + line.qty, 999);
           await tx.orderItem.update({ where: { id: existing.id }, data: { qty } });
         } else {
-          await tx.orderItem.create({ data: { orderId: order.id, ...line } });
+          await tx.orderItem.create({ data: createLineData(line, order.id) });
         }
         // Only written when somebody actually had to sign for this add. An add
         // that stayed inside the operator's own limit leaves any earlier
@@ -596,7 +692,12 @@ const publicKot = (kot, order) => ({
   orderId: kot.orderId,
   type: order.type,
   tableName: order.table?.name ?? null,
-  items: kot.items.map((i) => ({ name: i.name, qty: i.qty })),
+  items: kot.items.map((i) => ({
+    name: i.name,
+    qty: i.qty,
+    // The kitchen prepares these; prices stay off the KOT.
+    modifiers: (i.modifiers ?? []).map((m) => m.name),
+  })),
   createdAt: kot.createdAt,
 });
 
@@ -610,6 +711,7 @@ router.post(
     const kot = await prisma.$transaction(async (tx) => {
       const unsent = await tx.orderItem.findMany({
         where: { orderId: order.id, status: 'ACTIVE', kotId: null },
+        include: { modifiers: true },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       });
       if (unsent.length === 0) throw conflict('No new items to send to the kitchen');
@@ -639,7 +741,7 @@ router.get(
     const order = await loadOrder(req, { table: { select: { name: true } } });
     const kots = await prisma.kot.findMany({
       where: { orderId: order.id },
-      include: { items: { select: { name: true, qty: true } } },
+      include: { items: { select: { name: true, qty: true, modifiers: true } } },
       orderBy: { seq: 'asc' },
     });
     res.json({ kots: kots.map((k) => publicKot(k, order)) });
@@ -781,6 +883,199 @@ router.delete(
   }),
 );
 
+// --- promotions (VC-102) ------------------------------------------------------
+// Applying an offer is till work gated by promo.apply, not by discount
+// authority: the money was authorised when the owner published the campaign.
+// The redemption row snapshots name, code, version and amount; recomputeOrder
+// owns the amount from then on and re-decides eligibility on every basket
+// change. RECORDED REVERSAL POLICY: benefits reverse in full when the order is
+// voided and when the basket stops qualifying; a partial refund does NOT claw
+// back a promotion — the audit row on each reversal says which of these fired.
+
+const promoGate = [requireUsableLicense, loadPermissionContext, requireAction('promo.apply')];
+
+const promoLinesOf = (items) =>
+  items
+    .filter((i) => i.status === 'ACTIVE')
+    .map((i) => ({
+      productId: i.productId,
+      categoryId: i.product?.categoryId ?? null,
+      lineSubtotalPaise: paiseOf(i.unitPrice) * i.qty - paiseOf(i.lineDiscount),
+    }));
+
+router.post(
+  '/:id/promotions',
+  ...promoGate,
+  asyncHandler(async (req, res) => {
+    const body = z
+      .object({
+        promotionId: z.string().min(1).optional(),
+        code: z.string().trim().toUpperCase().optional(),
+        customerPhone: z.string().trim().optional(),
+      })
+      .refine((b) => Boolean(b.promotionId) !== Boolean(b.code), 'Send promotionId or code, not both')
+      .parse(req.body);
+    const customerDigits = body.customerPhone ? body.customerPhone.replace(/\D/g, '') : '';
+    if (body.customerPhone && customerDigits.length < 7) {
+      throw badRequest('customerPhone must carry at least 7 digits');
+    }
+    const customerKey = customerDigits ? `ph:${customerDigits}` : null;
+    const order = await loadOrder(req, {
+      items: { include: { product: { select: { categoryId: true } } } },
+    });
+    assertOpen(order);
+    await resolveStoreInScope(req, order.branchId);
+
+    const redemption = await prisma.$transaction(async (tx) => {
+      const promo = await tx.promotion.findFirst({
+        where: {
+          companyId: req.companyScope.id,
+          status: 'PUBLISHED',
+          ...(body.promotionId ? { id: body.promotionId } : { code: body.code }),
+        },
+        include: { itemRules: true, storeLinks: { select: { branchId: true } } },
+      });
+      // One answer for absent, another tenant's, and unpublished: this store
+      // has no such offer.
+      if (!promo) throw notFound('Promotion not found');
+      if (promo.storeLinks.length && !promo.storeLinks.some((s) => s.branchId === order.branchId)) {
+        throw conflict('This promotion is not available at this store');
+      }
+
+      const applied = await tx.promotionRedemption.findMany({
+        where: { orderId: order.id, status: 'APPLIED' },
+        include: { promotion: { select: { stackable: true } } },
+      });
+      if (applied.some((r) => r.promotionId === promo.id)) {
+        throw conflict('This promotion is already on the order');
+      }
+      const stacking = stackingRefusal(promo, applied.map((r) => r.promotion));
+      if (stacking === 'NOT_STACKABLE') throw conflict('This promotion cannot combine with others');
+      if (stacking === 'BLOCKED_BY_NON_STACKABLE') {
+        throw conflict('A promotion already on the order does not combine with others');
+      }
+
+      const verdict = evaluatePromotion(promo, {
+        lines: promoLinesOf(order.items),
+        orderType: order.type,
+        at: new Date(),
+      });
+      if (!verdict.ok) throw conflict(`Promotion does not apply: ${verdict.reason}`);
+
+      // The campaign slot, taken atomically: two tills racing for the last
+      // redemption cannot both pass this row count.
+      const slot = await tx.promotion.updateMany({
+        where: {
+          id: promo.id,
+          status: 'PUBLISHED',
+          ...(promo.totalLimit === null ? {} : { redemptionCount: { lt: promo.totalLimit } }),
+        },
+        data: { redemptionCount: { increment: 1 } },
+      });
+      if (slot.count === 0) throw conflict('This promotion has reached its redemption limit');
+
+      // Per-customer cap, counted AFTER the slot update: that update locks the
+      // promotion row, so a concurrent apply for the same customer waits here
+      // and then sees this transaction's committed row — two racing tills
+      // cannot both pass the count.
+      if (promo.perCustomerLimit !== null) {
+        if (!customerKey) throw badRequest('This promotion needs the customer’s phone number');
+        const used = await tx.promotionRedemption.count({
+          where: {
+            promotionId: promo.id,
+            customerKey,
+            status: 'APPLIED',
+            orderId: { not: order.id },
+          },
+        });
+        if (used >= promo.perCustomerLimit) {
+          throw conflict('This customer has reached the redemption limit for this promotion');
+        }
+      }
+
+      const row = await tx.promotionRedemption.upsert({
+        where: { promotionId_orderId: { promotionId: promo.id, orderId: order.id } },
+        create: {
+          promotionId: promo.id,
+          companyId: req.companyScope.id,
+          orderId: order.id,
+          branchId: order.branchId,
+          promotionName: promo.name,
+          promotionVersion: promo.version,
+          code: promo.code,
+          appliedById: req.user.id,
+          customerKey,
+        },
+        // A promotion removed and re-applied revives its own row, with the
+        // CURRENT version — the campaign may have been edited in between.
+        update: {
+          status: 'APPLIED',
+          reversedReason: null,
+          reversedAt: null,
+          promotionName: promo.name,
+          promotionVersion: promo.version,
+          code: promo.code,
+          appliedById: req.user.id,
+          customerKey,
+        },
+      });
+      await recomputeOrder(tx, order.id);
+      return tx.promotionRedemption.findUnique({ where: { id: row.id } });
+    });
+
+    await audit(req, {
+      action: 'ORDER_PROMO_APPLY',
+      entity: 'Order',
+      entityId: order.id,
+      companyId: req.companyScope.id,
+      meta: {
+        promotionId: redemption.promotionId,
+        name: redemption.promotionName,
+        version: redemption.promotionVersion,
+        amount: String(redemption.amount),
+        branchId: order.branchId,
+      },
+    });
+    res.json({ order: await fullOrder(order.id) });
+  }),
+);
+
+router.delete(
+  '/:id/promotions/:promotionId',
+  ...promoGate,
+  asyncHandler(async (req, res) => {
+    const order = await loadOrder(req);
+    assertOpen(order);
+    await resolveStoreInScope(req, order.branchId);
+
+    const reversed = await prisma.$transaction(async (tx) => {
+      const row = await tx.promotionRedemption.findFirst({
+        where: { orderId: order.id, promotionId: req.params.promotionId, status: 'APPLIED' },
+      });
+      if (!row) throw notFound('This promotion is not on the order');
+      const out = await tx.promotionRedemption.update({
+        where: { id: row.id },
+        data: { status: 'REVERSED', reversedReason: 'REMOVED', reversedAt: new Date(), amount: 0 },
+      });
+      await tx.promotion.update({
+        where: { id: row.promotionId },
+        data: { redemptionCount: { decrement: 1 } },
+      });
+      await recomputeOrder(tx, order.id);
+      return out;
+    });
+
+    await audit(req, {
+      action: 'ORDER_PROMO_REMOVE',
+      entity: 'Order',
+      entityId: order.id,
+      companyId: req.companyScope.id,
+      meta: { promotionId: reversed.promotionId, name: reversed.promotionName, branchId: order.branchId },
+    });
+    res.json({ order: await fullOrder(order.id) });
+  }),
+);
+
 // --- bill -------------------------------------------------------------------
 
 router.post(
@@ -793,16 +1088,40 @@ router.post(
       throw conflict('Order has no active items to bill');
     }
 
+    // Read outside the transaction: master data the bill is about to quote, not
+    // something the bill writes. Keeping it out keeps the counter transaction —
+    // the one every till contends on — as short as it was before.
+    const seller = await sellerOfRecord(prisma, order.branch);
+
+    // One timestamp for the row and the snapshot, so the invoice cannot claim a
+    // different billing instant from the order it belongs to.
+    const billedAt = new Date();
+
     await prisma.$transaction(async (tx) => {
       // Guarded transition: a concurrent bill of the same order loses here.
       const moved = await tx.order.updateMany({
         where: { id: order.id, status: 'OPEN' },
-        data: { status: 'BILLED', billedAt: new Date() },
+        data: { status: 'BILLED', billedAt },
       });
       if (moved.count === 0) throw conflict('Order is not open');
       await recomputeOrder(tx, order.id);
-      const invoiceNumber = await nextInvoiceNumber(tx, order.branch);
-      await tx.order.update({ where: { id: order.id }, data: { invoiceNumber } });
+      const { invoiceNumber, seriesPrefix } = await nextInvoiceNumber(tx, order.branch, billedAt);
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          invoiceNumber,
+          // Frozen in the SAME statement that assigns the number. A snapshot
+          // written afterwards could be lost to a crash, leaving an invoice
+          // number with no record of who issued it.
+          billingSnapshot: billingSnapshot({
+            branch: order.branch,
+            seller,
+            invoiceNumber,
+            seriesPrefix,
+            at: billedAt,
+          }),
+        },
+      });
     });
 
     const full = await prisma.order.findUnique({ where: { id: order.id }, include: ORDER_INCLUDE });
@@ -937,6 +1256,11 @@ router.post(
       const payment = await tx.payment.create({
         data: {
           orderId: order.id,
+          // The store that issued the bill, copied from the order rather than
+          // from the request. It is the column the terminal and device
+          // references are checked against, so taking it from the caller would
+          // hand the caller the power to attribute money to another store.
+          branchId: order.branchId,
           method: body.method,
           amount: (applied / 100).toFixed(2),
           tendered: tendered === null ? null : (tendered / 100).toFixed(2),
@@ -946,6 +1270,10 @@ router.post(
           // caller sent none, which the unique index permits any number of.
           idempotencyKey: body.idempotencyKey ?? null,
           receivedById: req.user.id,
+          // WHERE the money was actually taken. A day close reconciles cash per
+          // till, so this has to be the till that took THIS payment, not the one
+          // the order happened to be opened on.
+          ...deviceStamp(req),
         },
         include: { receivedBy: { select: { id: true, fullName: true } } },
       });
@@ -1807,6 +2135,23 @@ router.post(
         data: { status: 'VOID', voidReason: reason, voidedById: req.user.id, closedAt: new Date() },
       });
       if (moved.count === 0) throw conflict('Only open or billed orders can be voided');
+      // VC-102 recorded reversal policy: a void reverses every promotion in
+      // full and releases its campaign slot. The row keeps its amount — the
+      // benefit that WAS granted is part of what the void undid.
+      const promos = await tx.promotionRedemption.findMany({
+        where: { orderId: order.id, status: 'APPLIED' },
+        select: { id: true, promotionId: true },
+      });
+      for (const p of promos) {
+        await tx.promotionRedemption.update({
+          where: { id: p.id },
+          data: { status: 'REVERSED', reversedReason: 'ORDER_VOID', reversedAt: new Date() },
+        });
+        await tx.promotion.update({
+          where: { id: p.promotionId },
+          data: { redemptionCount: { decrement: 1 } },
+        });
+      }
     });
 
     await audit(req, {
@@ -1894,6 +2239,83 @@ router.get(
     }
     const branch = await prisma.branch.findUnique({ where: { id: order.branchId } });
     res.json({ receipt: buildReceipt(req.companyScope, branch, order) });
+  }),
+);
+
+// Viewing a receipt or KOT (the GETs above) is deliberately unaudited; this
+// records the explicit Print click. "REQUESTED" because the browser raising
+// its print dialog proves nothing about paper — there is no delivery status
+// in the browser print path, so the row must not read as "printed".
+//
+// Reprint marker contract (Window 3, Phase 2): the FIRST print of a document
+// writes ORDER_PRINT_REQUESTED; every later print of the SAME document (same
+// order, and for KOTs the same kotSeq) writes RECEIPT_REPRINT / KOT_REPRINT
+// instead, so an auditor filters reprints by action name alone. The response
+// returns { copyNumber, reprint } so the print UI can stamp DUPLICATE on the
+// copy it is about to render. Two caveats, both deliberate:
+//  - the count comes from the routine audit table, whose writes are
+//    fire-and-forget by design (lib/audit.js) — the marker is a display aid,
+//    not evidence, and must never be presented as a paper count;
+//  - two simultaneous clicks can both read the same prior count and share a
+//    copyNumber. Harmless for a display marker; do not "fix" it with a lock
+//    on the till's money path.
+router.post(
+  '/:id/print-events',
+  ...operate,
+  asyncHandler(async (req, res) => {
+    const body = z
+      .object({
+        document: z.enum(['RECEIPT', 'KOT']),
+        kotSeq: z.number().int().positive().optional(),
+      })
+      .parse(req.body);
+    const order = await loadOrder(req);
+    if (body.document === 'RECEIPT' && !['BILLED', 'PAID', 'REFUNDED'].includes(order.status)) {
+      throw conflict('Receipts exist only after billing');
+    }
+    const priorActions =
+      body.document === 'RECEIPT'
+        ? ['ORDER_PRINT_REQUESTED', 'RECEIPT_REPRINT']
+        : ['ORDER_PRINT_REQUESTED', 'KOT_REPRINT'];
+    const prior = await prisma.posAuditLog.count({
+      where: {
+        entityId: order.id,
+        action: { in: priorActions },
+        AND: [
+          { meta: { path: ['document'], equals: body.document } },
+          // A KOT print is per ticket: KOT #2's first print is not a reprint
+          // of KOT #1. Receipts have no seq and count as one document.
+          ...(body.document === 'KOT' && body.kotSeq
+            ? [{ meta: { path: ['kotSeq'], equals: body.kotSeq } }]
+            : []),
+        ],
+      },
+    });
+    const copyNumber = prior + 1;
+    const action =
+      prior === 0
+        ? 'ORDER_PRINT_REQUESTED'
+        : body.document === 'RECEIPT'
+          ? 'RECEIPT_REPRINT'
+          : 'KOT_REPRINT';
+    await audit(req, {
+      action,
+      entity: 'PosOrder',
+      entityId: order.id,
+      meta: {
+        document: body.document,
+        copyNumber,
+        ...(body.kotSeq ? { kotSeq: body.kotSeq } : {}),
+      },
+    });
+    res.json({
+      printEvent: {
+        document: body.document,
+        ...(body.kotSeq ? { kotSeq: body.kotSeq } : {}),
+        copyNumber,
+        reprint: copyNumber > 1,
+      },
+    });
   }),
 );
 

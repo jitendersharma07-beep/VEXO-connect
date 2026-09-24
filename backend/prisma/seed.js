@@ -11,6 +11,7 @@
 import { PrismaClient } from '@prisma/client';
 import { hash as argon2Hash } from '@node-rs/argon2';
 import { randomBytes } from 'node:crypto';
+import { mintStorePublicId } from '../src/lib/identity.js';
 
 const prisma = new PrismaClient();
 
@@ -82,6 +83,9 @@ const main = async () => {
       companyId: demo.id,
       name: 'Brew Street Café — Connaught Place',
       code: 'BSC-CP',
+      // Permanent store id, minted the same way the branches route mints it.
+      // Required since 20260924100100 made Branch.publicId NOT NULL.
+      publicId: await mintStorePublicId(prisma, { stateName: 'Delhi' }),
       isDemo: true,
       addressLine: 'Block A, Connaught Place (sample address)',
       city: 'New Delhi',
@@ -96,6 +100,7 @@ const main = async () => {
       companyId: demo.id,
       name: 'Brew Street Café — Cyber Hub',
       code: 'BSC-CH',
+      publicId: await mintStorePublicId(prisma, { stateName: 'Haryana' }),
       isDemo: true,
       addressLine: 'DLF Cyber Hub (sample address)',
       city: 'Gurugram',

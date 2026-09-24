@@ -32,6 +32,10 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
@@ -126,7 +130,7 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  h1 = await prisma.branch.create({ data: { companyId: hotel.id, name: 'Hotel One', code: 'H1' } });
+  h1 = await prisma.branch.create({ data: { companyId: hotel.id, publicId: 'VC-DK-0001', name: 'Hotel One', code: 'H1' } });
 
   const mk = async (key, data) => {
     users[key] = await prisma.posUser.create({ data: { passwordHash, ...data } });

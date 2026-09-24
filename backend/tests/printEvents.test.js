@@ -75,9 +75,9 @@ const bill = async (id) => {
 const printEvent = (id, body, token = tokens.cashier) =>
   request(app).post(`/api/orders/${id}/print-events`).set(auth(token)).send(body);
 
-const auditRows = (orderId) =>
+const auditRows = (orderId, actions = ['ORDER_PRINT_REQUESTED', 'RECEIPT_REPRINT', 'KOT_REPRINT']) =>
   prisma.posAuditLog.findMany({
-    where: { action: 'ORDER_PRINT_REQUESTED', entityId: orderId },
+    where: { action: { in: actions }, entityId: orderId },
     orderBy: { createdAt: 'asc' },
   });
 
@@ -137,24 +137,70 @@ describe('print-request audit', () => {
     expect(view.status).toBe(200);
     expect(await auditRows(o.id)).toHaveLength(0);
 
-    // Two explicit print clicks: two rows, so reprints are countable.
-    expect((await printEvent(o.id, { document: 'RECEIPT' })).status).toBe(204);
-    expect((await printEvent(o.id, { document: 'RECEIPT' })).status).toBe(204);
+    // First click: ORDER_PRINT_REQUESTED, copy 1, not a reprint. Second click
+    // of the SAME document: RECEIPT_REPRINT, copy 2, marked — an auditor
+    // filters reprints by action name alone, and the till gets the marker to
+    // stamp DUPLICATE on the copy it renders.
+    const first = await printEvent(o.id, { document: 'RECEIPT' });
+    expect(first.status).toBe(200);
+    expect(first.body.printEvent).toMatchObject({ document: 'RECEIPT', copyNumber: 1, reprint: false });
+    const second = await printEvent(o.id, { document: 'RECEIPT' });
+    expect(second.status).toBe(200);
+    expect(second.body.printEvent).toMatchObject({ document: 'RECEIPT', copyNumber: 2, reprint: true });
     const rows = await auditRows(o.id);
     expect(rows).toHaveLength(2);
-    expect(rows[0].meta).toMatchObject({ document: 'RECEIPT' });
+    expect(rows[0].action).toBe('ORDER_PRINT_REQUESTED');
+    expect(rows[0].meta).toMatchObject({ document: 'RECEIPT', copyNumber: 1 });
+    expect(rows[1].action).toBe('RECEIPT_REPRINT');
+    expect(rows[1].meta).toMatchObject({ document: 'RECEIPT', copyNumber: 2 });
     expect(rows[0].actorEmail).toBe('till@p.test');
   });
 
-  it('a KOT print event records the document and kot seq', async () => {
+  it('KOT reprints count per ticket — a new KOT seq starts at copy 1', async () => {
+    const o = await newOrder();
+    const kot1 = await request(app).post(`/api/orders/${o.id}/kot`).set(auth(tokens.cashier)).send({});
+    expect(kot1.status, JSON.stringify(kot1.body)).toBe(201);
+    const seq1 = kot1.body.kot.seq;
+
+    const p1 = await printEvent(o.id, { document: 'KOT', kotSeq: seq1 });
+    expect(p1.status).toBe(200);
+    expect(p1.body.printEvent).toMatchObject({ document: 'KOT', kotSeq: seq1, copyNumber: 1, reprint: false });
+
+    const p2 = await printEvent(o.id, { document: 'KOT', kotSeq: seq1 });
+    expect(p2.body.printEvent).toMatchObject({ kotSeq: seq1, copyNumber: 2, reprint: true });
+
+    // A second ticket on the same order is its own document: copy 1, no marker.
+    const add = await request(app)
+      .post(`/api/orders/${o.id}/items`)
+      .set(auth(tokens.cashier))
+      .send({ productId: coffee, qty: 1 });
+    expect(add.status, JSON.stringify(add.body)).toBe(200);
+    const kot2 = await request(app).post(`/api/orders/${o.id}/kot`).set(auth(tokens.cashier)).send({});
+    expect(kot2.status, JSON.stringify(kot2.body)).toBe(201);
+    const seq2 = kot2.body.kot.seq;
+    expect(seq2).not.toBe(seq1);
+
+    const p3 = await printEvent(o.id, { document: 'KOT', kotSeq: seq2 });
+    expect(p3.body.printEvent).toMatchObject({ kotSeq: seq2, copyNumber: 1, reprint: false });
+
+    const rows = await auditRows(o.id);
+    expect(rows.map((r) => r.action)).toEqual([
+      'ORDER_PRINT_REQUESTED',
+      'KOT_REPRINT',
+      'ORDER_PRINT_REQUESTED',
+    ]);
+  });
+
+  it('a receipt reprint does not inherit KOT print history, and vice versa', async () => {
     const o = await newOrder();
     const kot = await request(app).post(`/api/orders/${o.id}/kot`).set(auth(tokens.cashier)).send({});
     expect(kot.status, JSON.stringify(kot.body)).toBe(201);
+    await bill(o.id);
 
-    expect((await printEvent(o.id, { document: 'KOT', kotSeq: kot.body.kot.seq })).status).toBe(204);
-    const rows = await auditRows(o.id);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].meta).toMatchObject({ document: 'KOT', kotSeq: kot.body.kot.seq });
+    expect((await printEvent(o.id, { document: 'KOT', kotSeq: kot.body.kot.seq })).body.printEvent.copyNumber).toBe(1);
+    // Receipt's first print is copy 1 even though the order already has a KOT print row.
+    const r = await printEvent(o.id, { document: 'RECEIPT' });
+    expect(r.body.printEvent).toMatchObject({ document: 'RECEIPT', copyNumber: 1, reprint: false });
   });
 
   it('refuses a RECEIPT print event before billing — a receipt that cannot exist cannot be printed', async () => {

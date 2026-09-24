@@ -53,8 +53,11 @@ export const distributeProportional = (totalPaise, weights) => {
 // lines: ACTIVE lines only (caller filters), each
 //   { unitPrice, qty, lineDiscount?, taxPctMilli? }  — paise / milli-percent.
 // discount: null | { type: 'FLAT', value: paise } | { type: 'PERCENT', value: pctMilli }.
+// promoFlatPaise: already-computed promotion benefit (VC-102), folded into the
+// same discountAmount and distributed identically — one calculation covers
+// manual and automatic discounts. Caller clamps combined ≤ subtotal.
 // Validation (caps, FLAT ≤ subtotal, PERCENT ≤ 100%) happens in the routes.
-export const computeOrderTotals = (lines, discount = null) => {
+export const computeOrderTotals = (lines, discount = null, promoFlatPaise = 0) => {
   const withSubtotals = lines.map((l) => {
     assertInt(l.qty, 'qty');
     const gross = assertInt(l.unitPrice, 'unitPrice') * l.qty;
@@ -67,6 +70,9 @@ export const computeOrderTotals = (lines, discount = null) => {
     discountAmount = discount.type === 'FLAT'
       ? assertInt(discount.value, 'discount value')
       : percentOf(subtotal, discount.value);
+  }
+  if (subtotal > 0) {
+    discountAmount = Math.min(subtotal, discountAmount + assertInt(promoFlatPaise, 'promoFlatPaise'));
   }
   const shares = distributeProportional(discountAmount, withSubtotals.map((l) => l.lineSubtotal));
   const outLines = withSubtotals.map((l, i) => {
