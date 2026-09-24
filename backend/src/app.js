@@ -21,6 +21,7 @@ import tableRoutes from './api/routes/tables.js';
 import orderRoutes from './api/routes/orders.js';
 import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
+import menuProfitabilityRoutes from './api/routes/menuProfitability.js';
 import displayRoutes from './api/routes/display.js';
 import gatewayRoutes from './api/routes/gateway.js';
 
@@ -115,6 +116,8 @@ export const createApp = () => {
   api.use('/tables', tableRoutes);
   api.use('/orders', orderRoutes);
   api.use('/discount-policies', discountPolicyRoutes);
+  // VC-105. Mounted before /reports so the more specific path wins.
+  api.use('/reports/menu-profitability', menuProfitabilityRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
 
