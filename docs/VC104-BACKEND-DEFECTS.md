@@ -22,6 +22,7 @@ exists so the fix is a decision W1 makes with the evidence in hand.
 | D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
 | D-3 | Phone orders cannot sell a product with a REQUIRED modifier group | Such products are refused on the phone path with "Choose at least N"; the caller cannot complete the order | Medium — fails CLOSED, so no mispricing; a catalogue subset is simply unsellable by phone | `backend/src/api/routes/orders.js` `resolveCatalogLine` minSelect loop, called from `phoneOrders.js` |
 | D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
+| D-5 | The catalog API can leave a required modifier group permanently unsatisfiable | The product becomes unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it is reachable by an ordinary catalogue edit | `backend/src/api/routes/catalog.js:585` and `:644–675` |
 
 §3 is the part worth reading first: **the phone-order suite already builds D-1's
 exact conditions and simply never looks at the flag.**
@@ -29,6 +30,12 @@ exact conditions and simply never looks at the flag.**
 **D-3 and D-4 did not exist in either lane alone — the consolidation merge
 created both** (09-24, `merge/a406-consolidate`). They are recorded here because
 this is where a VC-104 reader will look, not because W2's browser QA found them.
+
+**D-5 is older than all of them** and was found later, on 09-24, while writing
+the first HTTP-level tests for the modifier catalog routes
+(`backend/tests/catalogModifiers.test.js`). It is filed here because it is the
+other half of D-3's question — *what should happen when a required modifier
+group cannot be satisfied* — and the two are best answered once, together.
 
 ---
 
@@ -255,6 +262,148 @@ The screenshots do not collide — the two lanes happen to use different
 `NN-name.png` stems — but that is luck, not a scheme, and a third lane would
 have to check.
 
+### Update, later on 09-24 — the artifact changed, the gap did not
+
+`frontend/qa/screens/results-vc105.json` now reads **48/48**, and the harness
+beside it gained a real improvement: it hashes every screenshot at the end of a
+run and fails if two are byte-identical, which is how it learned that
+`01-owner-item-view.png` and `02-chart-and-coverage.png` had been the same
+picture twice.
+
+That is a better harness and a better run. It is still **not evidence about this
+tree**, and the file says so itself: it carries **no `at` field**. The harness
+now in the tree stamps `at` unconditionally on the same line it writes `passed`
+and `total`, so a file with `passed` but no `at` cannot have come out of it —
+`git show x/vc105-ui:frontend/qa/vc105-browser-qa.mjs | grep -c 'at: new Date'`
+returns `0`, and `results-vc105.json` does not exist on that branch at all. The
+48/48 therefore came from the lane harness, run in the lane, against a tree with
+no VC-104 in it, and reached `main` only as a merge resolution (`513b2b0`).
+
+This is D-4 recurring one level up, and it is worth naming as a pattern: **a QA
+artifact is evidence about the tree that produced it, not about the tree it ends
+up committed in.** The `at` stamp exists precisely to make that difference
+visible, and it worked — this paragraph is the result of the stamp being missing
+rather than of anyone remembering to ask.
+
+So the open half of D-4 stands unchanged: until `run-all.sh` drives the VC-105
+harness itself, against consolidated code and a `vc105-seed-demo.mjs` fixture,
+the VC-105 row of the UI acceptance table is **owed, not passed**.
+
+---
+
+## D-5 — the catalog API can make a product unsellable and does not say so
+
+Found 09-24 while writing `backend/tests/catalogModifiers.test.js`, the first
+tests to reach the modifier catalog routes over HTTP at all. Not created by any
+merge: this has been true since modifiers landed.
+
+### What the code does
+
+`resolveCatalogLine` enforces a group's `minSelect` over **active** groups,
+counting only **active** options (`orders.js:211–239`):
+
+```js
+const activeGroups = product.modifierGroups.filter((g) => g.status === 'ACTIVE');
+for (const g of activeGroups) {
+  for (const m of g.options) {
+    if (m.status === 'ACTIVE') optionIndex.set(m.id, { group: g, option: m });
+  }
+}
+```
+
+Both filters are right on their own. Together they create a state the catalog
+routes will happily write and nothing will warn about: **an ACTIVE group with
+`minSelect >= 1` and no ACTIVE option in it.** Nothing can satisfy it, so every
+line for that product is refused, on every channel.
+
+Two ordinary edits reach it, neither of which looks dangerous:
+
+1. **Archive the last active option.**
+   `PATCH /products/:id/modifier-groups/:groupId/options/:optionId` with
+   `{"status":"ARCHIVED"}` (`catalog.js:644–675`) counts nothing and checks
+   nothing. Retiring "Whole milk" from a required *Milk* group of one is a
+   one-click way to stop selling the product.
+2. **Raise `minSelect` above the number of options that exist.**
+   `PATCH /products/:id/modifier-groups/:groupId` (`catalog.js:585`) has exactly
+   one cross-field check, `max != null && max < min`. When `maxSelect` is null —
+   the default, and the commonest case — that check is skipped entirely and
+   nothing compares `minSelect` against the option count. `minSelect: 3` on a
+   group with two options is accepted.
+
+### Observed
+
+Both paths are pinned in `backend/tests/catalogModifiers.test.js`, in the
+`D-5 tripwires` describe. Each test first **sells the product successfully**, so
+the later refusal is attributable to the edit and not to a broken fixture:
+
+```
+TRIPWIRE: archiving the last active option of a required group makes the product unsellable
+  sell → 201
+  PATCH option {status: ARCHIVED} → 200          ← accepted silently
+  sell with no modifiers → 400 'Choose at least 1 from "Milk"'
+  sell with the archived option → 400 'Unknown or archived modifier option'
+
+TRIPWIRE: minSelect may be raised above the number of options that exist
+  PATCH group {minSelect: 3} on a 2-option group → 200
+  sell with both options → 400 'Choose at least 3 from "Toppings"'
+```
+
+There is no third thing to try: the two refusals are the complete set of moves
+available to a caller, so the product is stuck.
+
+### Why it matters more than D-3
+
+D-3 costs a channel — a required-modifier product cannot be sold *by phone*.
+D-5 costs the product outright, on the till too, and it is reachable by a
+customer doing normal menu maintenance rather than by a merge. The failure also
+surfaces far away from its cause: the edit succeeds in the back office and the
+refusal appears at the till, possibly days later, with a message that describes
+the group rather than the edit that broke it.
+
+Severity is held at Medium only because it fails CLOSED — nothing is mispriced
+and no money moves.
+
+### The escape hatch exists, but is not discoverable
+
+Archiving the **group** does work, and that is tested here too ("archives a
+group, and the order path stops enforcing it"): `activeGroups` drops it and the
+product sells again. So the product is recoverable, by someone who knows that
+archiving the group is different from archiving its last option. Nothing in the
+API, the error, or any document said so before this one.
+
+### Suggested fixes — not applied, because this is a product decision
+
+Deliberately left unfixed. The tripwire tests assert today's behaviour so that
+behaviour is at least written down; **fixing D-5 is meant to break them**, and
+that is the signal, not a regression.
+
+1. **Refuse the edit** — 409 on archiving the last active option of a group with
+   `minSelect >= 1`, and on raising `minSelect` above the active-option count,
+   with a message naming the remedy ("archive the group instead"). Fails loud,
+   at the moment of the mistake, in front of the person who made it. Costs a
+   legitimate workflow: retiring a group option-by-option now has to archive the
+   group first.
+2. **Treat a required group with no active options as inactive** in
+   `resolveCatalogLine`. Nothing to refuse, nothing to learn. But it makes a
+   required choice vanish from the order and the receipt silently, which is the
+   kind of quiet semantic change this codebase avoids elsewhere.
+3. **Warn without blocking** — allow the edit, return the product with a flag
+   the catalogue screen renders. Needs a UI that does not exist yet (see below).
+
+(1) matches how the rest of this codebase behaves. It is still W1's/the owner's
+call, and it pairs naturally with D-3: both ask *what should happen when a
+required modifier group cannot be satisfied*, and one answer should cover both.
+
+### Note on how this went unnoticed
+
+`grep -rn "modifier-groups" frontend/src/` returns nothing. **There is no
+modifier management UI** — these four routes are API-only, so no screen, no
+browser QA and, until now, no test has ever exercised them. The order side of
+modifiers is covered well (`promotions.test.js`, `describe('modifier
+treatment')`), which is what made the gap easy to mistake for coverage: the
+tables were proven, the product was not. Every one of those tests builds its
+groups with `prisma.modifierGroup.create`, never through a route.
+
 ---
 
 ## 3. Why the phone-order suite stays green on both
@@ -350,4 +499,18 @@ them either way.
 
 D-4 is half fixed: the evidence files no longer overwrite each other, but no
 VC-105 browser run has been executed against this tree, so that row of the UI
-acceptance table is **OWED, not passed**.
+acceptance table is **OWED, not passed**. The 48/48 that appeared on `main`
+later on 09-24 does not change that — see the update under D-4 for why the
+missing `at` field settles its provenance.
+
+D-5 is **unfixed on purpose**, and is the one entry here that *is* pinned by
+assertions — two of them, labelled TRIPWIRE in
+`backend/tests/catalogModifiers.test.js`. They assert today's behaviour so it
+cannot change unnoticed; they are not an endorsement of it. A fix to D-5 should
+break exactly those two tests and nothing else in that file.
+
+What the new test file does **not** claim: it proves the four modifier catalog
+routes behave as written, not that the behaviour is the product anyone asked
+for. There is no modifier management UI to compare them against, and no
+acceptance criterion in the contract beyond §5.1's one line. Where a test simply
+records what the code does rather than what it should do, it says TRIPWIRE.

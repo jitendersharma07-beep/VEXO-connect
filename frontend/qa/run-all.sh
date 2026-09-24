@@ -134,8 +134,13 @@ if [ "$QA_EXIT" = 0 ]; then echo "PASS: vc104-ui browser QA"; else echo "FAIL: b
 # no runner, and it needs backend/scripts/vc105-seed-demo.mjs rather than the
 # run-seed.mjs above — different fixtures, so it cannot just be appended to
 # this script. Until that seeding step exists, the only VC-105 browser evidence
-# in the tree is screens/results-vc105.json from the lane's own 47/47 run
-# (recorded with no timestamp, against ports 5386/5387, BEFORE consolidation).
-# Treat it as a lane result, not as evidence about this tree. See D-4 in
+# in the tree is screens/results-vc105.json, and it is a LANE result.
+#
+# That file now reads 48/48 (it was 47/47 when this comment was first written),
+# and it still carries no "at" field. That is the tell, not an oversight: the
+# harness in this tree stamps `at` on the same line it writes `passed`, so a
+# file with one and not the other did not come from it. It came from the lane
+# harness, in the lane, against a tree with no VC-104 in it, and reached main as
+# a merge resolution. Do not read it as evidence about this tree. See D-4 in
 # docs/VC104-BACKEND-DEFECTS.md.
 exit "$QA_EXIT"
