@@ -14,7 +14,8 @@
 //   QA_OWNER=owner@… QA_MANAGER=… QA_CASHIER=… QA_PASSWORD=… \
 //   node qa/vc105-browser-qa.mjs
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
 
@@ -99,9 +100,44 @@ const gotoReport = async (page, qs = '') => {
   await new Promise((r) => setTimeout(r, 900));
 };
 
-const shot = async (page, name) => {
+// Every screenshot this run produced, so the end of the script can prove they
+// are twelve different pictures rather than one picture under twelve names.
+const shots = [];
+
+// `fullPage` by default. Pass selectors to frame a specific region instead:
+// two full-page captures of the same unchanged screen are byte-identical, so a
+// shot meant to evidence one part of the page has to be clipped to that part or
+// it evidences nothing the previous shot did not already show.
+const shot = async (page, name, selectors = null) => {
   const path = join(OUT, `${name}.png`);
-  await page.screenshot({ path, fullPage: true });
+  let clip = null;
+  if (selectors) {
+    clip = await page.evaluate((sels) => {
+      const boxes = sels
+        .map((s) => document.querySelector(s))
+        .filter(Boolean)
+        .map((el) => el.getBoundingClientRect());
+      if (!boxes.length) return null;
+      const pad = 12;
+      const left = Math.min(...boxes.map((b) => b.left)) + window.scrollX - pad;
+      const top = Math.min(...boxes.map((b) => b.top)) + window.scrollY - pad;
+      const right = Math.max(...boxes.map((b) => b.right)) + window.scrollX + pad;
+      const bottom = Math.max(...boxes.map((b) => b.bottom)) + window.scrollY + pad;
+      return {
+        x: Math.max(0, Math.round(left)),
+        y: Math.max(0, Math.round(top)),
+        width: Math.round(right - Math.max(0, left)),
+        height: Math.round(bottom - Math.max(0, top)),
+      };
+    }, selectors);
+    // A selector that did not match must not silently downgrade to a duplicate
+    // full-page shot — that is exactly the failure this parameter exists to fix.
+    if (!clip || clip.width < 1 || clip.height < 1) {
+      throw new Error(`shot("${name}") found none of its selectors: ${selectors.join(', ')}`);
+    }
+  }
+  await page.screenshot(clip ? { path, clip, captureBeyondViewport: true } : { path, fullPage: true });
+  shots.push({ name, path });
   console.log(`        screenshot -> ${path}`);
 };
 
@@ -184,7 +220,15 @@ check('coverage strip states costed-of-total lines', /9 of 10 sold lines carry a
 const unplottable = await page.$eval('[data-testid="chart-unplottable"]', (el) => el.innerText).catch(() => '');
 check('chart states uncosted items cannot be placed', /cannot be placed/.test(unplottable), true);
 check('chart names the uncosted item', /Mystery Box/.test(unplottable), true);
-await shot(page, '02-chart-and-coverage');
+// Clipped to the coverage strip and the chart. Shot 01 already shows the whole
+// page, so a second full-page capture of the same unchanged screen would be the
+// same bytes and would evidence nothing.
+// (the "cannot be placed" strip lives inside segment-chart, so it is included)
+await shot(page, '02-chart-and-coverage', [
+  '[data-testid="coverage-strip"]',
+  '[data-testid="segment-chart"]',
+  '[data-testid="segment-chart-empty"]',
+]);
 
 // --- 9. Drilldown ---------------------------------------------------------
 await page.evaluate(() => {
@@ -308,6 +352,18 @@ if (CASHIER) {
 
 // ---------------------------------------------------------------------------
 await browser.close();
+
+// --- 17. The screenshots are twelve pictures, not one picture twelve times --
+// This run found `01-owner-item-view.png` and `02-chart-and-coverage.png` byte
+// -identical: both were full-page captures of a screen nothing had changed
+// between. Green checks did not catch it because no check looked at the files.
+// This one does, so the next duplicate fails the run instead of shipping.
+const digests = shots.map((s) => ({ ...s, sha: createHash('sha256').update(readFileSync(s.path)).digest('hex') }));
+const dupes = Object.entries(
+  digests.reduce((acc, d) => ({ ...acc, [d.sha]: [...(acc[d.sha] ?? []), d.name] }), {}),
+).filter(([, names]) => names.length > 1).map(([, names]) => names.join(' == '));
+check('every screenshot is a distinct image', dupes, [],
+  `${digests.length} screenshots captured`);
 
 const passed = results.filter((r) => r.pass).length;
 // Lane-specific filename: a406 consolidation put this harness alongside
