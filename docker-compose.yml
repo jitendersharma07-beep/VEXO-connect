@@ -9,7 +9,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: atc_pos
-      POSTGRES_PASSWORD: atc_pos_dev
+      # Value lives in the git-ignored .env, never in this file. It must match
+      # what is already in the pos_dev_pgdata volume: POSTGRES_PASSWORD is only
+      # read at initdb, so editing it here cannot rotate the role.
+      POSTGRES_PASSWORD: ${POS_DEV_DB_PASSWORD:?unset - copy .env.example to .env and fill it}
       POSTGRES_DB: atc_pos
     ports:
       # Loopback only; 5439 avoids every Postgres already on this box.
