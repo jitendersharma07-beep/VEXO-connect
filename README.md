@@ -45,8 +45,11 @@ Pvt. Ltd. remains the company behind it, which is why the address is still
 ```bash
 docker compose up -d                  # dev Postgres on 127.0.0.1:5439
 cd backend && npm install
-export DATABASE_URL='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos?schema=public'
-export POS_JWT_SECRET='dev-only-secret-at-least-32-chars-long'
+# The dev DB password is read from the running container — it is not written
+# down in this repo. The session secret is generated per shell.
+export PGPW="$(docker exec atc-pos-dev-db printenv POSTGRES_PASSWORD)"
+export DATABASE_URL="postgresql://atc_pos:${PGPW}@127.0.0.1:5439/atc_pos?schema=public"
+export POS_JWT_SECRET="$(openssl rand -hex 32)"
 npx prisma migrate dev                # apply migrations
 node prisma/seed.js                   # VEXO admin + demo café (passwords print once)
 npm run dev                           # API on :5010
@@ -59,8 +62,9 @@ Tests (they truncate tables, so the DB name must end in `_test`):
 
 ```bash
 cd backend
-DATABASE_URL='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos_test?schema=public' \
-POS_JWT_SECRET='test-secret-0123456789abcdef0123456789' npm test
+export PGPW="$(docker exec atc-pos-dev-db printenv POSTGRES_PASSWORD)"
+DATABASE_URL="postgresql://atc_pos:${PGPW}@127.0.0.1:5439/atc_pos_test?schema=public" \
+POS_JWT_SECRET="$(openssl rand -hex 32)" npm test
 ```
 
 ## Production
