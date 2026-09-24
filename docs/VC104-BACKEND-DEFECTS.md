@@ -1,22 +1,24 @@
 # VC-104 backend defects found by W2's browser QA — report for W1
 
-**From:** W2 (frontend lane `x/vc104-ui`) · **To:** W1 (backend lane `x/vc104-api`)
-**Date:** 2026-09-24 · **Subject tree:** `x/vc104-api` @ `c40683b` (all line
-numbers below are that commit's)
+**From:** W2 (this lane, `x/vc104-ui`) · **To:** W1 (backend lane `x/vc104-api`)
+**Date:** 2026-09-24 · **Line numbers are `x/vc104-api`'s, at `c40683b`**
 
 Two defects in the phone-order backend. Both were found from the outside, by
 driving W1's API through a real browser against W2's own database — not by
 reading the code, and not by running W1's test suite (W2 does not run another
-worker's tests). Neither is fixed here: the backend is W1's to change. This
-report exists so the fix is a decision W1 makes with the evidence in hand.
+worker's tests). Neither is fixed: the backend is W1's to change. This report
+exists so the fix is a decision W1 makes with the evidence in hand.
+
+The same file is committed on `x/vc104-api` @ `a2a58c7`, beside the code it
+cites; this copy sits with the QA evidence.
 
 | # | Defect | Effect | Severity | Where |
 |---|--------|--------|----------|-------|
-| D-1 | `priceChanged` on reassign ignores the delivery charge | The caller is re-quoted nothing on exactly the moves that change what they pay | Medium — quote-facing, not billing (delivery charge is not billable while C-6 is open) | `src/api/routes/phoneOrders.js:858,879,914` |
-| D-2 | Prep-capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `src/api/routes/phoneOrders.js:178–185` + `:569` |
+| D-1 | `priceChanged` on reassign ignores the delivery charge | The caller is re-quoted nothing on exactly the moves that change what they pay | Medium — quote-facing, not billing (the charge is not billable while C-6 is open) | `backend/src/api/routes/phoneOrders.js:858,879,914` |
+| D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
 
-Both are invisible to the current backend suite. §3 explains why, because that
-is the part a fix has to change.
+§3 is the part worth reading first: **W1's own suite already builds D-1's exact
+conditions and simply never looks at the flag.**
 
 ---
 
@@ -27,30 +29,30 @@ is the part a fix has to change.
 `POST /phone-orders/:id/reassign` snapshots the order before the move:
 
 ```js
-// routes/phoneOrders.js:858
+// backend/src/api/routes/phoneOrders.js:858
 const before = { total: Number(order.total), tax: Number(order.taxAmount) };
 ```
 
 writes the new store's delivery charge onto the phone order:
 
 ```js
-// routes/phoneOrders.js:879
+// backend/src/api/routes/phoneOrders.js:879
 deliveryCharge: chosen.deliveryCharge ?? 0,
 ```
 
 and then answers:
 
 ```js
-// routes/phoneOrders.js:914
+// backend/src/api/routes/phoneOrders.js:914
 priceChanged: Number(after.total) !== before.total || Number(after.taxAmount) !== before.tax,
 ```
 
 Both terms are `Order` columns. The delivery charge is deliberately **not** an
-`Order` column — `lib/phoneOrders.js:116` sets `DELIVERY_CHARGE_BILLABLE =
-false` while C-6 is open, so the charge is quoted beside the order and only ever
-surfaces in `payableQuote = order.total + deliveryCharge`
-(`lib/phoneOrders.js:118–137`). That design is right, and this flag is the one
-place that forgot about it.
+`Order` column — `backend/src/lib/phoneOrders.js:116` sets
+`DELIVERY_CHARGE_BILLABLE = false` while C-6 is open, so the charge is quoted
+beside the order and only ever surfaces in
+`payableQuote = order.total + deliveryCharge` (`lib/phoneOrders.js:118–137`).
+That design is right, and this flag is the one place that forgot about it.
 
 ### Why it matters under C-7
 
@@ -70,9 +72,9 @@ C-7.
 Seeded lane data, CP → CH reassign, same basket: delivery ₹40 → ₹65,
 `payableQuote` moves by ₹25, `priceChanged: false`. First seen as a hung
 re-price banner in QA run `20260924-135119` (66 checks passed, then the harness
-waited for `po-move-banner` that the server's flag never justified). Evidence:
+waited for a `po-move-banner` that the server's flag never justified). Evidence:
 `frontend/qa/screens/12-reassign-modal.png`, `13-after-move.png` and
-`frontend/qa/screens/results.json` on `x/vc104-ui` @ `f344ef4`.
+`frontend/qa/screens/results.json` in this lane at `f344ef4`.
 
 ### Suggested fixes — W1's call
 
@@ -98,7 +100,7 @@ response alone, whether to re-read the number to the caller.
 Slot bookings are counted with a range filter on `scheduledFor`:
 
 ```js
-// routes/phoneOrders.js:178–185
+// backend/src/api/routes/phoneOrders.js:178–185
 const { start, end } = slotBoundsFor(when, cap.slotMinutes);
 const booked = await prisma.phoneOrder.count({
   where: {
@@ -113,7 +115,7 @@ const booked = await prisma.phoneOrder.count({
 But an ASAP submission never stores a time:
 
 ```js
-// routes/phoneOrders.js:569–576
+// backend/src/api/routes/phoneOrders.js:569–576
 let scheduledFor = null;
 if (body.scheduledFor) { … }
 const when = scheduledFor ?? new Date();
@@ -125,27 +127,27 @@ range predicate. So an ASAP order occupies no slot, ever.
 ### Why it matters
 
 ASAP is the dominant path for phone orders. `booked` under-counts, the
-`AT_CAPACITY` reason at `lib/phoneOrders.js:202–206` can never fire for ASAP
-traffic, and the seeded caps (CP 6, CH 2 per 15 min) are dead letters. The
-failure direction is the unsafe one: the guard **fails open** and keeps
+`AT_CAPACITY` reason at `backend/src/lib/phoneOrders.js:202–206` can never fire
+for ASAP traffic, and the seeded caps (CP 6, CH 2 per 15 min) are dead letters.
+The failure direction is the unsafe one: the guard **fails open** and keeps
 accepting into a kitchen that is already full, rather than refusing.
 
 ### Observed
 
 QA run `20260924-140702`: the CH store's row read "0/2 booked this 15-min slot"
 while two live `SUBMITTED` CH-routed orders sat inside that wall-clock window.
-Direct DB read confirmed `scheduledFor IS NULL` on all three of that run's
-orders. Evidence: `frontend/qa/screens/15b-capacity-asap-d2.png` on
-`x/vc104-ui` @ `f344ef4`.
+A direct DB read confirmed `scheduledFor IS NULL` on all three of that run's
+orders. Evidence: `frontend/qa/screens/15b-capacity-asap-d2.png` in this lane
+at `f344ef4`.
 
 ### Suggested fixes — W1's call
 
 1. **Anchor ASAP to its own slot:** persist `scheduledFor = now` on submission.
    One-line change; makes the column mean "when this order is due", which is
-   what the counter already assumes. Changes the meaning of the stored value
-   (an ASAP order becomes indistinguishable from one scheduled for now) — the
-   existing `scheduled: Boolean(scheduledFor)` at :664 would need another
-   source of truth, e.g. the explicit request flag.
+   what the counter already assumes. It changes the meaning of the stored value
+   (an ASAP order becomes indistinguishable from one scheduled for now), so the
+   `scheduled: Boolean(scheduledFor)` flag at :664 would need another source of
+   truth — e.g. the explicit request field.
 2. **Widen the count:** `OR (scheduledFor IS NULL AND createdAt >= start AND
    createdAt < end)`. Leaves the column's meaning alone; costs a slightly more
    complex query and an index worth checking.
@@ -155,49 +157,71 @@ path, which is all the client needs.
 
 ---
 
-## 3. Why the backend suite does not catch either
+## 3. Why W1's suite stays green on both
 
-This is the actionable part: **a fix needs new tests, and no existing assertion
-pins the buggy behaviour** — so fixing either defect should not turn the suite
-red.
+**No existing assertion pins either bug, so fixing them should not turn the
+suite red.** What is missing is coverage, and in D-1's case it is missing by a
+single line.
 
-- **D-1 has no coverage at all.** `priceChanged` appears nowhere in
-  `backend/tests/phoneOrders.test.js`; the reassign tests assert the 200 and the
-  409-on-invoiced path, never the flag.
-- **D-2 is covered only on the path that works.** The one capacity test —
-  `'refuses a store whose prep slot is already full'`, `phoneOrders.test.js:300`
-  — books its filler with an explicit `scheduledFor: when.toISOString()`
-  (:305) and queries with the same explicit time (:311). It therefore exercises
-  the branch where the filter matches and never the ASAP branch where it
-  cannot.
+### D-1 — the conditions are already built; nothing reads the flag
 
-Suggested additions, both cheap:
+`backend/tests/phoneOrders.test.js:516`, *"moves the order and recomputes price
+and tax for the new store"*, already sets up **exactly** the case that breaks:
 
-- reassign between two stores whose service areas carry **different**
-  `deliveryCharge` and an identical basket → assert the chosen flag is true and
-  `payableQuote` moved;
-- submit N ASAP orders into a store with `maxOrdersPerSlot = N` → assert the
-  next `check-stores` reports `booked: N` and `AT_CAPACITY`.
+| Line | What it establishes |
+|---|---|
+| :519 | `deliveryCharge` is 40 before the move |
+| :529 | `deliveryCharge` is 60 after the move — *"The second store charges 60 for the same pincode"* |
+| :535–536 | `order.total` is still 420 and `taxAmount` still 20 — *"Same catalog, so the food total is unchanged"* |
 
-The second is the one that would have caught D-2 on the day.
+Those three facts are the defect: `payableQuote` goes 460 → 480 while both terms
+of `priceChanged` stay equal, so the flag is `false` on a move the caller must be
+re-quoted for. The test simply never reads `res.body.priceChanged`, and the word
+appears nowhere else in the file. Adding
+
+```js
+expect(res.body.priceChanged).toBe(true);
+```
+
+to that test reproduces D-1 without any new fixture — and the test's own comment
+at :533–534 already states the C-7 premise that makes the flag structurally dead.
+
+### D-2 — covered only on the path that works
+
+The one capacity test — *"refuses a store whose prep slot is already full"*,
+`phoneOrders.test.js:300` — books its filler with an explicit
+`scheduledFor: when.toISOString()` (:305) and queries with the same explicit
+time (:311). It therefore exercises the branch where the filter matches and
+never the ASAP branch where it cannot. A test that submits N **ASAP** orders
+into a store with `maxOrdersPerSlot = N` and then expects `capacity.booked: N`
+and `AT_CAPACITY` would have caught this on the day; it is the one addition
+worth making before the fix.
+
+This is also why the lane's recorded 455/455 was never evidence against either
+defect — a green suite certifies what it asserts, and neither of these was
+asserted.
 
 ## 4. Reproduction
 
-Full environment recipe is in `docs/VC104-UI-DELIVERY.md` §6 (lane DBs, ports,
-seeded stores, and the env-var names for credentials — no secrets are written
-down anywhere in this lane). In short: run W1's backend from the `vc104-api`
-lane against a scratch DB with the lane seed, then
+Environment recipe: `docs/VC104-UI-DELIVERY.md` §6 in this lane for the browser
+path, or `docs/VC104-SETUP.md` on `x/vc104-api` for the backend alone (lane DBs,
+ports, seeded stores, and the env-var names for credentials — no secrets are
+written down in either lane). Run W1's backend against a scratch DB with the
+lane seed, then:
 
-- **D-1:** submit a DELIVERY order routed to CP, reassign it to CH (whose
-  service area for the same pincode carries a different delivery charge), and
-  read the response: `payableQuote` changes, `priceChanged` is `false`.
-- **D-2:** submit two ASAP orders routed to CH (seeded cap 2 per 15 min), then
-  call `check-stores` with no `scheduledFor`: the CH option reports
+- **D-1:** submit a DELIVERY order routed to the first store, reassign it to the
+  second (whose service area for the same pincode carries a different delivery
+  charge), and read the response: `payableQuote` changes, `priceChanged` is
+  `false`.
+- **D-2:** submit two ASAP orders routed to a store with a seeded cap of 2 per
+  15 min, then call `check-stores` with no `scheduledFor`: the option reports
   `capacity.booked: 0` and stays available.
 
-Neither requires the UI; both are visible in the raw JSON.
+Neither needs the UI; both are visible in the raw JSON.
 
 ## 5. What W2 did meanwhile (so W1 knows what to undo)
+
+Both changes live in this lane, not in W1's:
 
 - **For D-1**, `frontend/src/pages/PhoneOrders.jsx:606–614` raises the re-price
   banner on `priceChanged || payableQuote !== previous payableQuote` — an
@@ -206,14 +230,14 @@ Neither requires the UI; both are visible in the raw JSON.
   the flag alone if W1 prefers.
 - **For D-2**, QA §11 proves the capacity UI on the **scheduled** path and pins
   the ASAP hole as an explicit tripwire check (screenshot `15b`). That check is
-  written to **FAIL the day W1 changes the semantics**, and its failure note
-  says to retire the pin and re-prove ASAP with real fillers. A red `15b` after
-  a capacity fix is the expected, welcome outcome — not a regression.
+  written to **FAIL the day the semantics change**, and its failure note says to
+  retire the pin and re-prove ASAP with real fillers. A red `15b` after a
+  capacity fix is the expected, welcome outcome — not a regression.
 
 ## 6. What this report does not claim
 
-W2 did not run W1's backend test suite, did not modify W1's code, and does not
-certify the 455/455 figure recorded in `docs/lanes/VC104-API.md` (no on-disk log
-for that run exists in the lane). Everything above is either a direct quotation
-of the committed source at `c40683b` or an observation from W2's own browser-QA
-runs, whose evidence is committed on `x/vc104-ui` @ `f344ef4`.
+W2 did not run W1's test suite, did not modify W1's code, and does not certify
+the 455/455 figure recorded in `docs/lanes/VC104-API.md` (that lane holds no
+on-disk log for the run). Everything above is either a direct quotation of the
+committed source at `c40683b` or an observation from W2's own browser-QA runs,
+whose evidence is committed in this lane at `f344ef4`.
