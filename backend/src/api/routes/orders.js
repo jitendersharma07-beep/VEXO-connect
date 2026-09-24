@@ -25,6 +25,9 @@ import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
 import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber } from '../../lib/invoice.js';
+// ==== LANE inventory ====
+import { consumeForOrder } from '../../lib/inventory/consumption.js';
+// ==== END LANE inventory ====
 import {
   ORDER_INCLUDE,
   SUMMARY_INCLUDE,
@@ -803,6 +806,31 @@ router.post(
       await recomputeOrder(tx, order.id);
       const invoiceNumber = await nextInvoiceNumber(tx, order.branch);
       await tx.order.update({ where: { id: order.id }, data: { invoiceNumber } });
+
+      // ==== LANE inventory ====
+      // THE single point at which a sale takes stock. It is here and not in
+      // the KOT route or the payment route because this is the one transition
+      // that happens exactly once per order: the guarded updateMany above has
+      // already made a concurrent bill lose, so whoever reaches this line is
+      // the only one who will. A KOT can be reprinted and a payment can be
+      // split across four tenders; deducting at either would consume the
+      // ingredients once per print or once per swipe.
+      //
+      // Inside this transaction on purpose. A bill that rolls back must take
+      // its stock movements with it, or the shelf ends up short of goods that
+      // were never sold.
+      //
+      // Never blocks the bill on stock, and a company that does not use the
+      // inventory module has no sale-source location, so every line is simply
+      // recorded UNCOSTED and the till behaves exactly as it did before.
+      await consumeForOrder(tx, {
+        companyId: order.companyId,
+        branchId: order.branchId,
+        orderId: order.id,
+        userId: req.user.id,
+        occurredAt: new Date(),
+      });
+      // ==== END LANE inventory ====
     });
 
     const full = await prisma.order.findUnique({ where: { id: order.id }, include: ORDER_INCLUDE });
@@ -1564,6 +1592,15 @@ router.post(
     const order = await loadOrder(req);
     const amount = toPaise(body.amount);
 
+    // ==== LANE inventory ====
+    // A refund moves money and nothing else. There is deliberately no stock
+    // call in this route: the overwhelmingly common refund is a customer who
+    // was unhappy with food they have already eaten, and auto-restocking it
+    // would put a drunk coffee back on the shelf for the next order to sell.
+    // Goods come back only through POST /api/inventory/sales/consumptions/
+    // :id/return, which somebody has to invoke with a reason.
+    // ==== END LANE inventory ====
+
     // PHASE 1 — reserve the money locally, and commit, BEFORE the provider is
     // called. A request that is sent but never answered still holds its amount
     // here, so an unknown outcome can never become a second refund.
@@ -1807,6 +1844,14 @@ router.post(
         data: { status: 'VOID', voidReason: reason, voidedById: req.user.id, closedAt: new Date() },
       });
       if (moved.count === 0) throw conflict('Only open or billed orders can be voided');
+
+      // ==== LANE inventory ====
+      // Voiding an OPEN order consumed nothing, so there is nothing to undo.
+      // Voiding a BILLED one does NOT put the stock back, for the same reason
+      // a refund does not: the kitchen has already cooked it. The consumption
+      // rows stay and stand as the record of what left, and a deliberate
+      // return is the only way back — one rule, no special case to get wrong.
+      // ==== END LANE inventory ====
     });
 
     await audit(req, {
