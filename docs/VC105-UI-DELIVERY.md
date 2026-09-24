@@ -78,13 +78,20 @@ screenshots in `qa/screens/`, machine-readable results in
 48/48 browser checks passed
 ```
 
-> **Consolidation note (`merge/a406-consolidate`, 2026-09-24).** That 47/47 is
-> the **lane's** run, against ports 5386/5387 before consolidation, and it was
-> recorded with no timestamp. It is not evidence about this tree. Nothing has
-> re-run it here: `frontend/qa/run-all.sh` drives only the VC-104 harness, and
-> this one needs `backend/scripts/vc105-seed-demo.mjs` instead of the runner's
-> own seed. That gap is D-4 in `VC104-BACKEND-DEFECTS.md`; the results file was
-> also renamed there, because both harnesses used to write the same filename.
+> **Run against this tree, 2026-09-24T18:10:36Z.** `results-vc105.json` stamps
+> what produced it: `tree` `…/main-merge`, `branch` `main`, `baseSha`
+> `0115898`. Driven by `bash frontend/qa/run-all.sh`, which now seeds this
+> suite's own fixture (`backend/scripts/vc105-seed-demo.mjs`) and serves
+> **this** tree's backend with the synthetic cost provider — not a lane's.
+>
+> Until that run, the 48/48 quoted here was the **lane's**, recorded with no
+> timestamp against pre-consolidation code, and the honest status of this row
+> was "owed, not passed". Getting it to run here required two fixes to the seed
+> that no lane run could have surfaced: `Branch.publicId` is `NOT NULL` in this
+> schema, and `Payment → Order` is a composite `[orderId, branchId]` foreign
+> key. Both migrations are absent from `x/vc105-api`. That history is D-4 in
+> `VC104-BACKEND-DEFECTS.md`, which also explains why the results file was
+> renamed: both harnesses used to write the same filename and clobber it.
 
 Every screenshot carries at least one assertion — a screenshot nobody asserted
 against is decoration. The last of the 48 asserts something about the

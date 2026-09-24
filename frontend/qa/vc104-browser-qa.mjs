@@ -21,6 +21,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { treeStamp } from './tree-stamp.mjs';
 
 // puppeteer-core is a QA-only dependency; resolve it from this lane if
 // installed, else borrow the sibling vc105-ui lane's copy (same repo, same
@@ -74,6 +75,9 @@ const skip = (name, why) => {
 // in this directory, both of which defaulted to the same plain results.json.
 // Whichever ran second silently destroyed the other lane's evidence, and the
 // loss was invisible — the surviving file looks like a complete, passing run.
+//
+// The tree stamp answers the other half: not "is this file complete" but
+// "which checkout produced it". See qa/tree-stamp.mjs and D-4.
 let resultsWritten = false;
 const writeResults = () => {
   if (resultsWritten) return;
@@ -81,7 +85,8 @@ const writeResults = () => {
   const passed = results.filter((r) => r.pass).length;
   const skipped = results.filter((r) => r.skipped).length;
   writeFileSync(join(OUT, 'results-vc104.json'), JSON.stringify({
-    ui: UI, api: API, at: new Date().toISOString(), passed, skipped, total: results.length, results,
+    ui: UI, api: API, at: new Date().toISOString(), ...treeStamp(import.meta.url),
+    passed, skipped, total: results.length, results,
   }, null, 2));
   console.log(`\n${passed}/${results.length} browser checks passed (${skipped} skipped)`);
 };
@@ -279,7 +284,15 @@ let opts = await checkStores(owner);
 check('every store is rendered with a verdict (none hidden)', opts.length, 2, '§5.6: unavailable stores are shown with reasons, never dropped');
 const cpRow = opts.find((o) => o.testid === 'po-option-BSC-CP');
 const chRow = opts.find((o) => o.testid === 'po-option-BSC-CH');
-check('Connaught Place is available for 110001', cpRow?.available, true);
+// BOTH stores' hours are widened to all-day by qa/run-seed.mjs, in W2's
+// scratch DB only, so the run is time-independent instead of green-only
+// between 09:00 and 23:00 IST and degraded outside 11:00–22:00. The
+// `if (chOpen) … else skip(…)` pairs below are kept, but they no longer mean
+// "you ran this at night" — reaching one now means the fixture failed to
+// apply, which run-seed.mjs's own cpOpenDays=14 assertion should have caught
+// first. See the rationale block in run-seed.mjs for what that costs.
+check('Connaught Place is available for 110001', cpRow?.available, true,
+  'QA fixture holds CP open around the clock — this asserts service-area match, not hours');
 check('CP quotes the seeded ₹40 delivery charge', /₹40\.00/.test(cpRow?.text ?? ''), true);
 check('CP states the seeded ₹200 minimum order', /min order ₹200\.00/.test(cpRow?.text ?? ''), true);
 const chOpen = Boolean(chRow?.available);
@@ -576,11 +589,18 @@ if (MANAGER && chOpen) {
 // hole is pinned as an explicit tripwire at the end of this section.
 const capacitySlotAt = () => {
   // One shared timestamp for both fillers AND the probe: same 15-min bucket
-  // by construction, no boundary maths. Must sit inside CH's 11:00–22:00
-  // (not Monday) with margin, or the fillers would be refused for hours.
-  const t = new Date(Date.now() + 45 * 60000);
-  const m = t.getHours() * 60 + t.getMinutes();
-  return t.getDay() !== 1 && m >= 11 * 60 + 15 && m <= 21 * 60 + 30 ? t : null;
+  // by construction, no boundary maths. The only backend constraint on
+  // scheduledFor is that it be in the future (phoneOrders.js:572); the real
+  // gate is the branch being open AT the slot, and run-seed.mjs now holds CH
+  // open on all 7 days, so any future instant is legal.
+  //
+  // This used to return null outside `m >= 11*60+15 && m <= 21*60+30` and on
+  // Mondays, to keep the slot inside CH's seeded 11:00–22:00. That guard was
+  // wrong as well as limiting: getHours() is BOX-local — this box runs UTC —
+  // while the backend judges hours in IST, so it was comparing a UTC clock
+  // against an IST window. The two only overlap 11:15–16:30 UTC; the daytime
+  // lane run at 14:19 UTC landed inside that overlap and passed by luck.
+  return new Date(Date.now() + 45 * 60000);
 };
 const scheduleAt = async (page, t) => {
   await page.evaluate(() => {
@@ -604,7 +624,7 @@ const scheduleAt = async (page, t) => {
     .catch(() => false);
 };
 const capT = capacitySlotAt();
-if (chOpen && capT) {
+if (chOpen) {
   // Fill the slot: two ₹360 baskets (above CH's ₹300 min, so the only
   // possible CH refusal in this section is AT_CAPACITY) scheduled into the
   // same slot. Each goto mounts a fresh form = fresh idempotency key (§4).
@@ -657,10 +677,8 @@ if (chOpen && capT) {
       await shot(owner, '15b-capacity-asap-d2');
     }
   }
-} else if (chOpen) {
-  skip('capacity fill check', 'now+45min falls outside the safe scheduling window (11:15–21:30 IST, not Monday)');
 } else {
-  skip('capacity fill check', 'CH closed at run time');
+  skip('capacity fill check', 'CH did not come back available — the all-day hours fixture did not apply');
 }
 
 // --- 12. Cashier: no link, bounced route, refused API -----------------------

@@ -40,7 +40,8 @@ house frontend before a line of UI depended on it.
 | `src/components/Layout.jsx` | "Phone orders" nav item behind `isManagerUp(user)`, non-ATC scope only |
 | `qa/vc104-browser-qa.mjs` | Real-browser QA (below) |
 | `qa/run-seed.mjs` | Provisioning runner: seeds W2's own DB with secrets that never print (§6) |
-| `qa/run-all.sh` | One-shot pipeline: self-heal node_modules → seed → both servers → QA → cleanup (§6) |
+| `qa/run-all.sh` | One-shot pipeline for **both** UI suites: provision → per-suite seed → servers → QA → cleanup, VC-104 then VC-105 (§6) |
+| `qa/tree-stamp.mjs` | Derives `tree`/`branch`/`baseSha`/`dirty` from where the harness is running, so a results file states which tree produced it (D-4) |
 
 ### The rules the screen exists to honour
 
@@ -67,17 +68,30 @@ house frontend before a line of UI depended on it.
 
 ## 2. Browser QA — RUN AND GREEN
 
-> RUN 2026-09-24 (`results-vc104.json` `"at": "2026-09-24T14:19:48.479Z"`):
+> RUN 2026-09-24 (`results-vc104.json` `"at": "2026-09-24T18:09:52.465Z"`):
 > **72/72 checks passed, 0 skipped.** Evidence: `qa/screens/results-vc104.json`
 > plus 19 numbered screenshots (`01`…`18`, with `15b` for the D-2 pin); run
-> logs `/tmp/vc104-ui-qa-20260924-141846/`. Executed via
-> `bash frontend/qa/run-all.sh` (§6) against a per-run reset demo DB. Two
-> earlier same-day runs each failed on a real defect — the register is §3
-> (backend D-1/D-2 reported to W1; harness and pipeline defects fixed here).
+> logs `/tmp/vcx-qa-20260924-180847/`. Executed via
+> `bash frontend/qa/run-all.sh` (§6) against a per-run reset demo DB.
+>
+> **This run is against this tree's own backend.** The results file says so
+> itself — `tree` `…/main-merge`, `branch` `main`, `baseSha` `0115898` — which
+> matters because the previously quoted 72/72 (`"at": "…T14:19:48.479Z"`) was
+> byte-identical to `x/vc104-ui`'s own `results.json`: a lane artifact, against
+> the lane's 14 migrations rather than this tree's 21. `run-all.sh` and
+> `run-seed.mjs` had both kept resolving the backend to `../vc104-api/`. See
+> D-4 in `VC104-BACKEND-DEFECTS.md`. Earlier same-day runs each failed on a
+> real defect — the register is §3 (backend D-1/D-2 reported to W1; harness and
+> pipeline defects fixed here).
 
-Coverage as run (each check passes, fails, or records an explicit SKIP with
-its reason — Cyber Hub's real 11:00–22:00 hours and Monday closure make some
-checks time-dependent by design; this run needed none of the skips):
+Coverage as run (each check passes, fails, or records an explicit SKIP with its
+reason). This run needed none of the skips, and no longer can for reasons of
+timing: `qa/run-seed.mjs` holds both demo stores open on all seven days in W2's
+scratch DB, so the suite is time-independent. Before that it was green only
+between 09:00 and 23:00 IST, and outside 11:00–22:00 it silently skipped the
+two blocks carrying D-1 and D-2 — a 61/61 PASS that had never exercised the
+evidence §3 leans on. What that fixture costs is stated in `run-seed.mjs` and
+in D-4:
 
 0. Session + fixture preconditions (`/auth/me` role + MULTI_STORE plan).
 1. Nav gating, chip set exactly All/Submitted/Accepted/Rejected, empty state.
@@ -186,6 +200,26 @@ persists `results.json` on every exit path, crash included.
    orders poisoned the empty-state (§1) and capacity (§11) assertions. Each
    run now DROPs, recreates, migrates and reseeds `atc_pos_vc104ui_demo` —
    W2's own scratch DB, nobody else's evidence.
+6. **The runner served the wrong tree's backend** — both `run-all.sh` and
+   `run-seed.mjs` resolved to `../../../vc104-api/backend`. That was correct
+   while this file lived in W2's frontend lane, where W1's was the only backend
+   in reach, and silently wrong after consolidation: a green run in `main`
+   was a statement about the lane's 14 migrations. Both now resolve to
+   `../../backend`, stage 0 regenerates the Prisma client from **this**
+   schema, and it asserts `BranchPrepCapacity` is in the generated client —
+   a model this schema has and neither lane does — so a leftover lane client
+   cannot pass silently. (D-4.)
+7. **A green run could depend on the clock** — see §2. Both demo stores are
+   now held open all week by the seed runner, which asserts `cpOpenDays=14`
+   before the suite starts. The capacity block also picked its slot with
+   `getHours()` (box-local, UTC) and compared it to Cyber Hub's **IST** hours;
+   the two windows overlap only 11:15–16:30 UTC, so the earlier run passed
+   that guard by luck. The guard is gone — the fixture keeps CH open at every
+   instant, and the backend's only constraint on `scheduledFor` is that it be
+   in the future.
+8. **One harness failure discarded the other's result** — a VC-105 seed error
+   exited the script before VC-104's already-collected verdict was printed.
+   The stages are functions returning status now, and both verdicts print.
 
 ### Pre-run review fixes (kept)
 
@@ -195,8 +229,11 @@ mask the AT_CAPACITY verdict the capacity check asserts.
 
 ## 4. Separation of what is proven
 
-- W1's backend is used READ-ONLY from `../vc104-api/backend` — not one file
-  touched there; this lane's evidence is the UI's, not a re-run of W1's tests.
+- The backend is used READ-ONLY — not one file touched to make the UI pass;
+  this evidence is the UI's, not a re-run of W1's tests. **Which** backend
+  changed on consolidation: runs before 2026-09-24T18:09Z served
+  `../vc104-api/backend` (W1's lane); this tree's `backend/` serves it now, and
+  the results file records which (D-4).
 - W2 runs on its OWN databases (`atc_pos_vc104ui_demo`, `atc_pos_vc104ui_test`)
   on the shared dev container; W1's `atc_pos_vc104api_*` DBs untouched.
 - Ports: backend 127.0.0.1:5382, frontend 127.0.0.1:5383 (W2's designated
@@ -219,25 +256,31 @@ mask the AT_CAPACITY verdict the capacity check asserts.
 
 ## 6. Reproducing this run
 
-One shot (everything below, plus node_modules self-heal from vc105-ui's
-byte-identical install, health waits and server cleanup):
+One shot — and note it now drives **both** UI suites, VC-104 and VC-105, each
+against this tree's own backend, writing `results-vc104.json` and
+`results-vc105.json`. It also self-heals node_modules from a lane's
+byte-identical install, regenerates the Prisma client from this schema, waits
+on health, and cleans up its servers:
 
 ```bash
 bash frontend/qa/run-all.sh
 ```
 
-Or step by step:
+Neither suite's failure hides the other's verdict: both stages run, both print.
+
+Or step by step, for the VC-104 half:
 
 ```bash
 # W2's own DBs on the shared dev container (once):
 docker exec atc-pos-dev-db psql -U atc_pos -d postgres \
   -c 'CREATE DATABASE atc_pos_vc104ui_demo' -c 'CREATE DATABASE atc_pos_vc104ui_test'
 
-# Schema: stream W1's migration chain (lexicographic = chronological):
-cat ../vc104-api/backend/prisma/migrations/*/migration.sql \
-  | docker exec -i atc-pos-dev-db psql -v ON_ERROR_STOP=1 -U atc_pos -d atc_pos_vc104ui_demo -q
+# Schema: this tree's migrations, applied by Prisma (the runner DROPs and
+# recreates the DB first, so each run is hermetic):
+cd backend && DATABASE_URL=… node_modules/.bin/prisma migrate deploy
 
-# Seed + QA fixture (licence → MULTI_STORE), verified by row counts:
+# Seed + QA fixtures (licence → MULTI_STORE, both stores open all week),
+# verified by row counts — it prints counts and PASS/FAIL, never a password:
 node frontend/qa/run-seed.mjs
 ```
 
@@ -249,8 +292,8 @@ into scrollback. `seed.js` prints every password it issues, so the runner
 swallows its stdout and proves seeding by row counts instead.
 
 ```bash
-# W1's backend, read-only, on W2's port + DB (background):
-cd ../vc104-api/backend && PORT=5382 HOST=127.0.0.1 \
+# This tree's backend, read-only, on W2's port + DB (background):
+cd backend && PORT=5382 HOST=127.0.0.1 \
   CORS_ORIGIN=http://127.0.0.1:5383 DATABASE_URL=… node src/index.js
 
 # Frontend (background):

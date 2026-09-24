@@ -1,6 +1,11 @@
 {
   "ui": "http://127.0.0.1:5387",
   "api": "http://127.0.0.1:5386",
+  "at": "2026-09-24T18:10:36.225Z",
+  "tree": "/home/atc-noc/vexo-connect-x-lanes/main-merge",
+  "branch": "main",
+  "baseSha": "011589841afe7a66364d5fe658a1da87a87f3480",
+  "dirty": true,
   "passed": 48,
   "total": 48,
   "results": [

@@ -233,6 +233,13 @@ exact drift the export was chosen to prevent.
 
 ## D-4 — no VC-105 browser evidence for this tree, and the harnesses clobbered each other
 
+> **CLOSED 09-24.** `frontend/qa/run-all.sh` now drives both harnesses against
+> this tree's own backend, and both artifacts name the tree that produced them.
+> The account below is left in the past tense as written, because the reasoning
+> is what makes the fix reviewable. What changed is in **"Closed 09-24"** at the
+> end — including a **correction to this section's own central claim**, which
+> was half wrong in a way that matters more than the gap it described.
+
 Not a runtime defect. It is here because it is the kind of gap that reads as
 green.
 
@@ -300,6 +307,123 @@ rather than of anyone remembering to ask.
 So the open half of D-4 stands unchanged: until `run-all.sh` drives the VC-105
 harness itself, against consolidated code and a `vc105-seed-demo.mjs` fixture,
 the VC-105 row of the UI acceptance table is **owed, not passed**.
+
+### Closed 09-24 — both harnesses run here, and the artifacts name their tree
+
+One invocation of `frontend/qa/run-all.sh` now provisions, seeds, serves and
+drives both suites, and writes both results files:
+
+```
+72/72 browser checks passed (0 skipped)      ← VC-104, ports 5382/5383
+48/48 browser checks passed                  ← VC-105, ports 5386/5387
+```
+
+Both files carry the same stamp, self-derived by the harness at write time:
+
+```json
+"tree":    "/home/atc-noc/vexo-connect-x-lanes/main-merge",
+"branch":  "main",
+"baseSha": "011589841afe7a66364d5fe658a1da87a87f3480",
+"dirty":   true
+```
+
+`dirty: true`, and a `baseSha` that is the **parent** of the commit carrying
+these files, are both correct rather than sloppy: the run is what justified the
+commit, so it necessarily happened before it. A stamp that read clean here
+would be the precise lie this section exists to prevent.
+
+#### The correction — the `at` tell could never have worked
+
+Above, this section said the VC-105 artifact was the lane's, and that
+`results-vc104.json` was "a real run" on which D-1's evidence rests. **The
+second half was wrong.** `x/vc104-ui` carries its own
+`frontend/qa/screens/results.json`, and the file `main` committed as
+`results-vc104.json` was byte-identical to it:
+
+```
+git show HEAD:frontend/qa/screens/results-vc104.json      \
+git show x/vc104-ui:frontend/qa/screens/results.json      # identical
+```
+
+So **both** results files in this tree were lane artifacts. The VC-105 one was
+caught only because it happened to lack `at` — and the VC-104 lane harness
+*does* stamp `at` (`git show x/vc104-ui:frontend/qa/vc104-browser-qa.mjs |
+grep -c 'at: new Date'` returns `1`). A missing field is a **tell, not a
+check**: it catches the lane that forgot and misses the lane that remembered.
+The paragraph above congratulating the `at` stamp for working was therefore
+describing luck.
+
+`frontend/qa/tree-stamp.mjs` replaces the tell with a positive statement. It
+shells `git -C <the harness's own directory> rev-parse` at write time, so the
+value is **derived from where the harness is executing**, not declared. That
+choice is the whole point: an env var like `QA_TREE=…` would have been set
+correctly by the runner that was already correct, and wrongly — or not at all —
+by the one that was not, which is exactly the failure being guarded. Negative
+control: called from the `vc105-ui` lane it returns `branch: "x/vc105-ui"`, and
+from a non-repo directory it returns nulls rather than inheriting anything.
+
+#### What running against this tree actually exposed
+
+The gap was not only that the VC-105 suite had not run here. **Neither suite
+had.** `run-all.sh` and `run-seed.mjs` both resolved their backend to
+`../../../vc104-api/backend` — correct while the files lived in W2's frontend
+lane, where the only backend in reach was W1's, and silently wrong after
+consolidation. A green run in `main` was evidence about the lane's 14
+migrations, not this tree's 21. Both now resolve to `../../backend`, and stage 0
+asserts the generated Prisma client contains `BranchPrepCapacity` — a model
+present in this schema and absent from both lanes' — so a stale lane client
+cannot pass silently.
+
+Pointing the VC-105 seed at this tree surfaced two hard incompatibilities that
+no lane run could have found, because in each case the lane simply lacks the
+migration:
+
+- `Branch.publicId` is `NOT NULL` here (`20260924100100_foundation_org_identity`,
+  absent from `x/vc105-api`). The seed now mints through `mintStorePublicId`,
+  the same helper `prisma/seed.js` uses, so the fixture carries a real VEXO
+  Store ID rather than a literal.
+- `Payment → Order` is a **composite** foreign key here,
+  `[orderId, branchId] → [id, branchId]` (`20260924100200`), so the database
+  itself refuses to attach a payment to an order in another branch. The seed's
+  `payment.create` needed no `branchId` in the lane and cannot omit it here.
+
+Both were schema-level refusals at seed time, not subtle drift — which is the
+useful part: they had been invisible for as long as the harness ran elsewhere.
+
+#### A related fix: the suite was only green between 09:00 and 23:00 IST
+
+Found by running at 18:01 UTC (23:31 IST). The seed gives Connaught Place
+09:00–23:00 and Cyber Hub 11:00–22:00 with Mondays closed. The harness asserts
+CP's availability **unconditionally**, so a night run failed — and failed with
+`Connaught Place is available for 110001`, which reads like a backend
+availability bug rather than "you ran this after 23:00". It then hung on
+`[data-testid="po-success"]` and took the process down, discarding the rest of
+the suite.
+
+CH was handled better — the harness records SKIP — but the blocks it skips are
+the two carrying the open defects in this document: the CP→CH reassign and
+re-price block (**D-1**) and the capacity block (**D-2**, including the ASAP
+tripwire). The 18:01 run scored **61/61 with 4 skips** and reported PASS. A
+passing artifact that has never executed the evidence the defect register leans
+on is D-4's own pattern in miniature.
+
+`qa/run-seed.mjs` now holds both demo stores open on all seven days, in W2's
+scratch DB only, and asserts `cpOpenDays=14` before proceeding. The cost is
+stated in the file: branch-hours logic is no longer exercised in the browser
+suite, and the CLOSED reason string loses browser coverage — unavailable-store
+*rendering* is still covered deterministically by the out-of-area case, where CP
+refuses 122001 with "Out of area" (`07-out-of-area.png`). Hours are backend
+logic and are tested there.
+
+One latent harness bug fell out of this. The capacity block chose its slot with
+`t.getHours()`, which is **box-local** — this box runs UTC — and compared it
+against CH's **IST** window. The two overlap only 11:15–16:30 UTC; the lane's
+14:19 UTC run landed inside that overlap and passed by luck. The guard is gone,
+since the only backend constraint on `scheduledFor` is that it be in the future
+(`phoneOrders.js:572`) and the fixture now keeps CH open at every instant.
+
+With that, the VC-105 row of the UI acceptance table is **passed, not owed**,
+and the VC-104 row is evidence about this tree for the first time.
 
 ---
 
