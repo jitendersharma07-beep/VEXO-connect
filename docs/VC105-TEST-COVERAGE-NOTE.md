@@ -74,5 +74,6 @@ precisely the class of check whose absence let VC-104's D-1 sit unseen behind a
 green suite. Every parameter the endpoint accepts is exercised too — `from`/`to`,
 `branchId`, `channel`, and all four `groupBy` values (`:294–296`, `:694`, `:697`).
 
-No shared task was raised for this. Unlike VC-104's D-1/D-2, nothing here needs
-a decision before VC-105 ships.
+Raised on the shared task list as **#11**, flagged optional and non-blocking so
+it does not compete with **#10** (VC-104 D-1/D-2, which does need a decision).
+Nothing here needs a decision before VC-105 ships.
