@@ -18,15 +18,18 @@ exists so the fix is a decision W1 makes with the evidence in hand.
 
 | # | Defect | Effect | Severity | Where |
 |---|--------|--------|----------|-------|
-| D-1 | `priceChanged` on reassign ignores the delivery charge | The caller is re-quoted nothing on exactly the moves that change what they pay | Medium — quote-facing, not billing (the charge is not billable while C-6 is open) | `backend/src/api/routes/phoneOrders.js:858,879,914` |
-| D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
+| D-1 | ~~`priceChanged` on reassign ignores the delivery charge~~ **FIXED 09-24** | The caller was re-quoted nothing on exactly the moves that changed what they pay — and since food and tax cannot move on a reassign at all, the flag could never be true | Medium — quote-facing, not billing (the charge is not billable while C-6 is open) | Fix: `payableQuote` captured before and after via `buildQuote`, `phoneOrders.js:930,988,995` |
+| D-2 | ~~Prep capacity never counts ASAP orders~~ **FIXED 09-24**, one limitation recorded | The kitchen-full refusal was dead on the dominant path; the guard failed OPEN | High for the feature's purpose — no money impact | Fix: booked-count widened to ASAP orders by `createdAt`, `phoneOrders.js:197`. An order **reassigned after its own slot elapsed** still occupies nothing — pinned, see "What this does not settle" |
 | D-3 | ~~Phone orders cannot sell a product with a REQUIRED modifier group~~ **FIXED 09-24** | Such products were refused on the phone path with "Choose at least N"; the caller could not complete the order | Medium — failed CLOSED, so no mispricing; a catalogue subset was simply unsellable by phone | Fix: `modifierOptionIds` on `phoneOrders.js` `itemsSchema`, plus the three places that had encoded "modifiers cannot arrive here" |
 | D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
 | D-5 | ~~The catalog API can leave a required modifier group permanently unsatisfiable~~ **FIXED 09-24** | The product became unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it was reachable by an ordinary catalogue edit | Fix: `assertSatisfiable` in `backend/src/api/routes/catalog.js`, three call sites |
 | D-6 | Archiving a promotion permanently burns its code | The code cannot be republished, edited, or reused by a new promotion — the offer is unrecoverable and the till's code stops working for good | Medium — fails CLOSED, no mispricing; one code per mistake, not the catalogue | `backend/src/api/routes/promotions.js:353` with `:196`, `:229`, `:281`, `:167–172`. **Open, now pinned** by `promotions.test.js`; unfixed pending an owner decision — no VC-102 spec exists to settle intent |
 
-§3 is the part worth reading first: **the phone-order suite already builds D-1's
-exact conditions and simply never looks at the flag.**
+§3 is the part worth reading first, and the sentence that made it worth reading
+— **the phone-order suite already built D-1's exact conditions and simply never
+looked at the flag** — is what let the defect survive a passing suite. Both are
+now fixed and pinned (09-24); the original accounts below are kept unedited, and
+each carries a dated *Fixed* subsection at its end.
 
 **D-3 and D-4 did not exist in either lane alone — the consolidation merge
 created both** (09-24, `merge/a406-consolidate`). They are recorded here because
@@ -126,6 +129,43 @@ waited for a `po-move-banner` that the server's flag never justified). Evidence:
 W2 has no preference between these — only that the client can tell, from the
 response alone, whether to re-read the number to the caller.
 
+### Fixed 09-24 — option 1, and the defect was worse than reported
+
+`before` now captures the payable alongside total and tax
+(`phoneOrders.js:930`), the same figure is rebuilt from the updated row after
+the write (`:988`), and `priceChanged` compares all three (`:995`). Both
+payables come out of `buildQuote`, not out of arithmetic repeated here, so the
+flag keeps reporting whatever the operator is actually reading to the caller —
+including after C-6 closes and the charge stops being quoted beside the order.
+
+**What the write-up understated.** It said the flag is false "on exactly the
+moves that change what they pay", which reads as *sometimes* wrong. It is
+stronger than that: `total` and `taxAmount` are the only two things the old
+expression looked at, and **neither can move on a reassignment at all.** The
+catalog is company-wide (C-7) and each line's tax rate and unit price are
+snapshotted onto the row at submit, so `recomputeOrder` re-derives the same
+numbers from the same rows whichever store it is called for — `TaxRate` is
+company-scoped (`schema.prisma:494`) and carries no branch dimension. So
+`priceChanged` was not an inaccurate flag. It was a **dead** one: false on every
+reassignment that has ever run, including the ones that cost the caller more.
+
+Pinned by two tests, deliberately in opposite directions:
+
+| test | asserts | why it exists |
+|---|---|---|
+| `reports a price change when only the delivery charge moved (D-1)` | payable 460 → 480, `priceChanged` **true** | the defect itself |
+| `stays quiet when the move costs the caller nothing (D-1 control)` | both stores at ₹40, payable 460 → 460, `priceChanged` **false** | a flag hardwired to `true` passes the first test and is just as useless; the operator would re-quote every caller and learn to ignore it |
+
+Before the fix the first test failed `expected false to be true`. The existing
+test above it already built those exact conditions and simply never read the
+flag — which is how the suite stayed green through 41, then 52, tests.
+
+**The contract needs no version bump.** Option 2's concern was that §5.10
+promises a food-price semantic; the fix keeps the total and tax comparisons
+intact and only *adds* the payable, so nothing the contract already promises has
+changed meaning. Option 3 (`priceChanged` plus a separate `quoteChanged`) stays
+available if W1 later wants the two signals split.
+
 ---
 
 ## D-2 — prep capacity never counts ASAP orders (fails OPEN)
@@ -189,6 +229,92 @@ orders. Evidence: `frontend/qa/screens/15b-capacity-asap-d2.png`, committed here
 
 Either way the `booked` number that reaches the UI starts moving on the ASAP
 path, which is all the client needs.
+
+### Fixed 09-24 — option 2, chosen over option 1 on purpose
+
+The booked-count now reads (`phoneOrders.js:197`):
+
+```js
+OR: [
+  { scheduledFor: { gte: start, lt: end } },
+  { scheduledFor: null, createdAt: { gte: start, lt: end } },
+],
+```
+
+An ASAP order is counted against the slot it was **taken** in. Option 1
+(persisting `scheduledFor = now`) was rejected because the write-up's own
+caveat is the decisive one: it would make an ASAP order indistinguishable from
+one scheduled for now, and `scheduled: Boolean(scheduledFor)` has no other
+source of truth to fall back on. Option 2 leaves the column's meaning alone.
+
+**On the index question the write-up left open:** no new index is needed. The
+selective predicates — `companyId`, `routedBranchId`, `status` — are unchanged
+and already covered by `@@index([companyId, routedBranchId, status])`; the new
+`OR` only re-filters rows already narrowed to one store's live orders, so the
+access path is the same one the query used before.
+
+**This is a behaviour change, not only a reporting fix.**
+`loadBranchDecision` feeds three callers — branch-options (`:544`), submit
+(`:644`) and reassign (`:907`) — and the last two both enforce
+`if (!chosen.available) throw branchUnavailable(...)`. So a full ASAP slot now
+genuinely refuses new orders where it previously waved them through. That is
+the repair of a fail-open guard working as intended, but it will be visible to
+operators the first time a kitchen fills up.
+
+**Expected consequence elsewhere:** §5 below pins the ASAP hole as tripwire
+check `15b` in the vc104-ui QA harness, written to fail the day the semantics
+change. That day is today. A red `15b` is the welcome outcome described there,
+not a regression — the pin should now be retired and ASAP re-proved with real
+fillers.
+
+Pinned by three tests. Reverting the `OR` to the old single-term filter turns
+each of them red **on its own assertion**, not on a fixture:
+
+| test | inverted-guard failure |
+|---|---|
+| `counts ASAP orders against the slot as well (D-2)` | `expected +0 to be 1` — the booking is invisible to the counter |
+| `counts a reassigned ASAP order against the slot it was taken in (D-2)` | `expected 200 to be 409` — a full kitchen accepts a transfer |
+| `does NOT count an ASAP order moved after its slot elapsed (D-2 limitation)` | `expected +0 to be 1` — see below |
+
+The sibling scheduled-path test continues to prove the other branch, and books
+an hour ahead, so the two do not interfere.
+
+#### What this does not settle
+
+**A reassignment can still overfill a kitchen, and this fix does not stop it.**
+An ASAP order is anchored to its `createdAt`, but the reassign handler checks
+the target against `when = po.scheduledFor ?? new Date()` (`phoneOrders.js:892`)
+— the slot containing *now*. Move an order after its own slot has elapsed and
+the two no longer agree: it passes into the new store without occupying
+anything there. Measured, with a cap of 2 and one order taken natively:
+
+```
+3 late transfers accepted → 4 live orders at the store, reported booked = 1, available = true
+```
+
+Three things about that, in order of importance:
+
+1. **It is not a regression.** Before this fix the same store reported `booked:
+   0` and accepted everything, native orders included. The guard has gone from
+   blind to partially sighted, not the other way round.
+2. **The common case is covered**, and that is what the second test above
+   proves: an order taken and moved within the same slot *does* count, and the
+   store refuses the next one. A transfer minutes after the call — the ordinary
+   operator action — is handled.
+3. **Closing it is a schema decision, not a patch.** The order needs a slot
+   anchor that survives a move and is distinct from both `createdAt` and
+   `scheduledFor`; re-stamping either one destroys information the rest of the
+   route depends on (that is the same objection that ruled out option 1). So it
+   is recorded and pinned rather than quietly fixed, and the test above states
+   today's behaviour without endorsing it — it goes red the day someone adds
+   the anchor, and points here.
+
+**The TOCTOU race is unchanged.** Two concurrent submits into the last free slot
+both read `booked = n-1` and both pass. It predates this fix and is equally true
+of the scheduled path, so the change neither causes nor worsens it — but the
+guard is now load-bearing on the path nearly every caller takes, which raises
+the odds of someone reaching it. A fix means a transactional re-check or a
+unique constraint on (store, slot, sequence), neither of which is in scope here.
 
 ---
 
@@ -361,8 +487,10 @@ call sites still calling it.
   currently carries a `minSelect >= 1` group is still unverified, exactly as the
   section above says. The fix does not depend on the answer, but the *urgency*
   of having shipped it does.
-- **D-1 and D-2 remain open** and are W1's call; D-6 is recorded and now pinned
-  by tests, but unfixed pending a policy decision on code reservation.
+- **D-1 and D-2 remained open at the time this was written**; both were fixed
+  later the same day — see their *Fixed 09-24* subsections. D-6 is recorded and
+  now pinned by tests, but deliberately **unfixed pending an owner decision** on
+  code reservation; it is parked, not forgotten.
 - **The front end was not touched.** The phone-order operator screen has no
   modifier picker, so this fix makes the *API* able to sell these products; a
   human operator still cannot, from the UI, today. That is the next piece of work
@@ -1044,7 +1172,16 @@ counter reset, no historical bill rewritten.
 
 ---
 
-## 3. Why the phone-order suite stays green on both
+## 3. Why the phone-order suite stayed green on both
+
+> **Superseded 09-24 — this is the pre-fix analysis, kept because it is the
+> reason both defects survived a green suite.** Five assertions now pin what
+> this section says was unpinned. Four of them were **run red first** against
+> the unfixed code, with the exact failures recorded in the two *Fixed 09-24*
+> subsections, so the pins are evidence rather than decoration. The fifth is a
+> control that passes either way on purpose — §6 explains why that is not the
+> contradiction it looks like. The prediction below, that "fixing them should
+> not turn the suite red", held.
 
 **No existing assertion pins either bug, so fixing them should not turn the
 suite red.** What is missing is coverage, and in D-1's case it is missing by a
@@ -1053,7 +1190,9 @@ single line.
 ### D-1 — the conditions are already built; nothing reads the flag
 
 `backend/tests/phoneOrders.test.js:516`, *"moves the order and recomputes price
-and tax for the new store"*, already sets up **exactly** the case that breaks:
+and tax for the new store"*, already sets up **exactly** the case that breaks
+(the test is unchanged but now sits at `:890`, one added test and a fixture
+helper above it):
 
 | Line | What it establishes |
 |---|---|
@@ -1073,6 +1212,14 @@ expect(res.body.priceChanged).toBe(true);
 to that test reproduces D-1 without any new fixture — and the test's own comment
 at :533–534 already states the C-7 premise that makes the flag structurally dead.
 
+> **What was actually done (09-24).** That one line was *not* added to this
+> test. Editing an existing green test to make it red is a poor record: the
+> reader cannot later tell the original intent from the pin. Two new tests were
+> written beside it instead (`:913` and `:935`) — one asserting `true` on a
+> charge-only move, one asserting `false` when the move is free — so the
+> existing test keeps proving what it was written to prove. See D-1's *Fixed
+> 09-24* subsection for why a single `toBe(true)` would not have been enough.
+
 ### D-2 — covered only on the path that works
 
 The one capacity test — *"refuses a store whose prep slot is already full"*,
@@ -1084,9 +1231,15 @@ into a store with `maxOrdersPerSlot = N` and then expects `capacity.booked: N`
 and `AT_CAPACITY` would have caught this on the day; it is the one addition
 worth making before the fix.
 
+> **What was actually done (09-24).** Exactly that, with N = 1, at
+> `phoneOrders.test.js:358`. It ran red first (`expected +0 to be 1`) and the
+> filler is a plain `baseSubmission()` — no `scheduledFor` — so it fails again
+> the moment the ASAP branch is dropped from the count.
+
 This is also why the lane's recorded 455/455 was never evidence against either
 defect — a green suite certifies what it asserts, and neither of these was
-asserted.
+asserted. The same caution now applies in the other direction: a green suite
+certifies these five assertions and nothing more.
 
 ## 4. Reproduction
 
@@ -1106,6 +1259,12 @@ the lane seed, then:
 
 Neither needs the UI; both are visible in the raw JSON.
 
+> **Since 09-24 these recipes prove the fix, not the defect.** Run against this
+> tree, D-1 now returns `priceChanged: true` and D-2 reports `capacity.booked: 2`
+> with `AT_CAPACITY`. To see the original behaviour, check out `c40683b` — or
+> revert the `OR` array at `phoneOrders.js:195–198` and the two `buildQuote`
+> calls at `:930` and `:988`, which is how the failing runs above were produced.
+
 ## 5. What W2 did meanwhile (so W1 knows what to undo)
 
 Both changes are W2's frontend work, not changes to the backend they describe:
@@ -1121,6 +1280,32 @@ Both changes are W2's frontend work, not changes to the backend they describe:
   retire the pin and re-prove ASAP with real fillers. A red `15b` after a
   capacity fix is the expected, welcome outcome — not a regression.
 
+> **Both notes came due on 09-24, and both belong to the client side, which a
+> concurrent session has claimed** (negotiated in a working note at the repo
+> root, which may not outlive the branch — so the split is recorded here). The
+> split
+> agreed is: this session owns the route, the backend tests and this document;
+> that session owns `PhoneOrders.jsx`, the QA harness, `VC104-UI-DELIVERY.md`
+> and the API contract. **No frontend file was touched by this fix.**
+>
+> **D-1's banner is being removed there, and the first draft of this note
+> argued for keeping it — wrongly.** The argument was that the `||` is merely
+> redundant once the server flag works, and that redundancy is a free
+> independent check. It is not free: the client term compares against the
+> previous quote read off `detail`, so when `detail` is stale or not yet
+> loaded the banner fires on a move that cost the caller nothing. That is a
+> false positive the server flag cannot produce, and an operator who is
+> re-quoted on every move stops believing the banner — which is the same
+> failure D-1 caused, arrived at from the other side. Two sources of truth for
+> one rule, and the weaker one is wrong more often.
+>
+> **D-2's `15b` tripwire has fired**, exactly as its failure note anticipated,
+> so `15b` is **expected red** and retiring it is live work — claimed by the
+> same session. It was not retired here: the backend fix is proven at HTTP
+> level, but nobody has watched the ASAP capacity banner render, and marking a
+> UI check done on the strength of a backend run is the substitution this
+> report exists to warn about.
+
 ## 6. What this report does not claim
 
 W2 did not run W1's test suite, did not modify W1's code, and does not certify
@@ -1129,11 +1314,22 @@ on-disk log for the run). Everything above is either a direct quotation of the
 committed source at `c40683b` or an observation from W2's own browser-QA runs,
 whose evidence is committed here (from `x/vc104-ui` @ `f344ef4`).
 
-D-1 and D-2 were reported against `c40683b` and are **still unfixed** in this
-consolidated tree — the merge carried them forward untouched, as W2 wrote them.
-Neither is pinned by an assertion, so the phone-order suite says nothing about
-them either way; its figure has since moved from 41 to 52 and **none of those 11
-new tests touches D-1 or D-2**, which is exactly the trap a rising count sets.
+D-1 and D-2 were reported against `c40683b`, and the merge carried them forward
+untouched as W2 wrote them. The paragraph that stood here warned that the
+phone-order figure had risen from 41 to 52 while **none of those 11 new tests
+touched D-1 or D-2** — a rising count proving nothing about the defects under
+it. **Both were fixed on 09-24** and the count is now 57; the trap is worth
+restating rather than deleting, because the five tests that moved it are the
+only five that say anything about D-1 or D-2.
+
+Four of those five were run red against the unfixed code before they were
+allowed to go green. **The fifth never goes red, and that is its job** — `stays
+quiet when the move costs the caller nothing (D-1 control)` asserts
+`priceChanged === false`, which the broken code also produced. It is there to
+fail a *bad fix* rather than reproduce the defect: hardwire the flag to `true`
+and the other D-1 test passes while this one catches it. A test that has never
+been red is usually worthless; this is the exception, and the exception has to
+be argued rather than assumed.
 
 D-3 was the merge's own doing and is **FIXED** (09-24, same day, after D-5) —
 that is where 11 of those tests came from. A twelfth was added to

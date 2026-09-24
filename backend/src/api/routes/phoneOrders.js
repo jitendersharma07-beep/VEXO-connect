@@ -177,9 +177,11 @@ const loadBranchDecision = async ({ req, fulfilment, address, when, items }) => 
   }
   const capacityByBranch = new Map(capacities.map((c) => [c.branchId, c]));
 
-  // Capacity is counted over phone orders already scheduled into the same slot
-  // at the same store. Only live ones count - a rejected order is not occupying
-  // a kitchen.
+  // Capacity is counted over phone orders already booked into the same slot at
+  // the same store. Only live ones count - a rejected order is not occupying a
+  // kitchen. An ASAP order stores no scheduledFor, so it is counted against the
+  // slot it was taken in; leaving it out would exempt the path nearly every
+  // caller uses and let the guard pass a kitchen that is already full.
   const bookedByBranch = new Map();
   for (const branchId of branchIds) {
     const cap = capacityByBranch.get(branchId);
@@ -190,7 +192,10 @@ const loadBranchDecision = async ({ req, fulfilment, address, when, items }) => 
         companyId,
         routedBranchId: branchId,
         status: { in: ['SUBMITTED', 'ACCEPTED'] },
-        scheduledFor: { gte: start, lt: end },
+        OR: [
+          { scheduledFor: { gte: start, lt: end } },
+          { scheduledFor: null, createdAt: { gte: start, lt: end } },
+        ],
       },
     });
     bookedByBranch.set(branchId, booked);
@@ -915,7 +920,15 @@ router.post(
     if (!chosen) throw notFound('Branch not found');
     if (!chosen.available) throw branchUnavailable(chosen.unavailableReasons);
 
-    const before = { total: Number(order.total), tax: Number(order.taxAmount) };
+    // The payable is captured too, not just the order. Moving store cannot change
+    // food or tax — the catalog is company-wide (C-7) and each line's tax rate was
+    // snapshotted at submit — so the delivery charge is the only figure a
+    // reassignment actually moves, and it lives outside Order while C-6 is open.
+    const before = {
+      total: Number(order.total),
+      tax: Number(order.taxAmount),
+      payable: buildQuote(order, po.deliveryCharge).payableQuote,
+    };
 
     const updated = await prisma.$transaction(async (tx) => {
       await tx.order.update({ where: { id: order.id }, data: { branchId: body.branchId } });
@@ -969,9 +982,17 @@ router.post(
       },
     });
 
+    // Derived from buildQuote rather than re-added here, so that if C-6 closes and
+    // the charge folds into the order, this keeps reporting the same number the
+    // operator is reading to the caller.
+    const afterPayable = buildQuote(after, updated.deliveryCharge).payableQuote;
+
     res.json({
       phoneOrder: phoneOrderPublic(updated, after),
-      priceChanged: Number(after.total) !== before.total || Number(after.taxAmount) !== before.tax,
+      priceChanged:
+        Number(after.total) !== before.total ||
+        Number(after.taxAmount) !== before.tax ||
+        afterPayable !== before.payable,
     });
   }),
 );
