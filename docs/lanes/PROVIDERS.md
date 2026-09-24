@@ -19,6 +19,19 @@ The per-provider verdict and the blocked list live in
 | Test database | `vcx_providers_test` on 127.0.0.1:5440 (lane-private) |
 | Runner | `/home/atc-noc/vcx-providers-local/vcxp` |
 
+### Commits
+
+| SHA | Subject |
+|---|---|
+| `5b8d54d` | Keep the test lock alive past 300s, and stop describing another lane's database |
+| `63b0766` | Provider integrations: Swiggy, Zomato, Reelo and Tally, with what each refuses |
+| `34be0c7` | A settings screen that shows what each provider will not do |
+| `f8af80e` | Record what was verified, by what command, and what is still unknown |
+
+`34be0c7` is the last commit that changes code. Everything in §5 was executed
+against that tree state; `f8af80e` adds these two documents and nothing else, so
+the recorded results describe the shipped code and not an earlier draft of it.
+
 ### Modified tracked files (10)
 
 ```
@@ -249,6 +262,7 @@ bash /home/atc-noc/vcx-providers-local/vcxp build
 |---|---|
 | Full suite | **Test Files 1 passed (1) · Tests 80 passed (80)** · Duration 611.48s |
 | 100,000-row import | 528.4s, 189 rows/s, in `vcx_providers_test` — 86% of the suite's runtime |
+| Code under test | `34be0c7` (see §1) |
 
 ---
 
