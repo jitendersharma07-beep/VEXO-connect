@@ -95,8 +95,12 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
     },
   });
+  // publicId is required and unique since the foundation lane landed — the
+  // store identity a human reads out over the phone. This lane's fixtures were
+  // written before that column existed, so they are given one here rather than
+  // the column being made optional.
   branch = await prisma.branch.create({
-    data: { companyId: company.id, name: 'Main', code: 'P1' },
+    data: { companyId: company.id, publicId: 'VC-PJ-0001', name: 'Main', code: 'P1' },
   });
   const mk = (email, fullName, role) =>
     prisma.posUser.create({ data: { email, fullName, role, companyId: company.id, branchId: branch.id, passwordHash } });
@@ -272,7 +276,7 @@ describe('enqueue: scoping, dedupe, receipt gate', () => {
         licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
       },
     });
-    const ob = await prisma.branch.create({ data: { companyId: other.id, name: 'O', code: 'O1' } });
+    const ob = await prisma.branch.create({ data: { companyId: other.id, publicId: 'VC-PJ-0002', name: 'O', code: 'O1' } });
     await prisma.posUser.create({
       data: { email: 'owner@o.test', fullName: 'O', role: 'CUSTOMER_OWNER', companyId: other.id, branchId: ob.id, passwordHash },
     });

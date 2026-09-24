@@ -104,8 +104,12 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
     },
   });
+  // publicId is required and unique since the foundation lane landed — the
+  // store identity a human reads out over the phone. This lane's fixtures were
+  // written before that column existed, so they are given one here rather than
+  // the column being made optional.
   branch = await prisma.branch.create({
-    data: { companyId: company.id, name: 'Main', code: 'M1' },
+    data: { companyId: company.id, publicId: 'VC-KI-0001', name: 'Main', code: 'M1' },
   });
   const mk = (email, fullName, role) =>
     prisma.posUser.create({ data: { email, fullName, role, companyId: company.id, branchId: branch.id, passwordHash } });
@@ -314,7 +318,7 @@ describe('tenancy', () => {
       },
     });
     const otherBranch = await prisma.branch.create({
-      data: { companyId: other.id, name: 'Other', code: 'O1' },
+      data: { companyId: other.id, publicId: 'VC-KI-0002', name: 'Other', code: 'O1' },
     });
     await prisma.posUser.create({
       data: { email: 'till@o.test', fullName: 'Other Till', role: 'CASHIER', companyId: other.id, branchId: otherBranch.id, passwordHash },
