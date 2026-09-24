@@ -16,6 +16,7 @@ import {
   Menu,
   MonitorSmartphone,
   Package,
+  PhoneCall,
   ReceiptText,
   ScrollText,
   ShieldCheck,
@@ -28,7 +29,7 @@ import {
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
 import { usePermissions } from '../lib/permissions.jsx';
-import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope } from '../lib/pos.js';
+import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope, isManagerUp } from '../lib/pos.js';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
@@ -136,6 +137,12 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               </div>
               <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
               <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+              {/* VC-104: managers and owners only — the same role set the
+                  server's rolesFor('phone.*') admits. Cashiers get no link;
+                  the route guard and the API refuse them anyway. */}
+              {isManagerUp(user) ? (
+                <NavItem to="/phone-orders" icon={PhoneCall} label="Phone orders" />
+              ) : null}
               {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
               {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
               {canSeeReports(user) ? (
