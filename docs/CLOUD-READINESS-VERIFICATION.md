@@ -42,7 +42,7 @@ lane or worktree was modified.
 |---|---|---|---|---|
 | HTTPS / public access | **BLOCKED** | `1c7e8e6` | `evidence/02-*` | No approved public staging hostname exists. Exact DNS/proxy/TLS change-set is prepared and **not applied**; owner approves, then re-run. |
 | Real platform admin + customer provisioning | **PASS** (defect CR-1 found and fixed) | `1c7e8e6` | `evidence/03-*` | Ship CR-1. "Enabled modules" per licence is **not implemented** — product decision, not a defect. |
-| Email delivery + password reset | **BLOCKED** | `1c7e8e6` | `evidence/04-*` | The capability is absent from this build (0 occurrences in the shipped bundle). A complete implementation sits on unmerged lane `x/accounts`. Merge decision is the owner's; then verify with authorized inbox access. |
+| Email delivery + password reset | **BLOCKED** — ⚠ **superseded, see [After the merge](#after-the-merge--email-recovery-now-works)**: now **PASS** for the software, **BLOCKED** only for real-provider delivery | `1c7e8e6`; superseded by `98c11a2` | `evidence/04-*` | The capability is absent from this build (0 occurrences in the shipped bundle). A complete implementation sits on unmerged lane `x/accounts`. Merge decision is the owner's; then verify with authorized inbox access. |
 | Tenant / store isolation | **PASS** — 58/58 probes | `1c7e8e6` | `evidence/05-*` | None. Inventory scope untestable here because inventory is not in this build. |
 | Billing / payment / inventory / reporting | **PASS for what this build implements** | `1c7e8e6` | `evidence/06-*` | Three sub-checks are **NOT IN THIS BUILD** (recipe/modifier consumption, stock quantity/unit handling, restocking policy) — they live on unmerged lane `x/inventory`. Re-run after merge. |
 | Encrypted backup restore | **PASS** for schedule + restore (16/16); **BLOCKED** for decryption | archive `pos-prod-20260923T211456Z` | `evidence/07-*` | One owner-run command closes the decryption half. Destination-side deletion protection is **NOT VERIFIED**. |
@@ -348,6 +348,24 @@ platform-admin bootstrap refuses to create an administrator nobody can reach.
 `docs/ACCOUNTS-GO-LIVE.md` §1 is the exact configuration. Credentials go in the
 deployment's secret store — **not into chat, a tracked file, or a terminal that
 keeps scrollback.**
+
+### The staging stack now runs the merged tree
+
+The journey above ran on its own throwaway stack. The **persistent** staging
+stack was afterwards restarted onto the merged tree so the two agree, and was
+re-checked at the edge `http://127.0.0.1:8120/`:
+
+- it serves the merged bundle `index-TZS0KpMt.js`;
+- `POST /api/auth/forgot-password` answers **`503 POS_MAIL_NOT_CONFIGURED`** —
+  the fail-closed behaviour above, observed on the real stack rather than
+  inferred from the source;
+- a bad-credential login still answers `401 POS_UNAUTHENTICATED`, so the merged
+  Prisma client and the `vcx_staging` schema agree.
+
+Before the restart the stack was briefly **mixed** — the rebuilt bundle was
+already being served by the edge while the backend still ran pre-merge code, and
+that same endpoint answered `404`. Worth naming because a rebuilt frontend does
+not restart the API, and the mismatch is invisible until a route is probed.
 
 ### One regression this merge introduces
 
