@@ -6,8 +6,18 @@
 Two defects in the phone-order backend. Both were found from the outside, by
 driving W1's API through a real browser against W2's own database — not by
 reading the code, and not by running W1's test suite (W2 does not run another
-worker's tests). Neither is fixed: the backend is W1's to change. This report
-exists so the fix is a decision W1 makes with the evidence in hand.
+worker's tests). The backend is W1's to change, so this report exists to make
+the fix a decision W1 takes with the evidence in hand.
+
+> **Status, 2026-09-24 — this opening no longer describes the tree.** It was
+> written as "two defects, neither fixed". The register below has since grown to
+> six, and four of them are fixed here: **D-1, D-2, D-3 and D-5**. D-4 is
+> process rather than runtime. **D-6 is pinned but deliberately unfixed**,
+> pending an owner decision that no VC-102 spec settles. One D-2 limitation
+> survives its own fix and is recorded rather than closed — see *What this does
+> not settle*. Line numbers cited for the **fixed** defects are this tree's; the
+> unfixed ones still read against `c40683b`, so check which of the two a
+> citation is following before trusting it.
 
 > **Consolidation note (`merge/a406-consolidate`, 2026-09-24).** This report was
 > written twice, once per lane, each copy describing the other lane in the third
