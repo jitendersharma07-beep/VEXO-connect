@@ -43,6 +43,22 @@ export const env = {
   // A provider call that never returns must not hold a cashier, or a request
   // handler, forever. Exceeding this is UNKNOWN, never "refused".
   POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
+  // ---- LANE providers ----------------------------------------------------
+  // Provider integrations (Swiggy, Zomato, Reelo, Tally) hold the credentials
+  // they call out with in the database, so a database read must not be enough
+  // to use them. This key seals them. Unset is the normal shipped state: the
+  // integration screens then read as unavailable rather than half-working,
+  // which is the same refusal shape the gateway uses above.
+  POS_INTEGRATION_SECRET_KEY: process.env.POS_INTEGRATION_SECRET_KEY || null,
+  // Outbound provider calls get the same "never hold a request forever" rule as
+  // the gateway. Separate variable because a Tally machine on a shop LAN and a
+  // hosted aggregator API do not deserve the same patience.
+  POS_INTEGRATION_TIMEOUT_MS: Number(process.env.POS_INTEGRATION_TIMEOUT_MS || 20000),
+  // How often the outbound worker looks for due jobs. 0 disables the background
+  // loop, which is the shipped default: a deployment with no integration
+  // configured should not be running a poller, and the test suite drives the
+  // worker by calling it rather than by waiting for it.
+  POS_INTEGRATION_WORKER_INTERVAL_MS: Number(process.env.POS_INTEGRATION_WORKER_INTERVAL_MS || 0),
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
@@ -107,3 +123,29 @@ if (env.POS_GATEWAY_API_BASE) {
 if (!Number.isFinite(env.POS_GATEWAY_TIMEOUT_MS) || env.POS_GATEWAY_TIMEOUT_MS <= 0) {
   throw new Error('POS_GATEWAY_TIMEOUT_MS must be a positive number of milliseconds');
 }
+
+// ---- LANE providers -------------------------------------------------------
+// Checked at boot rather than at first use, because the first use is an operator
+// pasting a live provider key into the portal: discovering the key is malformed
+// after the paste means the credential has already been typed somewhere it
+// cannot be stored, and the operator has no way to know whether it was kept.
+if (env.POS_INTEGRATION_SECRET_KEY && !/^[0-9a-fA-F]{64}$/.test(env.POS_INTEGRATION_SECRET_KEY)) {
+  throw new Error('POS_INTEGRATION_SECRET_KEY must be 64 hex characters (32 bytes)');
+}
+if (!Number.isFinite(env.POS_INTEGRATION_TIMEOUT_MS) || env.POS_INTEGRATION_TIMEOUT_MS <= 0) {
+  throw new Error('POS_INTEGRATION_TIMEOUT_MS must be a positive number of milliseconds');
+}
+// A floor rather than "any positive number": a one-second poll against a queue
+// that is usually empty is a database query every second, forever, for nothing.
+if (
+  !Number.isFinite(env.POS_INTEGRATION_WORKER_INTERVAL_MS) ||
+  env.POS_INTEGRATION_WORKER_INTERVAL_MS < 0 ||
+  (env.POS_INTEGRATION_WORKER_INTERVAL_MS > 0 && env.POS_INTEGRATION_WORKER_INTERVAL_MS < 5000)
+) {
+  throw new Error('POS_INTEGRATION_WORKER_INTERVAL_MS must be 0 (off) or at least 5000');
+}
+
+// Storing credentials is what the integration screens exist to do, so with no
+// key the honest state is "unavailable", not "configured and silently in the
+// clear". Read-only views of already-stored integration state stay available.
+export const integrationSecretsEnabled = Boolean(env.POS_INTEGRATION_SECRET_KEY);

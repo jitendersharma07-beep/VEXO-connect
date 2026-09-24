@@ -108,6 +108,9 @@ model Company {
   promotions        Promotion[]
   customers         Customer[]
   phoneOrders       PhoneOrder[]
+
+  // LANE providers
+  integrationConnections IntegrationConnection[]
 }
 
 model Branch {
@@ -187,6 +190,10 @@ model Branch {
   prepCapacity        BranchPrepCapacity?
   phoneOrdersRouted   PhoneOrder[]        @relation("PhoneOrderRouted")
   phoneOrdersAccepted PhoneOrder[]        @relation("PhoneOrderAccepted")
+
+  // LANE providers
+  integrationOutlets IntegrationOutlet[]
+  aggregatorOrders   AggregatorOrder[]
 
   @@unique([companyId, code])
   // Referenced by everything that happens AT a store — terminals, devices,
@@ -268,6 +275,10 @@ model PosUser {
   phoneOrdersOperated PhoneOrder[] @relation("PhoneOrderOperator")
   phoneOrdersAccepted PhoneOrder[] @relation("PhoneOrderAcceptedBy")
   phoneOrdersRejected PhoneOrder[] @relation("PhoneOrderRejectedBy")
+
+  // LANE providers
+  discrepanciesResolved IntegrationDiscrepancy[] @relation("DiscrepancyResolvedBy")
+  loyaltyImportsStarted LoyaltyImportRun[]       @relation("LoyaltyImportStartedBy")
 
   // Referenced by PermissionRule and UserStoreAssignment so a tenant's rule or
   // assignment can only name a principal of that same tenant.
@@ -697,6 +708,27 @@ model Order {
   deviceId        String?
   device          Device?   @relation(fields: [deviceId, branchId], references: [id, branchId], onDelete: Restrict)
 
+  // ---- LANE providers -----------------------------------------------------
+  // Where this order came FROM, which is a different question from how it is
+  // served (that is `type`, DINE_IN or TAKEAWAY) and from how it is delivered
+  // (that is PhoneOrder.fulfilment). B§9 p7 requires the Orders screen to be
+  // able to tell these apart before any integration ships, so the column lands
+  // with the integrations rather than after them.
+  //
+  // Defaulting to POS is what makes this safe to add to a live table: every
+  // order that already exists was rung up at a counter, and that is exactly
+  // what the default asserts. No backfill invents anything.
+  channel         OrderChannel         @default(POS)
+  // Which provider, when the channel is AGGREGATOR. The pair is deliberately
+  // not a single "SWIGGY_ORDER" channel value: adding a provider must not
+  // require a migration, which is the schema-churn B§9 p7 forbids.
+  channelProvider IntegrationProvider?
+  // The provider's own id for this order, denormalised onto the order so the
+  // Orders screen and any export can quote it without joining. AggregatorOrder
+  // holds the authoritative copy and the uniqueness constraint that stops a
+  // repeated callback creating a second bill.
+  externalOrderId String?
+
   items       OrderItem[]
   kots        Kot[]
   payments    Payment[]
@@ -704,6 +736,10 @@ model Order {
   intents     PaymentIntent[]
   redemptions PromotionRedemption[]
   phoneOrder  PhoneOrder?
+
+  // LANE providers
+  aggregatorOrder   AggregatorOrder?
+  loyaltyOperations LoyaltyOperation[]
 
   @@unique([companyId, invoiceNumber])
   // Lets a payment reference (orderId, branchId), which is what ties the money
@@ -718,6 +754,8 @@ model Order {
   @@index([discountApprovedById])
   @@index([terminalId])
   @@index([deviceId])
+  // LANE providers — the Orders screen filters by where the order came from.
+  @@index([companyId, channel, billedAt])
 }
 
 model OrderItem {
@@ -2004,6 +2042,10 @@ model Customer {
   addresses   CustomerAddress[]
   phoneOrders PhoneOrder[]
 
+  // LANE providers
+  loyaltyLinks      LoyaltyProfileLink[]
+  loyaltyOperations LoyaltyOperation[]
+
   @@unique([companyId, phone])
   // Composite tenant target. Children key on (id, companyId) so a child row
   // straddling two tenants is a database impossibility, not a code review.
@@ -2208,4 +2250,684 @@ model PhoneOrderEvent {
 
   @@index([phoneOrderId, at])
   @@index([companyId, at])
+}
+
+// ==== LANE providers ====
+// Third-party provider integrations: delivery aggregators (Swiggy, Zomato),
+// loyalty/CRM (Reelo) and accounting (Tally).
+//
+// NOTHING IN THIS BLOCK IS CONNECTED TO A LIVE PROVIDER. Every adapter is
+// registered behind the same refusal the payment gateway uses (lib/gateway/
+// index.js): with no credentials configured, every route refuses and says so.
+// These tables exist so that the day credentials arrive, the work that has to
+// be right — idempotency, tenancy, reconciliation, the audit trail — is
+// already built and tested rather than written under time pressure.
+//
+// Design rules this block obeys, from the master spec:
+//   A§6 p7  provider credentials protected; signature/auth verification;
+//           adapter isolation and reconciliation tools
+//   B§9 p7  order gateway / provider-adapter boundary; provider and channel
+//           fields present BEFORE integrations ship
+//   B§14 p9 no parallel money ledgers, no parallel stock engines, no invoice
+//           mutation, no provider lock-in in core, no claim without verification
+//
+// The last one is why several columns below store what a provider SAID rather
+// than what we computed. An aggregator's commission and payout are its own
+// arithmetic; recording them verbatim next to our own totals is what makes a
+// discrepancy visible. Silently recomputing them would hide exactly the
+// disagreement reconciliation exists to surface.
+
+enum IntegrationProvider {
+  SWIGGY
+  ZOMATO
+  REELO
+  TALLY
+}
+
+enum IntegrationStatus {
+  // No credentials have been supplied. The shipped state.
+  NOT_CONFIGURED
+  // Credentials stored but never yet proven against the provider. This is NOT
+  // "connected" — it is the state a settings screen reaches on its own, and
+  // calling it connected is the claim B§14 p9 forbids.
+  CONFIGURED
+  // The last credential check actually reached the provider and succeeded.
+  CONNECTED
+  // The last check or sync failed; lastError says how, sanitized.
+  ERROR
+  // Switched off by an operator. Distinct from NOT_CONFIGURED: the credentials
+  // are still there, so turning it back on does not mean re-entering them.
+  DISABLED
+}
+
+// One row per (tenant, provider). Outlets hang off it, because a Swiggy or
+// Zomato account covers many restaurants under one set of credentials.
+model IntegrationConnection {
+  id        String              @id @default(cuid())
+  companyId String
+  company   Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  provider  IntegrationProvider
+
+  status  IntegrationStatus @default(NOT_CONFIGURED)
+  // Separate from status on purpose: an operator may disable a CONNECTED
+  // integration without destroying the proof that it once worked.
+  enabled Boolean           @default(false)
+
+  // Secret material, sealed with POS_INTEGRATION_SECRET_KEY (AES-256-GCM, see
+  // lib/integrations/secrets.js). Never selected into an API response — the
+  // route layer picks columns explicitly rather than returning the row.
+  credentialCiphertext  String?
+  // sha256 of the plaintext credential bundle. Lets the UI say "the key was
+  // changed on 12 March" and lets a test assert a rotation happened, without
+  // anything being able to read the key back out. A hash is not a credential.
+  credentialFingerprint String?
+  credentialUpdatedAt   DateTime?
+
+  // Non-secret settings: Tally company name and financial year, Reelo
+  // programme id, aggregator webhook path. Shape is validated per provider by
+  // a zod schema in lib/integrations/config.js, not by the database.
+  config Json?
+
+  // Three different clocks, because operators ask three different questions.
+  // "Did anyone check?", "did anything work?", "what broke?" — collapsing them
+  // into one timestamp is what makes a dead integration look alive.
+  lastCheckedAt        DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastError            String?
+  lastErrorAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  outlets        IntegrationOutlet[]
+  events         IntegrationEvent[]
+  jobs           IntegrationJob[]
+  discrepancies  IntegrationDiscrepancy[]
+  aggregatorOrders AggregatorOrder[]
+  loyaltyLinks     LoyaltyProfileLink[]
+  loyaltyOperations LoyaltyOperation[]
+  loyaltyImports   LoyaltyImportRun[]
+  postings         AccountingPosting[]
+  ledgerMaps       AccountingLedgerMap[]
+
+  @@unique([companyId, provider])
+  // Composite tenant target, so every child below carries companyId and has it
+  // checked by the database rather than by the code that wrote the row.
+  @@unique([id, companyId])
+}
+
+// Maps one provider outlet/restaurant to one VEXO store. Both directions are
+// unique: a store cannot quietly serve two Swiggy outlets, and one Swiggy
+// outlet cannot fan out into two stores. Either would make an order's
+// destination ambiguous, and an ambiguous destination is a wrong kitchen.
+model IntegrationOutlet {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+  branchId     String
+  branch       Branch                @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  externalOutletId   String
+  externalOutletName String?
+  active             Boolean @default(true)
+
+  // Menu publication state. The hash is of the payload we last pushed, so a
+  // re-push that would change nothing can be skipped and, more importantly, a
+  // menu that drifted since the last push is detectable.
+  menuSyncedAt   DateTime?
+  menuSyncHash   String?
+  menuSyncStatus String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  aggregatorOrders AggregatorOrder[]
+
+  @@unique([connectionId, externalOutletId])
+  @@unique([connectionId, branchId])
+  @@unique([id, companyId])
+  @@index([companyId, branchId])
+}
+
+enum IntegrationEventStatus {
+  RECEIVED
+  PROCESSED
+  // Deliberately not applied, with a reason: a duplicate, an event for an
+  // outlet we do not map, an event older than the state we already hold.
+  SKIPPED
+  FAILED
+}
+
+// Every inbound provider callback, recorded before it is acted on.
+//
+// This table IS the duplicate-callback guard. The unique constraint on
+// (connectionId, externalEventId) means a provider that delivers the same
+// event five times — which they all do, because at-least-once is the only
+// delivery guarantee anyone offers — inserts once and collides four times.
+// The collision is the detection; there is no "have we seen this?" read that
+// a concurrent retry could race past.
+model IntegrationEvent {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  externalEventId String
+  kind            String
+
+  // The normalised payload. The raw bytes are not kept: they can carry
+  // customer addresses and phone numbers, and this table is read by support.
+  payload Json
+
+  // Whether the signature/auth check passed. Stored rather than assumed,
+  // because an unsigned delivery that was nonetheless recorded is exactly the
+  // thing a security review needs to be able to find.
+  signatureValid Boolean
+  receivedAt     DateTime @default(now())
+
+  status      IntegrationEventStatus @default(RECEIVED)
+  attempts    Int                    @default(0)
+  processedAt DateTime?
+  skipReason  String?
+  lastError   String?
+
+  // Which provider order this event concerns, and where it sits in the
+  // provider's own ordering. Networks reorder; a CANCELLED that arrives after
+  // a DELIVERED must not be applied just because it arrived later. The adapter
+  // fills whichever of these the provider actually offers.
+  externalOrderId  String?
+  providerSequence Int?
+  providerEventAt  DateTime?
+
+  @@unique([connectionId, externalEventId])
+  @@index([companyId, status, receivedAt])
+  @@index([connectionId, externalOrderId])
+}
+
+enum IntegrationJobStatus {
+  PENDING
+  IN_FLIGHT
+  SUCCEEDED
+  FAILED
+  // Attempts exhausted. Stops retrying, stays visible, needs a human.
+  DEAD
+}
+
+// Outbound work: menu pushes, loyalty bill syncs, Tally vouchers. A durable
+// queue rather than an in-process one, because the thing it mostly has to
+// survive is this process restarting while a provider is down (A§4 p5-6, and
+// the local-agent contract in A§6 p7: "durable queue").
+//
+// dedupeKey is the caller's promise that two rows with the same key are the
+// same work. It is what stops a retried menu push, or a re-posted invoice,
+// from becoming a second one at the provider.
+model IntegrationJob {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  kind      String
+  dedupeKey String
+  payload   Json
+
+  status      IntegrationJobStatus @default(PENDING)
+  attempts    Int                  @default(0)
+  maxAttempts Int                  @default(8)
+  // Backoff target. A worker claims rows where nextAttemptAt <= now, so a
+  // provider outage costs one attempt per window instead of a hot loop.
+  nextAttemptAt DateTime           @default(now())
+  // Claim marker. A job held by a worker that died is reclaimable by age;
+  // without the pair, a crash mid-flight strands the row forever.
+  lockedAt      DateTime?
+  lockedBy      String?
+
+  // The provider's acknowledgement id, once it gives one.
+  externalRef String?
+  lastError   String?
+  lastErrorAt DateTime?
+  succeededAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, dedupeKey])
+  @@index([companyId, status, nextAttemptAt])
+  @@index([status, nextAttemptAt])
+}
+
+enum DiscrepancyState {
+  OPEN
+  RESOLVED
+  IGNORED
+}
+
+// Where the two sides disagree. Recorded, never auto-corrected.
+//
+// The task this serves is settlement reconciliation, and the rule there is
+// that VEXO does not silently recompute a provider's totals. If Swiggy says it
+// is paying 412.50 on a bill we totalled at 430.00, both numbers are written
+// down and a human decides which is wrong. An integration that quietly adopted
+// the provider's figure would be a second money ledger (B§14 p9).
+model IntegrationDiscrepancy {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  kind        String
+  externalRef String?
+  orderId     String?
+
+  // Ours and theirs, in rupees, to the same scale the rest of the product
+  // stores money at. Both nullable because "they have a row we do not" is
+  // itself a discrepancy, and it has only one side.
+  expectedAmount Decimal? @db.Decimal(12, 2)
+  observedAmount Decimal? @db.Decimal(12, 2)
+  detail         Json?
+
+  state          DiscrepancyState @default(OPEN)
+  detectedAt     DateTime         @default(now())
+  resolvedAt     DateTime?
+  resolvedById   String?
+  resolvedBy     PosUser?         @relation("DiscrepancyResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolutionNote String?
+
+  @@index([companyId, state, detectedAt])
+  @@index([connectionId, kind])
+  @@index([resolvedById])
+}
+
+// How an order reached us. `type` says how it is served, PhoneOrder.fulfilment
+// says how it leaves; this says who sent it. B§9 p7.
+enum OrderChannel {
+  POS
+  PHONE
+  AGGREGATOR
+  ONLINE
+  API
+}
+
+enum AggregatorOrderState {
+  RECEIVED
+  ACCEPTED
+  REJECTED
+  PREPARING
+  READY
+  PICKED_UP
+  DELIVERED
+  CANCELLED
+}
+
+// The sidecar for an aggregator order, exactly as PhoneOrder is for a phone
+// order: the Order is an ordinary Order from the moment it is accepted, so
+// pricing, tax, KOT, payment and refund reuse the existing lifecycle and
+// recomputeOrder() stays the only thing that writes order money.
+//
+// orderId is nullable AND unique. Nullable because an order that arrives for
+// an outlet we cannot map, or that is rejected on arrival, must still be
+// recorded — losing it is how a restaurant finds out from the customer.
+// Unique because one provider order may never produce two bills.
+model AggregatorOrder {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+  outletId     String?
+  // Restrict, not SetNull: the composite carries companyId, which is required
+  // here, so nulling it is not available. Restrict is also the behaviour we
+  // want — a mapping with order history is deactivated via `active`, never
+  // deleted out from under the orders that came through it.
+  outlet       IntegrationOutlet?    @relation(fields: [outletId, companyId], references: [id, companyId], onDelete: Restrict)
+  branchId     String?
+  branch       Branch?               @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  provider               IntegrationProvider
+  externalOrderId        String
+  // The short code the rider and the customer actually say out loud. Not the
+  // key — providers reuse display codes across outlets and days.
+  externalOrderDisplayId String?
+
+  orderId String? @unique
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  state AggregatorOrderState @default(RECEIVED)
+
+  // The provider's own arithmetic, stored verbatim. See the block comment at
+  // the head of this lane: these are never recomputed into our totals, they
+  // are compared against them.
+  grossAmount             Decimal? @db.Decimal(12, 2)
+  providerDiscountAmount  Decimal? @db.Decimal(12, 2)
+  restaurantDiscountAmount Decimal? @db.Decimal(12, 2)
+  commissionAmount        Decimal? @db.Decimal(12, 2)
+  taxAmount               Decimal? @db.Decimal(12, 2)
+  deliveryFeeAmount       Decimal? @db.Decimal(12, 2)
+  packagingFeeAmount      Decimal? @db.Decimal(12, 2)
+  netPayoutAmount         Decimal? @db.Decimal(12, 2)
+  currency                String   @default("INR")
+  // PREPAID or COD as the provider reports it. Drives whether the POS should
+  // expect to collect anything at all.
+  paymentMode             String?
+
+  // The normalised order as the adapter read it, kept so a mapping bug can be
+  // diagnosed against what actually arrived rather than against a guess.
+  normalised Json
+
+  placedAt     DateTime?
+  acceptedAt   DateTime?
+  rejectedAt   DateTime?
+  readyAt      DateTime?
+  pickedUpAt   DateTime?
+  deliveredAt  DateTime?
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  // Staleness guard. An event carrying a sequence at or below this one has
+  // already been superseded and is skipped, not applied. This is what makes
+  // out-of-order delivery safe rather than merely rare.
+  lastSequence Int?
+  lastEventAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, externalOrderId])
+  @@index([companyId, state])
+  @@index([branchId, placedAt])
+  @@index([outletId])
+}
+
+// --- loyalty (Reelo) ---------------------------------------------------------
+//
+// SOURCE OF TRUTH: the provider. The client has an existing loyalty programme
+// with roughly 100,000 customers and their balances, and that programme stays
+// authoritative. VEXO does not keep a points ledger, does not recompute a
+// balance and never writes one back as if it were its own. What it keeps is a
+// mapping, a cache of the last balance the provider quoted, and a record of
+// every instruction it sent — which is the minimum needed to avoid asking
+// twice. This is the one place in the product where an external system, not
+// VEXO, holds the ledger, and it is deliberate: B§14 p9 forbids a SECOND
+// ledger, and building our own points engine alongside Reelo's would be one.
+
+model LoyaltyProfileLink {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+  customerId   String
+  customer     Customer              @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  externalCustomerId String
+  // E.164 without the +, as lib/integrations/identity.js normalises it. Stored
+  // rather than derived so a later change to the normalisation rule cannot
+  // silently re-point an existing link at a different person.
+  normalizedPhone    String
+
+  // A CACHE of what the provider last said, never an authority. Nothing in the
+  // product may spend these points without asking the provider first; the
+  // column exists so a cashier sees a number instead of a spinner, and so a
+  // drift against the provider is detectable.
+  lastKnownBalance Int?
+  balanceAsOf      DateTime?
+  membershipTier   String?
+  pointsExpireAt   DateTime?
+
+  // IMPORT (historical backfill), LOOKUP (matched at the till) or CREATE.
+  source     String
+  linkedAt   DateTime  @default(now())
+  lastSyncedAt DateTime?
+
+  @@unique([connectionId, externalCustomerId])
+  @@unique([connectionId, customerId])
+  @@index([connectionId, normalizedPhone])
+  @@index([companyId])
+}
+
+enum LoyaltyOpKind {
+  // A completed bill reported to the provider so it can award its own points.
+  BILL_SYNC
+  // Points spent against a bill.
+  REDEEM
+  // An earlier operation undone, because the bill was voided or refunded.
+  REVERSE
+}
+
+enum LoyaltyOpStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REVERSED
+}
+
+// Every instruction sent to the loyalty provider, with the key that makes
+// sending it twice harmless. The unique constraint on (connectionId,
+// idempotencyKey) is what stops a retried bill sync crediting a customer
+// twice, and a double-tapped redeem button spending the points twice.
+model LoyaltyOperation {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+  customerId   String?
+  // Restrict for the same reason as AggregatorOrder.outlet: the composite
+  // carries a required companyId. It is also the right rule — a customer with
+  // loyalty instructions on record is archived (Customer.archivedAt), not
+  // erased, and erasing one would destroy the evidence of what we told the
+  // provider to do with their points.
+  customer     Customer?             @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Restrict)
+  orderId      String?
+  order        Order?                @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  kind           LoyaltyOpKind
+  idempotencyKey String
+
+  // Signed: negative for a redemption, positive for a credit. Null when the
+  // provider decides the award itself and we only reported the bill.
+  pointsDelta Int?
+  amount      Decimal? @db.Decimal(12, 2)
+
+  status      LoyaltyOpStatus @default(PENDING)
+  externalRef String?
+  // A reversal names what it undid, so "was this refund's points taken back?"
+  // is a lookup rather than a reconstruction.
+  reversesId  String?
+  reverses    LoyaltyOperation?  @relation("LoyaltyReversal", fields: [reversesId], references: [id], onDelete: SetNull)
+  reversedBy  LoyaltyOperation[] @relation("LoyaltyReversal")
+
+  requestedAt DateTime  @default(now())
+  confirmedAt DateTime?
+  lastError   String?
+
+  @@unique([connectionId, idempotencyKey])
+  @@index([companyId, status])
+  @@index([customerId])
+  @@index([orderId])
+  @@index([reversesId])
+}
+
+enum ImportRunState {
+  // Counted and reported, nothing written. Always the first state.
+  PREVIEW
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// A resumable historical import of an existing loyalty account.
+//
+// Resumable because 100,000 customers is not one request, and a run that has
+// to start from zero after every network blip never finishes. `cursor` is the
+// number of the last row COMMITTED: on resume the file is re-read but rows up
+// to and including the cursor are stepped over, so no work is repeated and none
+// is lost. Every counter is COUNTED as rows are processed, never estimated —
+// they are what the operator reconciles against the provider's own total.
+model LoyaltyImportRun {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  state  ImportRunState @default(PREVIEW)
+  // A preview run writes nothing. Leaving this true is the default, so the
+  // destructive form has to be asked for.
+  dryRun Boolean        @default(true)
+
+  cursor String?
+
+  // Digest of the export this run is reading. Resuming at row 64,001 is only
+  // safe against the SAME file: the same row number in a re-export is a
+  // different customer, so a resume that did not check this would import the
+  // wrong hundred thousand rows and report success. Refusing a resume is
+  // recoverable; a silently misaligned one is not.
+  sourceFingerprint String?
+
+  // What the provider said the account holds, if it will tell us. The point of
+  // comparison for "did we get everything".
+  totalReported   Int?
+  fetched         Int @default(0)
+  matchedExisting Int @default(0)
+  created         Int @default(0)
+  skipped         Int @default(0)
+  failed          Int @default(0)
+  // Sum of the balances seen, for a reconciliation total. Decimal rather than
+  // Int because 100,000 customers' points sum past a 32-bit column sooner than
+  // anyone expects, and a silently wrapped total is worse than no total.
+  balanceSumPoints Decimal @default(0) @db.Decimal(18, 0)
+
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  lastHeartbeatAt DateTime?
+  lastError       String?
+  startedById     String?
+  startedBy       PosUser?  @relation("LoyaltyImportStartedBy", fields: [startedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  exceptions LoyaltyImportException[]
+
+  @@index([companyId, state])
+  @@index([startedById])
+}
+
+// One row per record the import could not take. An import that reports
+// "99,412 of 100,000" without saying which 588 and why is not reportable.
+model LoyaltyImportException {
+  id    String           @id @default(cuid())
+  runId String
+  run   LoyaltyImportRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  rowNumber          Int?
+  externalCustomerId String?
+  // The contact detail as the provider gave it, unnormalised — the whole point
+  // of the exception is usually that it could not be normalised.
+  phoneRaw           String?
+  reason             String
+  detail             Json?
+  at                 DateTime @default(now())
+
+  @@index([runId, at])
+}
+
+// --- accounting (Tally) ------------------------------------------------------
+//
+// DIRECTION: VEXO -> Tally, one way. VEXO's own POS and inventory records stay
+// authoritative for the transactions it originates; Tally receives them as
+// vouchers. Nothing in this block reads a balance back from Tally and treats
+// it as truth about a VEXO order, because that would be the parallel money
+// ledger B§14 p9 forbids.
+
+enum AccountingDocType {
+  SALES
+  CREDIT_NOTE
+  RECEIPT
+  PAYMENT
+  PURCHASE
+}
+
+enum AccountingPostingStatus {
+  PENDING
+  QUEUED
+  SENT
+  // Tally answered and named the voucher it created.
+  ACKNOWLEDGED
+  FAILED
+  DEAD
+}
+
+// One posting per (source document, document type). The unique constraint is
+// the duplicate-voucher guard: an invoice can produce exactly one SALES
+// voucher, however many times the queue retries.
+model AccountingPosting {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+  branchId     String?
+
+  docType AccountingDocType
+  // What in VEXO this represents: ORDER, REFUND or PAYMENT, and its id.
+  sourceType String
+  sourceId   String
+
+  voucherType String
+  // Our stable external reference, which is the invoice number. Tally is asked
+  // to store it, so a re-import can be matched instead of duplicated.
+  voucherNumber String?
+  voucherDate   DateTime
+  amount        Decimal  @db.Decimal(12, 2)
+
+  // What Tally gave back. MASTERID and REMOTEID are Tally's own handles for
+  // the voucher it created; holding them is what makes a later amendment
+  // target the right row instead of adding another.
+  externalMasterId   String?
+  externalVoucherKey String?
+  acknowledgedAt     DateTime?
+
+  status    AccountingPostingStatus @default(PENDING)
+  attempts  Int                     @default(0)
+  lastError String?
+  // sha256 of the request we built. If a retry would send a different payload
+  // than the attempt that may already have landed, that is a bug worth
+  // failing on rather than a difference worth ignoring.
+  payloadHash String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, sourceType, sourceId, docType])
+  @@index([companyId, status])
+  @@index([connectionId, voucherNumber])
+}
+
+// The names Tally already uses, supplied by whoever maintains the client's
+// books. Tally matches ledgers BY NAME and creates a new one when the name is
+// unknown, so a typo here does not fail — it silently opens a second account.
+// That is why these are configured and verifiable rather than derived.
+model AccountingLedgerMap {
+  id           String                @id @default(cuid())
+  companyId    String
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  // SALES_BY_TAX | TAX_OUTPUT | ROUNDING | PAYMENT_METHOD | PARTY_DEFAULT |
+  // COST_CENTRE — see LEDGER_KINDS in lib/integrations/accounting.js. A free
+  // string rather than an enum so a later posting type (PURCHASE) can name its
+  // ledgers without a migration.
+  kind String
+  // The VEXO-side key this maps from: a tax percent ("5"), a payment method
+  // ("UPI"), a store id.
+  key  String
+
+  ledgerName String
+  costCentre String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, kind, key])
+  @@index([companyId])
 }

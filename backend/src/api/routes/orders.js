@@ -33,6 +33,15 @@ import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber, sellerOfRecord, billingSnapshot } from '../../lib/invoice.js';
 import { routeKotItems } from '../../lib/kitchen.js';
+// LANE providers — the whole of this lane's contact with the till, five calls
+// that cannot throw. See lib/integrations/hooks.js for why they are shaped that
+// way and what runs when none of them fires.
+import {
+  onOrderBilled,
+  onPaymentRecorded,
+  onRefundSettled,
+  onOrderVoided,
+} from '../../lib/integrations/hooks.js';
 import {
   ORDER_INCLUDE,
   SUMMARY_INCLUDE,
@@ -1152,6 +1161,9 @@ router.post(
       companyId: req.companyScope.id,
       meta: { invoiceNumber: full.invoiceNumber, total: String(full.total) },
     });
+    // LANE providers. After the commit and after the audit, and unable to throw
+    // — a bill prints whether or not an accounting or loyalty provider answers.
+    await onOrderBilled(order.id);
     res.json({
       order: serializeOrder(full),
       receipt: buildReceipt(req.companyScope, order.branch, full),
@@ -1324,6 +1336,8 @@ router.post(
         ? { paymentId: result.payment.id, channel: 'MANUAL' }
         : { method: body.method, amount: String(result.payment.amount), channel: 'MANUAL' },
     });
+    // LANE providers.
+    await onPaymentRecorded(order.id, result.payment.id);
     // 200, not 201: a replay created nothing. The body is otherwise identical
     // so a till that retries blind still renders the right receipt, and
     // `replayed` lets one that cares tell the difference.
@@ -2034,6 +2048,10 @@ router.post(
       },
     });
 
+    // LANE providers. Posts a credit note and reverses loyalty ONLY for a
+    // SUCCEEDED refund — the hook checks that itself, so an unconfirmed gateway
+    // refund reaching here posts nothing and is picked up by the reconcile leg.
+    await onRefundSettled(order.id, refund.id);
     // 202, not 201: the refund is on record and holding its money, but whether
     // the provider took it is unknown. Saying 201 would claim it was placed.
     res.status(answer.confirmed ? 201 : 202).json({
@@ -2108,6 +2126,10 @@ router.post(
       },
     });
 
+    // LANE providers. The second chance at the posting the original request
+    // could not make: a refund that has only now settled becomes a credit note
+    // here, under the same key, so the pair cannot produce two.
+    await onRefundSettled(order.id, refund.id);
     res.status(answer.confirmed ? 200 : 202).json({
       order: await fullOrder(order.id),
       refund: publicRefund(refund),
@@ -2181,6 +2203,10 @@ router.post(
       companyId: req.companyScope.id,
       meta: { reason, invoiceNumber: order.invoiceNumber },
     });
+    // LANE providers. Gives back what the bill earned. No accounting posting: a
+    // void that never reached Tally needs no credit note, and one that did is
+    // corrected by the refund the void required before it would run.
+    await onOrderVoided(order.id);
     res.json({ order: await fullOrder(order.id) });
   }),
 );

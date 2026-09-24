@@ -17,6 +17,8 @@ import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
 import {
   canTransition, TIMESTAMP_FOR, orderKitchenReady, nextChangeSeq,
 } from '../../lib/kitchen.js';
+// LANE providers — one call, on the single kitchen write, which cannot throw.
+import { onKitchenItemState } from '../../lib/integrations/hooks.js';
 
 const router = Router();
 router.use(requirePosAuth, resolveCompanyScope);
@@ -219,6 +221,10 @@ router.post('/items/:id/state', ...operate, asyncHandler(async (req, res) => {
       include: { orderItem: { select: { name: true, qty: true } }, kot: { select: { seq: true } } },
     });
   });
+  // LANE providers. Tells an aggregator its order is ready — but only once the
+  // LAST line is, which is a question about the whole order and so cannot be
+  // answered inside the transaction that moved one line.
+  await onKitchenItemState(item.id);
   await finish(updated, false);
 }));
 

@@ -4,7 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import pinoHttp from 'pino-http';
 
-import { env, gatewayEnabled } from './config/env.js';
+import { env, gatewayEnabled, integrationSecretsEnabled } from './config/env.js';
 import { logger, resSerializer } from './lib/logger.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { notFoundHandler, errorHandler } from './middleware/error.js';
@@ -40,6 +40,11 @@ import phoneOrderRoutes from './api/routes/phoneOrders.js';
 
 // LANE foundation, Phase 2 — VC-102.
 import promotionRoutes from './api/routes/promotions.js';
+
+// ---- LANE providers ----
+import integrationRoutes from './api/routes/integrations.js';
+import integrationWebhookRoutes from './api/routes/integrationWebhooks.js';
+import loyaltyRoutes from './api/routes/loyalty.js';
 
 export const createApp = () => {
   const app = express();
@@ -106,6 +111,35 @@ export const createApp = () => {
     app.use('/api/gateway', gatewayRoutes);
   }
 
+  // ---- LANE providers ----
+  // Aggregator callbacks, for the same reason and in the same place: the bytes
+  // the provider sent are the bytes we authenticate.
+  //
+  // Conditional on credential storage because inbound auth compares against a
+  // header value that lives inside the sealed credential — with no key there is
+  // no credential to open, so every delivery would 401 regardless. A deployment
+  // that cannot answer a callback should not advertise the endpoint.
+  if (integrationSecretsEnabled) {
+    app.use('/api/integrations/webhooks', integrationWebhookRoutes);
+  }
+
+  // ---- LANE providers ----
+  // The one endpoint that legitimately carries megabytes: the historical loyalty
+  // import consumes an export the client downloads from their own Reelo account,
+  // and the client's is ~100,000 customers — about 4MB of CSV. Its own bound is
+  // declared in zod at 40MB, and for a while the 1mb parser below sat in front of
+  // it, so the request the route documents could not physically arrive: a 413
+  // from the body parser, before any handler, with nothing in it to explain that
+  // the file was simply too big for a limit nobody had connected to the feature.
+  //
+  // Scoped to this path rather than raising the global limit. Every other
+  // endpoint in this API takes a form, and a 48MB ceiling on all of them is an
+  // invitation to exhaust the process's memory from an unauthenticated route.
+  // Set ABOVE the zod bound on purpose, so an oversized file is refused by the
+  // schema — which can say what the limit is and what to do instead — rather
+  // than by the parser, which cannot.
+  app.use('/api/integrations/REELO/import', express.json({ limit: '48mb' }));
+
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/', (_req, res) => {
@@ -154,6 +188,15 @@ export const createApp = () => {
 
   // LANE vc104-api
   api.use('/phone-orders', phoneOrderRoutes);
+
+  // ---- LANE providers ----
+  // Mounted unconditionally, unlike the webhook router above: the screen must be
+  // reachable in order to say that credential storage is switched off, and an
+  // operator who cannot see that has no way to find out why saving a key fails.
+  api.use('/integrations', integrationRoutes);
+  // The till's half. A separate mount because it is separate work with separate
+  // permissions — a cashier reaching /integrations would be a bug.
+  api.use('/loyalty', loyaltyRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);
