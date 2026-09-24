@@ -86,14 +86,15 @@ construction — proven in the suite, not assumed.
   staff credential, single-use code, part-paid mirroring, exact-key
   allowlist, both directions of token cross-use, cross-branch PUT,
   PAID → THANKYOU → IDLE, and sign-out killing the display.
-- **Browser gate CLOSED (2026-09-23)** on a later 17/17 by session
-  `7565dff8` — Run A 8/8 (this walkthrough, unmodified) and Run B 9/9
-  (quantity update, part payment without a thank-you, sign-out revocation) —
-  on the **original-box dev stack** (127.0.0.1:5350/5351), source `1d5407b`
-  (code ≡ `5ac675a`), with every exercised code path byte-identical to RC-1
-  `7faa9d6`. It did not run on the lab, nor against a stack built from RC-1.
-  Provenance and the remaining gaps: `docs/RELEASE-HANDOVER-CHECKLIST.md`,
-  §VC-101 evidence.
+- **Browser evidence ACCEPTED by the owner (2026-09-23): 17/17 on the
+  atc-noc isolated dev stack** (`~/vexo-connect-dev`, 127.0.0.1:5350/5351, 12
+  migrations), run by session `7565dff8` — Run A 8/8 (this walkthrough,
+  unmodified) and Run B 9/9 (quantity update, part payment without a
+  thank-you, sign-out revocation). Source `1d5407b` (code ≡ `5ac675a`); every
+  exercised code path is byte-identical to RC-1 `7faa9d6`. **Not a lab run and
+  not full RC browser acceptance** — it did not run on the lab, nor against a
+  stack built from RC-1, and the untested display behaviours stay listed as
+  limitations in `docs/RELEASE-HANDOVER-CHECKLIST.md`, §VC-101 evidence.
 
 ## Commits
 

@@ -201,7 +201,7 @@ export default function DayClose() {
         ...(note.trim() ? { note: note.trim() } : {}),
         ...(existing ? { correctsId: existing.id } : {}),
       });
-      toast.push(
+      toast(
         data.close.variance === 0
           ? `${preview.businessDate} closed — the drawer balances`
           : `${preview.businessDate} closed — ${variancePhrase(data.close.variance)}`,
