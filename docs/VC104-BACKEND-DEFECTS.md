@@ -11,7 +11,7 @@ the fix a decision W1 takes with the evidence in hand.
 
 > **Status, 2026-09-24 — this opening no longer describes the tree.** It was
 > written as "two defects, neither fixed". The register below has since grown to
-> six, and four of them are fixed here: **D-1, D-2, D-3 and D-5**. D-4 is
+> seven, and five of them are fixed here: **D-1, D-2, D-3, D-5 and D-7**. D-4 is
 > process rather than runtime. **D-6 is pinned but deliberately unfixed**,
 > pending an owner decision that no VC-102 spec settles. One D-2 limitation
 > survives its own fix and is recorded rather than closed — see *What this does
