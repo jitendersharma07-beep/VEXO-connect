@@ -594,6 +594,19 @@ const hashOf = (body) =>
 
 const orderOf = (orderId) => (orderId ? prisma.order.findUnique({ where: { id: orderId } }) : null);
 
+// The answer a duplicate submission gets, wherever the duplicate is noticed:
+// the original order back when the body matches, and a refusal when the same
+// key was reused to mean something else. One function for both the pre-check
+// and the concurrent path, so the two cannot drift into answering differently.
+const answerDuplicate = async (res, prior, requestHash) => {
+  if (prior.requestHash !== requestHash) throw idempotencyReused();
+  return res.status(200).json({ phoneOrder: phoneOrderPublic(prior, await orderOf(prior.orderId)) });
+};
+
+// `meta.target` is the field list, e.g. ["companyId","idempotencyKey"].
+const idempotencyClash = (err) =>
+  err?.code === 'P2002' && String(err?.meta?.target ?? '').includes('idempotencyKey');
+
 router.post(
   '/',
   ...can('phone.order.create'),
@@ -606,10 +619,7 @@ router.post(
     const prior = await prisma.phoneOrder.findFirst({
       where: { companyId, idempotencyKey: body.idempotencyKey },
     });
-    if (prior) {
-      if (prior.requestHash !== requestHash) throw idempotencyReused();
-      return res.status(200).json({ phoneOrder: phoneOrderPublic(prior, await orderOf(prior.orderId)) });
-    }
+    if (prior) return answerDuplicate(res, prior, requestHash);
 
     const customer = await prisma.customer.findFirst({ where: { id: body.customerId, companyId } });
     if (!customer) throw notFound('Customer not found');
@@ -657,62 +667,79 @@ router.post(
       lines.push(await resolveCatalogLine(companyId, item));
     }
 
-    const created = await withReferenceRetry(async (reference) =>
-      prisma.$transaction(async (tx) => {
-        const order = await tx.order.create({
-          data: {
-            companyId,
-            branchId: body.branchId,
-            // Pickup and delivery are both TAKEAWAY at the Order level; the real
-            // fulfilment mode lives on the sidecar (contract C-2). OrderType
-            // belongs to the orders lane and is not extended from here.
-            type: 'TAKEAWAY',
-            note: body.note ?? null,
-            openedById: req.user.id,
-          },
-        });
-        // Was `createMany` with a guard that threw if any line carried
-        // modifiers — correct while the API had no modifier field, and the
-        // guard is what made D-3's blast radius knowable instead of silent.
-        // Now that phone orders can carry them, the nested snapshot rows rule
-        // createMany out and this is the till's own per-row writer. Still one
-        // transaction, so a half-written order is not reachable.
-        for (const l of lines) {
-          await tx.orderItem.create({ data: createLineData(l, order.id) });
-        }
-        await recomputeOrder(tx, order.id);
+    // The pre-check above cannot see a submission that has not committed yet, so
+    // a double-click gets past it and both requests reach the create. Postgres
+    // holds the loser's insert until the winner commits, which means a clash on
+    // this key is proof the winner is readable NOW — and the loser is owed the
+    // answer the pre-check would have given it a moment later, not the 500 a
+    // bare P2002 used to produce. The transaction rolled back whole, so there is
+    // no half-written order behind this and nothing to undo.
+    let created;
+    try {
+      created = await withReferenceRetry(async (reference) =>
+        prisma.$transaction(async (tx) => {
+          const order = await tx.order.create({
+            data: {
+              companyId,
+              branchId: body.branchId,
+              // Pickup and delivery are both TAKEAWAY at the Order level; the real
+              // fulfilment mode lives on the sidecar (contract C-2). OrderType
+              // belongs to the orders lane and is not extended from here.
+              type: 'TAKEAWAY',
+              note: body.note ?? null,
+              openedById: req.user.id,
+            },
+          });
+          // Was `createMany` with a guard that threw if any line carried
+          // modifiers — correct while the API had no modifier field, and the
+          // guard is what made D-3's blast radius knowable instead of silent.
+          // Now that phone orders can carry them, the nested snapshot rows rule
+          // createMany out and this is the till's own per-row writer. Still one
+          // transaction, so a half-written order is not reachable.
+          for (const l of lines) {
+            await tx.orderItem.create({ data: createLineData(l, order.id) });
+          }
+          await recomputeOrder(tx, order.id);
 
-        const phoneOrder = await tx.phoneOrder.create({
-          data: {
-            companyId,
-            reference,
-            customerId: customer.id,
-            addressId: address?.id ?? null,
-            fulfilment: body.fulfilment,
-            scheduledFor,
-            status: 'SUBMITTED',
-            routedBranchId: body.branchId,
-            orderId: order.id,
-            operatorId: req.user.id,
-            operatorName: req.user.fullName ?? req.user.email,
-            deliveryCharge: chosen.deliveryCharge ?? 0,
-            note: body.note ?? null,
-            idempotencyKey: body.idempotencyKey,
-            requestHash,
-          },
-        });
-        await tx.phoneOrderEvent.create({
-          data: {
-            companyId,
-            phoneOrderId: phoneOrder.id,
-            action: 'SUBMITTED',
-            actorId: req.user.id,
-            toBranchId: body.branchId,
-          },
-        });
-        return phoneOrder;
-      }),
-    );
+          const phoneOrder = await tx.phoneOrder.create({
+            data: {
+              companyId,
+              reference,
+              customerId: customer.id,
+              addressId: address?.id ?? null,
+              fulfilment: body.fulfilment,
+              scheduledFor,
+              status: 'SUBMITTED',
+              routedBranchId: body.branchId,
+              orderId: order.id,
+              operatorId: req.user.id,
+              operatorName: req.user.fullName ?? req.user.email,
+              deliveryCharge: chosen.deliveryCharge ?? 0,
+              note: body.note ?? null,
+              idempotencyKey: body.idempotencyKey,
+              requestHash,
+            },
+          });
+          await tx.phoneOrderEvent.create({
+            data: {
+              companyId,
+              phoneOrderId: phoneOrder.id,
+              action: 'SUBMITTED',
+              actorId: req.user.id,
+              toBranchId: body.branchId,
+            },
+          });
+          return phoneOrder;
+        }),
+      );
+    } catch (err) {
+      if (!idempotencyClash(err)) throw err;
+      const winner = await prisma.phoneOrder.findFirst({
+        where: { companyId, idempotencyKey: body.idempotencyKey },
+      });
+      if (!winner) throw err;
+      return answerDuplicate(res, winner, requestHash);
+    }
 
     await audit(req, {
       action: 'PHONE_ORDER_SUBMIT',

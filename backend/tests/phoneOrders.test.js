@@ -480,11 +480,60 @@ describe('idempotent submission', () => {
 
   it('survives a double-click: two concurrent identical submits make one order', async () => {
     const body = baseSubmission();
+    // The test is named "make one order", so count Orders and not just the
+    // PhoneOrder sidecar: the loser's whole transaction rolls back, and an
+    // orphaned Order with no sidecar would be invisible to the row count below
+    // while still being a real order in a real store's list. Safe as a global
+    // delta because fileParallelism is off and globalSetup serializes runs.
+    const ordersBefore = await prisma.order.count();
+
     const [r1, r2] = await Promise.all([submit(body), submit(body)]);
     const codes = [r1.status, r2.status].sort();
-    // Either the second saw the first (200), or both raced into the unique
-    // index and one was rejected. Never two orders.
-    expect(codes[0]).toBe(201);
+
+    // Asserted as an EXACT pair, because the loose version of this test is what
+    // hid the defect it was written to catch. It asked only for `codes[0] ===
+    // 201` and one row, and its comment tolerated the loser being "rejected" —
+    // so the suite stayed green while the loser was in fact answered 500, from
+    // an uncaught P2002 on (companyId, idempotencyKey). One operator
+    // double-click, and the till showed a server error for an order that had
+    // just been created.
+    //
+    // Both interleavings land on this same pair, so it is not flaky: either the
+    // second request's pre-check sees the first already committed (200 by the
+    // replay path), or it does not and the clash resolves to the same 200. The
+    // key and body are identical, so 409 is unreachable here — that is the
+    // reused-key test below.
+    expect(codes, JSON.stringify([r1.body, r2.body])).toEqual([200, 201]);
+
+    // The 200 has to be the SAME order, or it is a polite answer rather than a
+    // correct one — the caller would be told "done" about somebody else's work.
+    expect(r1.body.phoneOrder.id).toBe(r2.body.phoneOrder.id);
+    expect(r1.body.phoneOrder.order.id).toBe(r2.body.phoneOrder.order.id);
+
+    const rows = await prisma.phoneOrder.count({ where: { idempotencyKey: body.idempotencyKey } });
+    expect(rows).toBe(1);
+    expect(await prisma.order.count()).toBe(ordersBefore + 1);
+  });
+
+  // The concurrent half of the test below. The race resolves a duplicate by
+  // re-reading the committed row and comparing hashes, so it has a 409 branch as
+  // well as a 200 one, and that branch is only reachable from here — the
+  // sequential test cannot enter it. Without this, a refactor could turn a raced
+  // key-reuse back into a 500 and every test would stay green.
+  it('refuses a reused key carrying a different order even when the two race', async () => {
+    const body = baseSubmission();
+    const tampered = { ...body, items: [{ productId: cappuccino.id, qty: 5 }] };
+
+    const [r1, r2] = await Promise.all([submit(body), submit(tampered)]);
+    const codes = [r1.status, r2.status].sort();
+    // Deterministic whichever way it interleaves and whichever body wins: one
+    // submission creates the order, the other is refused for reusing its key to
+    // mean something else.
+    expect(codes, JSON.stringify([r1.body, r2.body])).toEqual([201, 409]);
+
+    const loser = r1.status === 409 ? r1 : r2;
+    expect(loser.body.error.code).toBe('POS_IDEMPOTENCY_KEY_REUSED');
+
     const rows = await prisma.phoneOrder.count({ where: { idempotencyKey: body.idempotencyKey } });
     expect(rows).toBe(1);
   });
