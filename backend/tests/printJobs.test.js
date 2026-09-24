@@ -392,9 +392,9 @@ describe('printed documents carry the truth (pre-hardware checklist)', () => {
       label: 'REFUND HANDED BACK — recorded by staff',
     });
 
-    // Not 275. amountDue is what is still owed on the bill, and the bill was
-    // settled in full; the ₹40 back is its own line. Netting the refund in here
-    // would print a balance the customer does not owe.
+    // Not 40. amountDue is what is still owed on the bill, and the bill was
+    // settled in full; the ₹40 back is its own line. Letting the refund reopen
+    // the balance would hand the customer paper saying they still owe it.
     expect(doc.amountDue).toBe(0);
     expect(doc.total).toBe(315);
   });
