@@ -7,9 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DEV_DB='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos?schema=public'
-TEST_DB='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos_test?schema=public'
-DEV_SECRET='dev-only-secret-0123456789abcdef0123456789'
+# DEV_DB, TEST_DB and DEV_SECRET are built at the end of step 0, not here: the
+# database password is read out of the running container rather than written
+# down, so this file carries no credential of its own.
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
@@ -29,6 +29,22 @@ docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -tAc 'SELECT 1' >/dev/null
 docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -tc \
   "SELECT 1 FROM pg_database WHERE datname='atc_pos_test'" | grep -q 1 || \
   docker exec atc-pos-dev-db psql -U atc_pos -d atc_pos -c 'CREATE DATABASE atc_pos_test OWNER atc_pos'
+
+# The password lives in the container's environment, which is the only copy
+# this script needs. Reading it here — rather than holding a literal — means a
+# rotated container password is picked up with no edit, and that this file can
+# be committed without carrying a credential.
+PW="$(docker exec atc-pos-dev-db printenv POSTGRES_PASSWORD 2>/dev/null)"
+[ -n "$PW" ] || { echo "FAIL: could not read POSTGRES_PASSWORD from atc-pos-dev-db"; exit 2; }
+DEV_DB="postgresql://atc_pos:${PW}@127.0.0.1:5439/atc_pos?schema=public"
+TEST_DB="postgresql://atc_pos:${PW}@127.0.0.1:5439/atc_pos_test?schema=public"
+unset PW
+
+# Session-signing secret: whatever the caller exported, else fresh per run.
+# A per-run value means dev sessions do not outlive the run, and no shared
+# signing key sits in the repo for anyone who reads it to mint tokens with.
+DEV_SECRET="${POS_JWT_SECRET:-$(openssl rand -hex 32)}"
+[ "${#DEV_SECRET}" -ge 32 ] || { echo "FAIL: POS_JWT_SECRET is set but shorter than 32 characters"; exit 2; }
 
 say "1/6  Backend dependencies"
 cd backend
