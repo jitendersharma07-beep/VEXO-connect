@@ -91,12 +91,27 @@ const plan = sqlc(`SELECT plan FROM "License"
 // screenshotted at 07-out-of-area. Hours are backend logic and are tested
 // there; the browser checks here are about service-area matching, pricing,
 // routing and capacity.
-sqlc(`UPDATE "BranchHours" SET "opensMinute" = 0, "closesMinute" = 1439, closed = false
+//
+// 1440, not 1439. The window is [opensMinute, closesMinute) — half-open, so
+// that 09:00-17:00 and 17:00-21:00 can abut without both claiming 17:00 — and
+// 1439 therefore means "open until 23:58:59", leaving the store shut for the
+// last minute of every day. A browser run starting at 23:59 IST would have
+// found both stores closed and gone red with nothing in the artifact to explain
+// it: about one run in 1440, which is exactly the kind of flake that gets
+// re-run rather than diagnosed. Measured, not reasoned: /tmp/vcx-w2close/
+// hours-probe.mjs walks all 1440 minutes against the shipped isOpenAt and
+// reports one closed minute at 1439 and none at 1440.
+//
+// The same value is in backend/tests/phoneOrders.test.js's openAllWeek(), where
+// it is harmless today because no test there asks at a named minute; it is
+// REPORTED in docs/VC104-BACKEND-DEFECTS.md rather than changed here, because
+// that file belongs to the lane working D-1/D-2 right now.
+sqlc(`UPDATE "BranchHours" SET "opensMinute" = 0, "closesMinute" = 1440, closed = false
       WHERE "branchId" IN (SELECT b.id FROM "Branch" b
                            JOIN "Company" c ON c.id = b."companyId"
                            WHERE c."isDemo" = true AND b.code IN ('BSC-CP', 'BSC-CH'))`);
 const cpAlwaysOpen = sqlc(`SELECT count(*) FROM "BranchHours"
-      WHERE "opensMinute" = 0 AND "closesMinute" = 1439 AND closed = false
+      WHERE "opensMinute" = 0 AND "closesMinute" = 1440 AND closed = false
         AND "branchId" IN (SELECT b.id FROM "Branch" b
                            JOIN "Company" c ON c.id = b."companyId"
                            WHERE c."isDemo" = true AND b.code IN ('BSC-CP', 'BSC-CH'))`);
