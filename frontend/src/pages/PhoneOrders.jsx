@@ -596,22 +596,20 @@ export default function PhoneOrders() {
           onClose={() => setReassignOpen(false)}
           onDone={(data) => {
             setReassignOpen(false);
-            // The server's priceChanged tracks the BILLED order (total+tax)
-            // only; the quoted delivery charge sits outside it (C-6: quoted,
-            // never billed), so with a company-wide menu the flag stays false
-            // on the very moves that change what the caller pays. The operator
-            // must re-read the quote whenever the PAYABLE quote moved — so
-            // also compare the two server-computed quotes. No client money
-            // math: both numbers arrive from the server; this is only !==.
-            const quoteChanged =
-              Boolean(data.priceChanged) ||
-              data.phoneOrder.payableQuote !== detail?.payableQuote;
-            setMoveResult({ priceChanged: quoteChanged, payableQuote: data.phoneOrder.payableQuote });
+            // priceChanged now includes the delivery charge, so it means "the
+            // payable the caller was quoted moved" (D-1, fixed 09-24). This
+            // used to OR in a client-side payableQuote comparison because the
+            // server flag only looked at total+tax and so could never be true;
+            // that workaround is gone deliberately. Re-deriving it here would
+            // be a second source of truth for one rule, and it read the
+            // PREVIOUS quote off `detail`, which is false-positive-prone the
+            // moment `detail` is stale or not yet loaded.
+            setMoveResult({ priceChanged: Boolean(data.priceChanged), payableQuote: data.phoneOrder.payableQuote });
             toast(
-              quoteChanged
+              data.priceChanged
                 ? `Moved. The price changed — new quote ${fmtINR(data.phoneOrder.payableQuote)}.`
                 : 'Moved. The price did not change.',
-              quoteChanged ? 'info' : 'success',
+              data.priceChanged ? 'info' : 'success',
             );
             refetchAll();
           }}
