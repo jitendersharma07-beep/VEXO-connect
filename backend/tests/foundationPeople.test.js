@@ -60,6 +60,7 @@ const wipe = async () => {
   await prisma.terminal.deleteMany();
   await prisma.branchBrand.deleteMany();
   await prisma.brand.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   // GST points at LegalEntity (RESTRICT), both point at Company; and a nested

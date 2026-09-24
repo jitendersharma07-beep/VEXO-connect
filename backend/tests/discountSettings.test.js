@@ -49,6 +49,7 @@ const wipe = async () => {
   await prisma.license.deleteMany();
   // RESTRICT foreign keys: policies go before the rows they point at.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();

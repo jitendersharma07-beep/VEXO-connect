@@ -58,6 +58,7 @@ const wipe = async () => {
   // RESTRICT on purpose — a policy must not survive, or silently widen,
   // because its branch or user went away — so it has to go first here.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();

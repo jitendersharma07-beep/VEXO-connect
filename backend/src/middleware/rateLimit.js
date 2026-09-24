@@ -7,12 +7,26 @@ const message = { error: { code: 'POS_RATE_LIMITED', message: 'Too many requests
 // the behaviour under test) expect 401.
 const isTest = process.env.NODE_ENV === 'test';
 
+// A suite that runs with the limiters skipped cannot tell a working 429 path
+// from a broken one — both stay green. This switch turns genuine enforcement
+// back on for the handful of tests whose subject IS the limiter, so the
+// shipped configuration (windows, limits, headers) is what gets exercised
+// rather than a parallel test-only copy of it.
+//
+// It has no effect outside NODE_ENV=test: enforcement is the default there is
+// no way to switch off anywhere else.
+let enforceInTest = false;
+export const setRateLimitEnforcementForTest = (on) => {
+  enforceInTest = Boolean(on);
+};
+const skipInTest = () => isTest && !enforceInTest;
+
 export const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => isTest,
+  skip: skipInTest,
   message,
 });
 
@@ -22,8 +36,31 @@ export const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: true,
-  skip: () => isTest,
+  skip: skipInTest,
   message: {
     error: { code: 'POS_RATE_LIMITED', message: 'Too many sign-in attempts. Try again in a few minutes.' },
+  },
+});
+
+// Password recovery, per client address. This sits in front of the per-account
+// ceilings in lib/accounts.js and answers a different attack: those stop
+// somebody hammering one mailbox, this stops them walking an address list to
+// farm "which of these exist" out of load or timing. Neither substitutes for
+// the other.
+//
+// Looser than loginLimiter because a real person mistypes their address, waits
+// for a mail that is slow, and asks again — but far tighter than the global
+// ceiling, because no honest caller needs twenty of these in a quarter hour.
+export const recoveryLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: skipInTest,
+  message: {
+    error: {
+      code: 'POS_RATE_LIMITED',
+      message: 'Too many recovery attempts. Try again in a few minutes.',
+    },
   },
 });
