@@ -253,11 +253,28 @@ const publicProduct = (p) => ({
     : null,
   status: p.status,
   variants: (p.variants ?? []).map(publicVariant),
+  modifierGroups: (p.modifierGroups ?? []).map((g) => ({
+    id: g.id,
+    name: g.name,
+    minSelect: g.minSelect,
+    maxSelect: g.maxSelect,
+    status: g.status,
+    options: (g.options ?? []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      price: num(m.price),
+      status: m.status,
+    })),
+  })),
 });
 
 const PRODUCT_INCLUDE = {
   taxRate: { select: { id: true, name: true, ratePercent: true } },
   variants: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] },
+  modifierGroups: {
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    include: { options: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+  },
 };
 
 const productCreate = z.object({
@@ -496,6 +513,162 @@ router.delete(
       entityId: product.id,
       companyId: req.companyScope.id,
       meta: { variantId: variant.id, name: variant.name },
+    });
+    res.json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+// --- modifier groups + options -----------------------------------------------
+
+const groupCreate = z
+  .object({
+    name: z.string().trim().min(1).max(60),
+    minSelect: z.number().int().min(0).default(0),
+    maxSelect: z.number().int().min(1).nullish(),
+  })
+  .refine((g) => g.maxSelect == null || g.maxSelect >= g.minSelect, {
+    message: 'maxSelect must be at least minSelect',
+    path: ['maxSelect'],
+  });
+const groupUpdate = z
+  .object({
+    name: z.string().trim().min(1).max(60).optional(),
+    minSelect: z.number().int().min(0).optional(),
+    maxSelect: z.number().int().min(1).nullish(),
+    status: z.enum(['ACTIVE', 'ARCHIVED']).optional(),
+  });
+
+router.post(
+  '/products/:id/modifier-groups',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const product = await loadProduct(req);
+    const data = groupCreate.parse(req.body);
+    const clash = await prisma.modifierGroup.findFirst({
+      where: { productId: product.id, name: data.name },
+    });
+    if (clash) throw conflict(`Modifier group "${data.name}" already exists on this product`);
+    const group = await prisma.modifierGroup.create({
+      data: {
+        productId: product.id,
+        name: data.name,
+        minSelect: data.minSelect,
+        maxSelect: data.maxSelect ?? null,
+      },
+    });
+    await audit(req, {
+      action: 'MODIFIER_GROUP_CREATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, name: group.name },
+    });
+    res.status(201).json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+const loadGroup = async (req) => {
+  const product = await loadProduct(req);
+  const group = product.modifierGroups.find((g) => g.id === req.params.groupId);
+  if (!group) throw notFound('Modifier group not found');
+  return { product, group };
+};
+
+router.patch(
+  '/products/:id/modifier-groups/:groupId',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const { product, group } = await loadGroup(req);
+    const data = groupUpdate.parse(req.body);
+    const min = data.minSelect ?? group.minSelect;
+    const max = data.maxSelect !== undefined ? data.maxSelect : group.maxSelect;
+    if (max != null && max < min) throw badRequest('maxSelect must be at least minSelect', 'maxSelect');
+    if (data.name && data.name !== group.name) {
+      const clash = await prisma.modifierGroup.findFirst({
+        where: { productId: product.id, name: data.name },
+      });
+      if (clash) throw conflict(`Modifier group "${data.name}" already exists on this product`);
+    }
+    await prisma.modifierGroup.update({
+      where: { id: group.id },
+      data: {
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.minSelect !== undefined ? { minSelect: data.minSelect } : {}),
+        ...(data.maxSelect !== undefined ? { maxSelect: data.maxSelect } : {}),
+        ...(data.status !== undefined ? { status: data.status } : {}),
+      },
+    });
+    await audit(req, {
+      action: 'MODIFIER_GROUP_UPDATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, ...data },
+    });
+    res.json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+const optionCreate = z.object({
+  name: z.string().trim().min(1).max(60),
+  price: money2,
+});
+const optionUpdate = optionCreate.partial().extend({
+  status: z.enum(['ACTIVE', 'ARCHIVED']).optional(),
+});
+
+router.post(
+  '/products/:id/modifier-groups/:groupId/options',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const { product, group } = await loadGroup(req);
+    const data = optionCreate.parse(req.body);
+    const clash = await prisma.modifierOption.findFirst({
+      where: { groupId: group.id, name: data.name },
+    });
+    if (clash) throw conflict(`Option "${data.name}" already exists in this group`);
+    await prisma.modifierOption.create({
+      data: { groupId: group.id, name: data.name, price: data.price.toFixed(2) },
+    });
+    await audit(req, {
+      action: 'MODIFIER_OPTION_CREATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, option: data.name, price: data.price },
+    });
+    res.status(201).json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+router.patch(
+  '/products/:id/modifier-groups/:groupId/options/:optionId',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const { product, group } = await loadGroup(req);
+    const option = group.options.find((m) => m.id === req.params.optionId);
+    if (!option) throw notFound('Modifier option not found');
+    const data = optionUpdate.parse(req.body);
+    if (data.name && data.name !== option.name) {
+      const clash = await prisma.modifierOption.findFirst({
+        where: { groupId: group.id, name: data.name },
+      });
+      if (clash) throw conflict(`Option "${data.name}" already exists in this group`);
+    }
+    await prisma.modifierOption.update({
+      where: { id: option.id },
+      data: {
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.price !== undefined ? { price: data.price.toFixed(2) } : {}),
+        ...(data.status !== undefined ? { status: data.status } : {}),
+      },
+    });
+    await audit(req, {
+      action: 'MODIFIER_OPTION_UPDATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, optionId: option.id, ...data },
     });
     res.json({ product: publicProduct(await loadProduct(req)) });
   }),

@@ -191,6 +191,10 @@ export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amoun
   const payment = await tx.payment.create({
     data: {
       orderId: order.id,
+      // From the order, never from the webhook. A gateway callback is an
+      // outside caller like any other, and this column decides which store's
+      // takings the money lands in.
+      branchId: order.branchId,
       method: normaliseMethod(method),
       channel: 'GATEWAY',
       amount: (amountPaise / 100).toFixed(2),

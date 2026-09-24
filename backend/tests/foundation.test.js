@@ -32,10 +32,19 @@ const wipe = async () => {
   // order delete fails outright once any intent exists.
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  // Promotion tables before Order/Product/Category/Branch/Company — all four
+  // point at them with RESTRICT foreign keys.
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -82,10 +91,10 @@ beforeAll(async () => {
     data: { name: 'Charlie Expired', slug: 'charlie-expired', licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() - 86400e3) } } },
   });
 
-  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha One', code: 'A1' } });
-  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha Two', code: 'A2' } });
-  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, name: 'Bravo One', code: 'B1' } });
-  await prisma.branch.create({ data: { companyId: companyC.id, name: 'Charlie One', code: 'C1' } });
+  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-FA-0001', name: 'Alpha One', code: 'A1' } });
+  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-FA-0002', name: 'Alpha Two', code: 'A2' } });
+  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, publicId: 'VC-FA-0003', name: 'Bravo One', code: 'B1' } });
+  await prisma.branch.create({ data: { companyId: companyC.id, publicId: 'VC-FA-0004', name: 'Charlie One', code: 'C1' } });
 
   atcAdmin = await mkUser({ email: 'atc@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN', passwordHash });
   await mkUser({ email: 'owner.a@test.local', fullName: 'Owner A', role: 'CUSTOMER_OWNER', companyId: companyA.id, passwordHash });
@@ -233,14 +242,16 @@ describe('branch scoping', () => {
   it('branch-pinned roles list only their own branch', async () => {
     const mgr = await request(app).get('/api/branches').set(auth(tokens.managerA1));
     expect(mgr.body.branches.map((b) => b.code)).toEqual(['A1']);
+    // The Phase 1 catalog keeps org.store.read from CASHIER: a till login
+    // sells; it does not browse the organisation's stores.
     const cash = await request(app).get('/api/branches').set(auth(tokens.cashierA1));
-    expect(cash.body.branches.map((b) => b.code)).toEqual(['A1']);
+    expect(cash.status).toBe(403);
   });
 
-  it('a cashier reading a sibling branch is refused as forbidden, not hidden', async () => {
-    const own = await request(app).get(`/api/branches/${branchA1.id}`).set(auth(tokens.cashierA1));
+  it('a branch-pinned manager reading a sibling branch is refused as forbidden, not hidden', async () => {
+    const own = await request(app).get(`/api/branches/${branchA1.id}`).set(auth(tokens.managerA1));
     expect(own.status).toBe(200);
-    const sibling = await request(app).get(`/api/branches/${branchA2.id}`).set(auth(tokens.cashierA1));
+    const sibling = await request(app).get(`/api/branches/${branchA2.id}`).set(auth(tokens.managerA1));
     expect(sibling.status).toBe(403);
     expect(sibling.body.error.code).toBe('POS_FORBIDDEN');
   });

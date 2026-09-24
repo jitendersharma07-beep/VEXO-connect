@@ -29,10 +29,17 @@ const wipe = async () => {
   // order delete fails outright once any intent exists.
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -84,9 +91,9 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() - 86400e3) } },
     },
   });
-  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha One', code: 'A1' } });
-  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha Two', code: 'A2' } });
-  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, name: 'Bravo One', code: 'B1' } });
+  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-PH-0001', name: 'Alpha One', code: 'A1' } });
+  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-PH-0002', name: 'Alpha Two', code: 'A2' } });
+  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, publicId: 'VC-PH-0003', name: 'Bravo One', code: 'B1' } });
 
   const mk = (data) => prisma.posUser.create({ data: { passwordHash, ...data } });
   await mk({ email: 'atc@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN' });
@@ -864,6 +871,7 @@ describe('transitions, refunds and voids', () => {
         prisma.payment.create({
           data: {
             orderId: o.id,
+            branchId: branchA1.id,
             method: 'CARD',
             amount: '1.00',
             idempotencyKey: 'db-backstop-0001',
@@ -874,10 +882,10 @@ describe('transitions, refunds and voids', () => {
       // …while NULL keys stay exempt, which is what lets every pre-existing
       // row and every gateway payment go on coexisting.
       const a = await prisma.payment.create({
-        data: { orderId: o.id, method: 'CASH', amount: '1.00' },
+        data: { orderId: o.id, branchId: branchA1.id, method: 'CASH', amount: '1.00' },
       });
       const b = await prisma.payment.create({
-        data: { orderId: o.id, method: 'CASH', amount: '1.00' },
+        data: { orderId: o.id, branchId: branchA1.id, method: 'CASH', amount: '1.00' },
       });
       expect(a.idempotencyKey).toBeNull();
       expect(b.idempotencyKey).toBeNull();
@@ -1017,7 +1025,7 @@ describe('daily closing', () => {
     const orderId = o.body.order.id;
     await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
     await prisma.payment.create({
-      data: { orderId, method: 'CARD', channel: 'GATEWAY', amount: '500.00', providerRef: `pay_probe_${Date.now()}` },
+      data: { orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY', amount: '500.00', providerRef: `pay_probe_${Date.now()}` },
     });
     const mgr = await prisma.posUser.findFirst({ where: { branchId: branchA1.id, role: 'BRANCH_MANAGER' } });
     await prisma.refund.create({
@@ -1270,7 +1278,7 @@ describe('daily closing', () => {
     const orderId = o.body.order.id;
     await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
     await prisma.payment.create({
-      data: { orderId, method: 'CARD', channel: 'GATEWAY', amount: '250.00', providerRef: `pay_post_${Date.now()}` },
+      data: { orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY', amount: '250.00', providerRef: `pay_post_${Date.now()}` },
     });
 
     const p = (await preview(tokens.managerA1)).body.existingClose.postClose;
