@@ -280,21 +280,24 @@ Stated plainly so nobody discovers it mid-service:
 - **No online card/UPI collection.** Card and UPI are recorded from your existing
   machine or QR code. See §10.
 - **No customer accounts, loyalty, or table reservations.**
-- **No cap on how large a discount a cashier may give.** Any cashier can discount
-  up to 100 %. If you want a ceiling above which a manager must approve, ask VEXO
-  — it is a small change, but VEXO needs *you* to choose the number.
+- **Discount limits are yours to set.** Out of the box a cashier may not
+  discount at all. You grant permission and ceilings on the **Discounts** page
+  (visible only to you) — for the whole company, one branch, or one named
+  person — and you may delegate approval so a manager signs for anything above
+  a ceiling with their own password at the till.
 - **Discount and void history goes back only as far as this system does.** Who
   discounted and who voided *is* now a screen you can open — **Reports →
   Discounts & voids** (§5) — but it reads the log this system has kept since it
   went live. It cannot tell you about anything that happened before that. The
   screen also reads at most 1,000 events per range and says so on screen when it
   hits that; narrow the dates if you see the warning.
-- **No phone-sized screen.** Use a tablet, laptop or till monitor. Below about
-  768 pixels wide — which is every phone held upright — the menu down the left
-  disappears and there is nothing to replace it, so staff can see the page they
-  are on and cannot get to any other. It is not a rendering fault and it will
-  not look broken; they simply will not be able to navigate. If you want the POS
-  on phones, ask VEXO.
+- **Phones can navigate; a till still wants a bigger screen.** Below about
+  768 pixels wide — every phone held upright — the menu down the left becomes
+  a menu button that opens the same menu as a drawer, so staff can always
+  reach their screens. Each person still sees only the pages their role
+  allows, phone or not. Selling all day is more comfortable on a tablet,
+  laptop or till monitor; the phone view is there so nobody is ever stranded
+  on one screen.
 
 ---
 

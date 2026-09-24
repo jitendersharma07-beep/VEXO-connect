@@ -1072,15 +1072,18 @@ Written down so they are disclosed rather than discovered.
 11. **No pull-based payment recovery.** If a gateway `payment.captured` webhook
     is missed, nothing polls the provider to find out. Only relevant once the
     gateway is switched on, and it should be built before it is.
-12. **There is no navigation below 768 px.** Measured on the deployed bundle at
-    twelve widths: at 768 px a cashier on the Sell screen has four nav links;
-    at 767 px they have **zero** — the sidebar is `hidden … md:flex` and
-    nothing replaces it. The page itself is fine, with no horizontal overflow
-    even at 320 px, which is exactly why this was nearly missed: the layout
-    does not *look* broken, it is simply unusable, because a cashier on a phone
-    cannot reach Orders to reprint a bill. **The POS needs a tablet or larger**
-    — said plainly in `guide-owner.md` §9. A mobile menu is a small change if
-    the client wants phones, and `Layout.jsx` is the only file it touches.
+12. ~~**There is no navigation below 768 px.**~~ Fixed in `29a067f` and
+    shipped in v1.0.1. The sidebar's nav body was lifted into `SidebarBody`
+    and rendered twice: as the ≥ 768 px sidebar (unchanged) and as a drawer
+    behind a menu control below 768 px — the same role-gated tree, not a
+    copied link list, so a cashier's drawer shows only the cashier's links
+    and the drawer closes on route change. Measured **33/33** on the deployed
+    bundle across widths down to 320 px: navigation reachable at every width,
+    horizontal overflow still zero, and the cashier's visible link count
+    strictly smaller than the owner's at the same width — the check that
+    fails if the drawer were a hardcoded list. The original defect for
+    history: at 767 px a cashier had **zero** nav links, because the sidebar
+    was `hidden … md:flex` and nothing replaced it.
 13. ~~**No error boundary.**~~ Fixed 2026-09-22 in `1e64b24` and **deployed**
     at 14:49 UTC in the same push as item 9 — 18/18 green against the bundle
     pulled out of the running container, re-confirmed at 15:09 UTC against
