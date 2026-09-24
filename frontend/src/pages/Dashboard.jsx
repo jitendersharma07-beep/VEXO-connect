@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Store, Users, BadgeCheck, CalendarClock, ReceiptText } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
+import { usePermissions } from '../lib/permissions.jsx';
 import { canSeeReports, canSell, fmtDate } from '../lib/pos.js';
 import {
   PageHeader,
@@ -17,6 +18,13 @@ const daysLeft = (iso) => Math.ceil((new Date(iso) - Date.now()) / 86400000);
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const { can } = usePermissions();
+  // LANE foundation — the catalog keeps org.store.read from till-only roles,
+  // and the dashboard is linked for everyone. Fetching the branch list only
+  // when the caller holds the action (and separately from the summary) keeps
+  // a till login's dashboard standing instead of collapsing the whole screen
+  // on a refusal it was always going to get.
+  const canReadStores = can('org.store.read');
   const [summary, setSummary] = useState(null);
   const [branches, setBranches] = useState([]);
   const [error, setError] = useState('');
@@ -25,10 +33,8 @@ export default function Dashboard() {
     let alive = true;
     (async () => {
       try {
-        const [s, b] = await Promise.all([api.get('/dashboard/summary'), api.get('/branches')]);
-        if (!alive) return;
-        setSummary(s.data);
-        setBranches(b.data.branches);
+        const s = await api.get('/dashboard/summary');
+        if (alive) setSummary(s.data);
       } catch (err) {
         if (alive) setError(apiError(err, 'Could not load the dashboard'));
       }
@@ -37,6 +43,22 @@ export default function Dashboard() {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!canReadStores) return undefined;
+    let alive = true;
+    (async () => {
+      try {
+        const b = await api.get('/branches');
+        if (alive) setBranches(b.data.branches);
+      } catch {
+        // One card's list — the stat cards above already carry the counts.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [canReadStores]);
 
   if (error) return <ErrorNote message={error} />;
   if (!summary) return <FullScreenSpinner />;
@@ -96,7 +118,10 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-3">
+      {/* Card and its 2-column span are gated together: hiding only the card
+          would leave the sales card rattling in a 3-column grid. */}
+      <div className={`mt-6 grid gap-4 ${canReadStores ? 'lg:grid-cols-3' : ''}`}>
+        {canReadStores ? (
         <div className="card p-5 lg:col-span-2">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">Your branches</h2>
@@ -127,6 +152,7 @@ export default function Dashboard() {
             </ul>
           )}
         </div>
+        ) : null}
 
         <div className="card flex flex-col items-center justify-center p-6 text-center">
           <div className="rounded-xl bg-slate-100 p-3">

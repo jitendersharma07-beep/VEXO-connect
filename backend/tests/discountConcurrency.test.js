@@ -126,7 +126,7 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  h1 = await prisma.branch.create({ data: { companyId: hotel.id, name: 'Hotel One', code: 'H1' } });
+  h1 = await prisma.branch.create({ data: { companyId: hotel.id, publicId: 'VC-DK-0001', name: 'Hotel One', code: 'H1' } });
 
   const mk = async (key, data) => {
     users[key] = await prisma.posUser.create({ data: { passwordHash, ...data } });

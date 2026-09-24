@@ -164,7 +164,7 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  b1 = await prisma.branch.create({ data: { companyId: cafe.id, name: 'Cafe One', code: 'C1' } });
+  b1 = await prisma.branch.create({ data: { companyId: cafe.id, publicId: 'VC-AV-0001', name: 'Cafe One', code: 'C1' } });
 
   users.cashier = await prisma.posUser.create({
     data: {

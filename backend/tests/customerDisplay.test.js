@@ -116,9 +116,9 @@ beforeAll(async () => {
       },
     },
   });
-  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha One', code: 'A1' } });
-  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha Two', code: 'A2' } });
-  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, name: 'Bravo One', code: 'B1' } });
+  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-CD-0001', name: 'Alpha One', code: 'A1' } });
+  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-CD-0002', name: 'Alpha Two', code: 'A2' } });
+  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, publicId: 'VC-CD-0003', name: 'Bravo One', code: 'B1' } });
 
   const mk = (email, fullName, role, companyId, branchId = null) =>
     prisma.posUser.create({ data: { email, fullName, role, companyId, branchId, passwordHash } });

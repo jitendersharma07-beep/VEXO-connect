@@ -128,7 +128,7 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
     },
   });
-  branch = await prisma.branch.create({ data: { companyId: company.id, name: 'Gw One', code: 'G1' } });
+  branch = await prisma.branch.create({ data: { companyId: company.id, publicId: 'VC-GW-0001', name: 'Gw One', code: 'G1' } });
   const mk = (data) => prisma.posUser.create({ data: { passwordHash, ...data } });
   await mk({ email: 'atc.g@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN' });
   await mk({ email: 'owner.g@test.local', fullName: 'Owner G', role: 'CUSTOMER_OWNER', companyId: company.id });
@@ -156,7 +156,7 @@ beforeAll(async () => {
     },
   });
   other.branch = await prisma.branch.create({
-    data: { companyId: other.company.id, name: 'Rv One', code: 'R1' },
+    data: { companyId: other.company.id, publicId: 'VC-GW-0002', name: 'Rv One', code: 'R1' },
   });
   await mk({ email: 'owner.r@test.local', fullName: 'Owner R', role: 'CUSTOMER_OWNER', companyId: other.company.id });
   await mk({

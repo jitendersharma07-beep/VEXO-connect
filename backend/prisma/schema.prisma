@@ -18,6 +18,19 @@ enum PosRole {
   CUSTOMER_OWNER // owns one company, all its branches
   BRANCH_MANAGER // one branch of one company
   CASHIER // one branch of one company
+  // Appended, never reordered or renamed: a Postgres enum value carries an
+  // ordinal and the four above are already written into live PosUser rows.
+  // BRANCH_MANAGER is the spec's Store Manager and keeps its old name, because
+  // renaming it would rewrite every row that holds it.
+  COMPANY_ADMIN // whole company; the admin work an owner delegates
+  FINANCE // whole company; money and tax, sells nothing
+  REGIONAL_MANAGER // the stores of one Region, never the whole company
+  CAPTAIN // one store; takes orders, cannot bill
+  KITCHEN // one store; KOT screens only
+  INVENTORY // stock, at the store or the company
+  PURCHASE // company; vendors and purchase orders
+  DELIVERY // one store; delivery handover
+  AUDITOR // reads what it is granted, writes nothing
 }
 
 enum CompanyStatus {
@@ -82,6 +95,16 @@ model Company {
   dayCloses  DayClose[]
 
   discountPolicies DiscountPolicy[]
+
+  // LANE foundation
+  legalEntities     LegalEntity[]
+  gstRegistrations  GstRegistration[]
+  brands            Brand[]
+  regions           Region[]
+  terminals         Terminal[]
+  devices           Device[]
+  permissionRules   PermissionRule[]
+  supportGrants     SupportAccessGrant[]
 }
 
 model Branch {
@@ -98,6 +121,47 @@ model Branch {
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
+  // ---- LANE foundation ----------------------------------------------------
+  // The VEXO Store ID: minted once, printed on invoices, quoted in support
+  // tickets, never editable. `name` and `code` are the customer's to change;
+  // this is the identity everything else points at. `id` is a cuid and stays
+  // the database key — publicId exists because a human has to be able to read
+  // it out over the phone.
+  publicId          String           @unique
+  pincode           String?
+  // Which registered business this store trades as, and under which GSTIN.
+  // Nullable because a tenant configures these after the store exists, and a
+  // store that has not been mapped yet must not be unusable — billing refuses
+  // to issue a GST invoice without a registration instead.
+  //
+  // These three are COMPOSITE references, carrying companyId alongside the id.
+  // Tenancy is then a foreign key: the database itself refuses to link a store
+  // to another customer's entity, GSTIN or region, on UPDATE as well as on
+  // INSERT. Cross-table agreement expressed this way rather than as a CHECK,
+  // because a CHECK cannot see another table and a trigger pretending to is
+  // not a constraint — it is a race.
+  //
+  // MATCH SIMPLE (the default) skips the check when the nullable id is NULL,
+  // which is exactly right: an unmapped store has nothing to verify. The
+  // gstRegistrationId reference carries legalEntityId too, so the GSTIN must
+  // belong to the entity this store trades as; the SQL CHECK
+  // `Branch_gst_needs_entity` closes the one gap that leaves, a GSTIN set
+  // while legalEntityId is still NULL.
+  legalEntityId     String?
+  legalEntity       LegalEntity?     @relation(fields: [legalEntityId, companyId], references: [id, companyId], onDelete: Restrict)
+  gstRegistrationId String?
+  gstRegistration   GstRegistration? @relation(fields: [gstRegistrationId, legalEntityId, companyId], references: [id, legalEntityId, companyId], onDelete: Restrict)
+  regionId          String?
+  region            Region?          @relation(fields: [regionId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Invoice series prefix. Null = use `code`, which is what every existing
+  // store does. Set it once and a later code change cannot relabel the series,
+  // because the counter is keyed by branch and FY, not by the prefix.
+  invoicePrefix     String?
+  // Per-premises, not per-company: an FSSAI licence is issued to the kitchen at
+  // this address, and it is the number that has to appear on this store's bills.
+  fssaiLicenseNo    String?
+  fssaiValidUpto    DateTime?
+
   users PosUser[]
 
   tables          DiningTable[]
@@ -107,8 +171,22 @@ model Branch {
 
   discountPolicies DiscountPolicy[]
 
+  // LANE foundation
+  terminals       Terminal[]
+  devices         Device[]
+  brandLinks      BranchBrand[]
+  permissionRules PermissionRule[]
+  userAssignments UserStoreAssignment[]
+
   @@unique([companyId, code])
+  // Referenced by everything that happens AT a store — terminals, devices,
+  // orders, assignments — so that each of those carries the tenant and has it
+  // checked, instead of trusting whoever wrote the row.
+  @@unique([id, companyId])
   @@index([companyId])
+  @@index([gstRegistrationId])
+  @@index([regionId])
+  @@index([legalEntityId])
 }
 
 model PosUser {
@@ -119,7 +197,19 @@ model PosUser {
   // Branch-scoped roles (BRANCH_MANAGER, CASHIER) carry the branch they are
   // pinned to; owner/ATC rows leave it null.
   branchId           String?
-  branch             Branch?       @relation(fields: [branchId], references: [id])
+  // Composite where it can be. A platform operator has a NULL companyId, and
+  // MATCH SIMPLE skips the check when any referencing column is NULL — so this
+  // constrains customer principals, which are the ones that have a branch at
+  // all, and leaves operator rows alone. Operators are kept out of tenant data
+  // by requireTenantPrincipal and the support-grant gate, not by this.
+  //
+  // Restrict, where the single-column version was SET NULL. Postgres nulls
+  // EVERY referencing column of a composite key, so deleting a branch under the
+  // old action would also blank companyId here — silently promoting a cashier
+  // into something with no tenant at all, which is what a platform operator
+  // looks like. Stores are retired by status, not deleted, so refusing the
+  // delete costs nothing and removes that path entirely.
+  branch             Branch?       @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
   email              String        @unique
   fullName           String
   passwordHash       String
@@ -143,8 +233,32 @@ model PosUser {
   discountPolicies  DiscountPolicy[] @relation("DiscountPolicySubject")
   discountsApproved Order[]          @relation("OrderDiscountApprovedBy")
 
+  // ---- LANE foundation ----------------------------------------------------
+  // A REGIONAL_MANAGER is scoped by region, not by a single branch, so it
+  // cannot use branchId. Null for every other role.
+  regionId String?
+  region   Region? @relation(fields: [regionId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  // Explicit multi-store scope. A user with no assignments is scoped by role
+  // alone; a user with assignments is scoped by exactly those stores. See the
+  // authoritative statement on UserStoreAssignment and in lib/permissions.js
+  // (`storeScopeFor`).
+  storeAssignments   UserStoreAssignment[] @relation("StoreAssignmentUser")
+  storeAssignmentsBy UserStoreAssignment[] @relation("StoreAssignmentCreatedBy")
+
+  permissionRules    PermissionRule[]     @relation("PermissionRuleSubject")
+  permissionRulesSet PermissionRule[]     @relation("PermissionRuleUpdatedBy")
+  devicesEnrolled    Device[]             @relation("DeviceEnrolledBy")
+  devicesRevoked     Device[]             @relation("DeviceRevokedBy")
+  supportGrants      SupportAccessGrant[] @relation("SupportGrantOperator")
+  supportGrantsGiven SupportAccessGrant[] @relation("SupportGrantGrantedBy")
+
+  // Referenced by PermissionRule and UserStoreAssignment so a tenant's rule or
+  // assignment can only name a principal of that same tenant.
+  @@unique([id, companyId])
   @@index([companyId])
   @@index([branchId])
+  @@index([regionId])
 }
 
 model PosSession {
@@ -278,9 +392,16 @@ model PosAuditLog {
   entityId   String?
   ip         String?
   meta       Json?
+  // LANE foundation — plain columns with no foreign key, like actorId above.
+  // An audit write must never be the thing that fails a request, and a log row
+  // that cannot be written because its subject was removed is worse than a log
+  // row pointing at an id that no longer resolves.
+  terminalId String?
+  deviceId   String?
 
   @@index([companyId, at])
   @@index([action, at])
+  @@index([deviceId, at])
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +564,7 @@ model Order {
   companyId            String
   company              Company       @relation(fields: [companyId], references: [id])
   branchId             String
-  branch               Branch        @relation(fields: [branchId], references: [id])
+  branch               Branch        @relation(fields: [branchId, companyId], references: [id, companyId])
   type                 OrderType
   status               OrderStatus   @default(OPEN)
   tableId              String?
@@ -478,6 +599,27 @@ model Order {
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
+  // ---- LANE foundation ----------------------------------------------------
+  // Everything the issued invoice legally asserted about the seller, frozen at
+  // bill time: legal name, GSTIN, registered address, state code, FSSAI, store
+  // id and series prefix. The seller's master data is editable by design, so
+  // re-deriving these at print time would let a GSTIN corrected in March
+  // silently restate a January invoice. Null on every order billed before this
+  // column existed — those receipts keep reading from the live records, which
+  // is the only information that ever existed for them. Never backfilled with
+  // today's values pretending to be that day's.
+  billingSnapshot Json?
+  // Which till and which physical device rang it up. Nullable: a bill taken on
+  // a browser that never enrolled has no device, and that is not an error.
+  //
+  // Both carry branchId, so attribution is checked against the store the
+  // transaction actually happened in. An order cannot claim to have been rung
+  // up on another store's counter.
+  terminalId      String?
+  terminal        Terminal? @relation(fields: [terminalId, branchId], references: [id, branchId], onDelete: Restrict)
+  deviceId        String?
+  device          Device?   @relation(fields: [deviceId, branchId], references: [id, branchId], onDelete: Restrict)
+
   items    OrderItem[]
   kots     Kot[]
   payments Payment[]
@@ -485,10 +627,15 @@ model Order {
   intents  PaymentIntent[]
 
   @@unique([companyId, invoiceNumber])
+  // Lets a payment reference (orderId, branchId), which is what ties the money
+  // to the same store as the bill.
+  @@unique([id, branchId])
   @@index([companyId, branchId, status])
   @@index([companyId, billedAt])
   @@index([tableId])
   @@index([discountApprovedById])
+  @@index([terminalId])
+  @@index([deviceId])
 }
 
 model OrderItem {
@@ -539,7 +686,13 @@ model Kot {
 model Payment {
   id           String         @id @default(cuid())
   orderId      String
-  order        Order          @relation(fields: [orderId], references: [id])
+  // Carried on the payment, not looked up through the order, because it is the
+  // column the terminal and device references below are checked against. A
+  // payment therefore cannot be attributed to a till or a device belonging to
+  // a store other than the one that issued the bill. Backfilled from the order
+  // for every payment written before this column existed.
+  branchId     String
+  order        Order          @relation(fields: [orderId, branchId], references: [id, branchId])
   method       PaymentMethod
   channel      PaymentChannel @default(MANUAL)
   // amount = applied to the order (≤ remaining due). For cash, tendered is
@@ -585,9 +738,19 @@ model Payment {
 
   createdAt    DateTime       @default(now())
 
+  // LANE foundation — which till and device took the money. A cash variance is
+  // only answerable if the drawer it came out of is on the row.
+  terminalId String?
+  terminal   Terminal? @relation(fields: [terminalId, branchId], references: [id, branchId], onDelete: Restrict)
+  deviceId   String?
+  device     Device?   @relation(fields: [deviceId, branchId], references: [id, branchId], onDelete: Restrict)
+
   @@unique([orderId, idempotencyKey])
+  @@index([branchId])
   @@index([orderId])
   @@index([createdAt])
+  @@index([terminalId])
+  @@index([deviceId])
 }
 
 // One attempt to collect an order's due amount through a provider. Order-linked
@@ -725,6 +888,14 @@ model InvoiceCounter {
   branch     Branch @relation(fields: [branchId], references: [id])
   fyLabel    String
   lastNumber Int    @default(0)
+  // The series this year's bills are issued under, frozen when the year's
+  // first bill is issued. Read back for every later bill in the same series,
+  // so editing Branch.code or Branch.invoicePrefix mid-year cannot relabel a
+  // running series. See lib/invoice.js.
+  //
+  // Backfilled for existing counters from the invoice numbers already issued
+  // under them — historical evidence, not today's branch values.
+  seriesPrefix String
 
   @@unique([branchId, fyLabel])
 }
@@ -789,4 +960,399 @@ model DayClose {
 
   @@index([companyId, businessDate])
   @@index([branchId, businessDate])
+}
+
+// ===========================================================================
+// LANE foundation — Expansion Phase 1: organisation, identity, terminals,
+// devices and the permission/scope layer. Spec Part A §7, Part B §3/§5/§11.
+//
+// The shape is Tenant (Company) → Legal Entity → GST Registration → Store
+// (Branch) → Terminal → Device. Brand, Region and Inventory Location are
+// deliberately NOT levels of that chain — they are separate dimensions a store
+// is tagged with, because a single outlet can trade two brands and an inventory
+// location does not own a bill. InventoryLocation belongs to the inventory
+// lane and is not created here.
+//
+// Nothing below renames an existing table or column. `Branch` stays `Branch`
+// in the database however the screens spell it.
+// ===========================================================================
+
+// The registered business that actually sells. One tenant can hold several —
+// a group running two companies under one VEXO login is the ordinary case, not
+// the exotic one.
+model LegalEntity {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  // Exactly as it appears on the certificate of incorporation, because this is
+  // the string a tax invoice has to carry. The brand customers recognise lives
+  // in `Brand`, and the two are usually different.
+  legalName String
+  tradeName String?
+  // PAN and CIN are the entity's identity, not the tenant's. Nullable because a
+  // tenant may configure stores before Finance hands over the paperwork, and
+  // refusing to save a legal entity until then would just push the data into a
+  // spreadsheet. The uniqueness is per tenant: two tenants legitimately holding
+  // the same PAN (an agency setting up a client) must not be able to discover
+  // each other through a 409.
+  pan       String?
+  cin       String?
+  status    CatalogStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  gstRegistrations GstRegistration[]
+  branches         Branch[]
+
+  @@unique([companyId, legalName])
+  @@unique([companyId, pan])
+  // Redundant on its own — `id` is already the key. It exists so children can
+  // point at (id, companyId) instead of (id), which is what makes "this row
+  // belongs to that tenant" a foreign key rather than a hope. See the tenancy
+  // note on Branch.
+  @@unique([id, companyId])
+  @@index([companyId])
+}
+
+// One GSTIN. A legal entity registered in four states has four of these, and a
+// store maps to exactly one — that mapping is what decides the GSTIN, the
+// place of supply and the invoice series a bill is issued under.
+model GstRegistration {
+  id            String      @id @default(cuid())
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  legalEntityId String
+  // Composite: the entity must be one of THIS tenant's. A single-column
+  // reference would happily accept another customer's legal entity id.
+  legalEntity   LegalEntity @relation(fields: [legalEntityId, companyId], references: [id, companyId], onDelete: Restrict)
+  gstin         String
+  // The trade name on THIS registration. It can differ from the entity's, which
+  // is why it is not read off LegalEntity.
+  tradeName     String?
+  // First two digits of the GSTIN. Stored rather than derived so the invoice
+  // snapshot is self-contained, and constrained in SQL so it can never
+  // disagree with the GSTIN it came from.
+  stateCode     String
+  stateName     String
+  addressLine   String?
+  city          String?
+  pincode       String?
+  status        CatalogStatus @default(ACTIVE)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  branches Branch[]
+
+  // Per tenant, not global. A globally unique GSTIN would answer "does another
+  // VEXO customer already use this number?" to anyone who can type one in.
+  @@unique([companyId, gstin])
+  // Lets Branch reference a registration by (id, legalEntityId, companyId), so
+  // a store's GSTIN is forced to belong both to the store's tenant AND to the
+  // store's own legal entity. Without the middle column a branch could name
+  // entity A and a GSTIN registered to entity B, and the invoice would assert
+  // a pairing that does not exist.
+  @@unique([id, legalEntityId, companyId])
+  @@index([companyId])
+  @@index([legalEntityId])
+}
+
+// Monotonic counters for ids that are public and permanent. Same idiom as
+// InvoiceCounter: one row, incremented inside the caller's transaction, so two
+// stores created at the same instant cannot be handed the same number.
+model PlatformCounter {
+  key        String @id
+  lastNumber Int    @default(0)
+}
+
+// A customer-facing brand. A food court unit selling under two names is one
+// store with two brands, not two stores — which is why this is a separate
+// dimension and not a level above Branch.
+model Brand {
+  id        String        @id @default(cuid())
+  companyId String
+  company   Company       @relation(fields: [companyId], references: [id])
+  name      String
+  code      String
+  status    CatalogStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  storeLinks BranchBrand[]
+
+  @@unique([companyId, code])
+  @@unique([companyId, name])
+  @@unique([id, companyId])
+  @@index([companyId])
+}
+
+// Store ↔ brand. `companyId` is carried on the link row itself so BOTH sides
+// can be tied to the same tenant by foreign key: without it the two ids are
+// independently valid and nothing stops one tenant's store being linked to
+// another tenant's brand.
+model BranchBrand {
+  branchId  String
+  companyId String
+  branch    Branch   @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  brandId   String
+  brand     Brand    @relation(fields: [brandId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdAt DateTime @default(now())
+
+  @@id([branchId, brandId])
+  @@index([brandId])
+  @@index([companyId])
+}
+
+// A region or cluster of stores. `parentId` lets a tenant nest cluster inside
+// region without a second table; it is not a reporting hierarchy and carries no
+// permissions of its own — a REGIONAL_MANAGER's reach comes from the stores
+// that point here.
+model Region {
+  id        String        @id @default(cuid())
+  companyId String
+  company   Company       @relation(fields: [companyId], references: [id])
+  name      String
+  code      String
+  parentId  String?
+  // Composite, so a cluster can only nest inside a region of the same tenant.
+  parent    Region?       @relation("RegionTree", fields: [parentId, companyId], references: [id, companyId], onDelete: Restrict)
+  status    CatalogStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  children Region[]  @relation("RegionTree")
+  branches Branch[]
+  users    PosUser[]
+
+  @@unique([companyId, code])
+  @@unique([companyId, name])
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([parentId])
+}
+
+enum TerminalStatus {
+  ACTIVE
+  DISABLED
+}
+
+// A logical till: "Counter 1", "Drive-through". Bound to one store for its
+// whole life — a terminal that could move between stores would make the day's
+// cash belong to two places at once.
+model Terminal {
+  id        String @id @default(cuid())
+  // Denormalised from the branch on purpose, and written by the server from the
+  // branch it resolved — never from the request. Device authentication has to
+  // establish the tenant on every single call, and it must not need a join to
+  // do it.
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  branchId  String
+  // Composite: the denormalised companyId above is only trustworthy if the
+  // database checks it against the branch. This is that check.
+  branch    Branch  @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  code      String
+  name      String
+  status    TerminalStatus @default(ACTIVE)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  devices  Device[]
+  orders   Order[]
+  payments Payment[]
+
+  @@unique([branchId, code])
+  // So a device, an order or a payment can name (terminalId, branchId) and
+  // have the pairing enforced — a till from another store can never be
+  // attributed to this store's takings.
+  @@unique([id, branchId])
+  @@index([companyId])
+  @@index([branchId])
+}
+
+enum DeviceType {
+  COUNTER
+  KDS
+  CUSTOMER_DISPLAY
+  HANDHELD
+  OTHER
+}
+
+// PENDING = enrolled, no credential issued yet. ACTIVE = holds a live token.
+// REVOKED = terminal state; the row stays for the audit trail and for the
+// orders that point at it, but its token is gone.
+enum DeviceStatus {
+  PENDING
+  ACTIVE
+  REVOKED
+}
+
+// A physical or browser device. Its credential is scoped to exactly one store
+// and at most one terminal, and that scope is checked server-side on every
+// request — a token that leaks is a token for one counter, not for a tenant.
+model Device {
+  id String @id @default(cuid())
+  // Quoted in support tickets and printed on the device's own settings screen.
+  // Minted once, never editable.
+  publicId String @unique
+  // See Terminal.companyId — same reason, same rule: server-written.
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id])
+  branchId    String
+  branch      Branch    @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  terminalId  String?
+  // (terminalId, branchId), not terminalId alone: a device's credential is
+  // scoped to one store, and pointing it at a till in a different store would
+  // make that scope a fiction.
+  terminal    Terminal? @relation(fields: [terminalId, branchId], references: [id, branchId], onDelete: Restrict)
+  name        String
+  type        DeviceType   @default(COUNTER)
+  status      DeviceStatus @default(PENDING)
+  // Only the hash. The token itself is shown once, at activation, and is not
+  // recoverable afterwards — the same contract as a staff temporary password.
+  // Revoking clears this column, because status alone would leave a working
+  // credential in the wild.
+  tokenHash   String?   @unique
+  lastSeenAt  DateTime?
+  lastSeenIp  String?
+  activatedAt DateTime?
+  revokedAt   DateTime?
+  revokedById String?
+  revokedBy   PosUser?  @relation("DeviceRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  enrolledById String?
+  enrolledBy   PosUser? @relation("DeviceEnrolledBy", fields: [enrolledById], references: [id], onDelete: Restrict)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  orders   Order[]
+  payments Payment[]
+
+  @@unique([id, branchId])
+  @@index([companyId])
+  @@index([branchId])
+  @@index([terminalId])
+  @@index([status])
+}
+
+enum PermissionLevel {
+  COMPANY
+  BRANCH
+  USER
+}
+
+enum PermissionEffect {
+  ALLOW
+  DENY
+}
+
+// Narrowing rules over the role baseline in src/lib/permissions.js. Resolved
+// most-specific-first the way DiscountPolicy already resolves — USER over
+// BRANCH over COMPANY — and deliberately incapable of widening: an ALLOW can
+// only switch something back on that a broader DENY switched off, never grant
+// an action the role never had. That is what makes "a cashier cannot grant
+// themselves more permission" a property of the data model instead of a check
+// somebody has to remember to write.
+//
+// One exception to most-specific-wins, and it is the important one: a
+// COMPANY-level DENY is a HARD prohibition, not an inherited default. It is the
+// tenant saying "not in this business, by anyone", so a narrower ALLOW does not
+// lift it — resolveRules reapplies it last, over the narrower winner. The rules
+// route refuses to store such an ALLOW in the first place, so nobody is left
+// looking at a rule that says ALLOW while the server says no.
+model PermissionRule {
+  id        String          @id @default(cuid())
+  companyId String
+  company   Company         @relation(fields: [companyId], references: [id])
+  level     PermissionLevel
+  branchId  String?
+  branch    Branch?         @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  userId    String?
+  user      PosUser?        @relation("PermissionRuleSubject", fields: [userId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Same trick as DiscountPolicy.scopeKey: Postgres counts NULLs as distinct,
+  // so a nullable (branchId, userId) pair cannot stop a hundred duplicate
+  // "company default" rows. "company" | "branch:<id>" | "user:<id>".
+  scopeKey  String
+  action    String
+  effect    PermissionEffect
+  note        String?
+  updatedById String?
+  updatedBy   PosUser? @relation("PermissionRuleUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([companyId, scopeKey, action])
+  @@index([companyId, level])
+  @@index([branchId])
+  @@index([userId])
+}
+
+// Which stores a user may act in. THE AUTHORITATIVE RULE, stated once here and
+// implemented once in lib/permissions.js `storeScopeFor`:
+//
+//   Assignment rows REPLACE the store scope the role implies. They do not only
+//   narrow it. A BRANCH_MANAGER covering two outlets gets two rows and reaches
+//   both — for a store-pinned role that is a widening, and it is intended;
+//   "manager of the airport and the mall" is an ordinary job. A user with no
+//   rows falls back to PosUser.branchId, which is how every existing account
+//   already works and is why this table could be added without a backfill.
+//
+// An earlier comment here said this table "only ever narrows, never widens".
+// That was wrong about the code and is corrected rather than reconciled: the
+// resolver has always read the rows as the scope. What never widens is the set
+// of ACTIONS — scope answers "where", never "what", so no number of assignment
+// rows turns a cashier into someone who can issue a refund.
+//
+// Widening is safe because of who may write these rows, not because of what
+// they say. The route requires `user.write`, refuses any store outside the
+// caller's OWN scope, and refuses a row naming the caller — so nobody can
+// assign themselves anywhere, and an admin cannot hand out reach they do not
+// themselves hold.
+model UserStoreAssignment {
+  id          String   @id @default(cuid())
+  userId      String
+  // companyId carried on the row so both sides are tied to one tenant by
+  // foreign key: without it, a row could name this tenant's user and another
+  // tenant's store, and the scope it produced would cross the boundary the
+  // rest of the system is built on.
+  companyId   String
+  user        PosUser  @relation("StoreAssignmentUser", fields: [userId, companyId], references: [id, companyId], onDelete: Restrict)
+  branchId    String
+  branch      Branch   @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  createdById String?
+  createdBy   PosUser? @relation("StoreAssignmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@unique([userId, branchId])
+  @@index([branchId])
+  @@index([companyId])
+}
+
+// Platform support reaching into a tenant. Explicit, time-boxed and granted by
+// that tenant's own owner — a POS_SUPER_ADMIN is cross-tenant by construction,
+// so without this table "ATC looked at my data" has no record and no consent.
+// Every grant, use and revocation is audited.
+model SupportAccessGrant {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  // The platform operator the grant is for. Named, never a blanket grant to the
+  // role: "ATC can see it" is not consent, "this person until Friday" is.
+  //
+  // Single-column on purpose, and the one place in this file that stays that
+  // way. The subject of a grant is by definition NOT a member of this company —
+  // an operator's companyId is NULL — so there is no (id, companyId) pair to
+  // match. requireTenantPrincipal on the grant routes is what checks the
+  // operator is an operator; a composite key here would simply be unsatisfiable.
+  userId    String
+  user      PosUser @relation("SupportGrantOperator", fields: [userId], references: [id], onDelete: Restrict)
+  reason      String
+  grantedById String
+  grantedBy   PosUser  @relation("SupportGrantGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+  grantedAt   DateTime @default(now())
+  // Required. A grant with no end is standing access wearing a consent label.
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  revokedById String?
+
+  @@index([companyId, expiresAt])
+  @@index([userId, expiresAt])
 }

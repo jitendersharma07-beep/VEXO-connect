@@ -21,10 +21,11 @@ import {
   branchIdFilterFor,
 } from '../../middleware/auth.js';
 import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
+import { deviceContext, assertDeviceStore, deviceStamp } from '../../middleware/device.js';
 import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
 import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
-import { nextInvoiceNumber } from '../../lib/invoice.js';
+import { nextInvoiceNumber, sellerOfRecord, billingSnapshot } from '../../lib/invoice.js';
 import {
   ORDER_INCLUDE,
   SUMMARY_INCLUDE,
@@ -47,7 +48,10 @@ import {
 } from '../../lib/orders.js';
 
 const router = Router();
-router.use(requirePosAuth, resolveCompanyScope);
+// deviceContext AFTER resolveCompanyScope — a device token can only be judged
+// once the tenant it must belong to is known. It is optional: a browser till
+// that sends no token passes straight through and attributes less.
+router.use(requirePosAuth, resolveCompanyScope, deviceContext);
 
 const operate = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER', 'CASHIER'), requireUsableLicense];
 const managerUp = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER'), requireUsableLicense];
@@ -68,6 +72,11 @@ const loadOrder = async (req, include = undefined) => {
   if (isBranchPinned(req.user) && order.branchId !== req.user.branchId) {
     throw forbidden('Your role is limited to your own branch');
   }
+  // Every route in this file that touches an existing order comes through here,
+  // so the device's store scope is enforced once rather than remembered twenty
+  // times. A device at one store cannot add items to, bill, collect on, refund
+  // or void an order belonging to another — even with a valid user session.
+  assertDeviceStore(req, order.branchId);
   return order;
 };
 
@@ -213,6 +222,10 @@ router.post(
     });
     if (!branch) throw notFound('Branch not found');
     if (branch.status !== 'ACTIVE') throw conflict('Branch is closed');
+    // A device credential is scoped to one store. Checked here, server-side,
+    // against the branch the route actually resolved — not against whatever the
+    // body claimed.
+    assertDeviceStore(req, branch.id);
 
     if (data.type === 'TAKEAWAY' && data.tableId) {
       throw badRequest('tableId is not allowed for TAKEAWAY orders', 'tableId');
@@ -253,6 +266,11 @@ router.post(
           tableId: data.type === 'DINE_IN' ? data.tableId : null,
           note: data.note ?? null,
           openedById: req.user.id,
+          // Where the order was OPENED. Not re-stamped at bill or payment time:
+          // each payment carries its own till, so a bill started on a handheld
+          // and settled at the counter records both truthfully instead of one
+          // overwriting the other.
+          ...deviceStamp(req),
         },
       });
       await tx.orderItem.createMany({
@@ -793,16 +811,40 @@ router.post(
       throw conflict('Order has no active items to bill');
     }
 
+    // Read outside the transaction: master data the bill is about to quote, not
+    // something the bill writes. Keeping it out keeps the counter transaction —
+    // the one every till contends on — as short as it was before.
+    const seller = await sellerOfRecord(prisma, order.branch);
+
+    // One timestamp for the row and the snapshot, so the invoice cannot claim a
+    // different billing instant from the order it belongs to.
+    const billedAt = new Date();
+
     await prisma.$transaction(async (tx) => {
       // Guarded transition: a concurrent bill of the same order loses here.
       const moved = await tx.order.updateMany({
         where: { id: order.id, status: 'OPEN' },
-        data: { status: 'BILLED', billedAt: new Date() },
+        data: { status: 'BILLED', billedAt },
       });
       if (moved.count === 0) throw conflict('Order is not open');
       await recomputeOrder(tx, order.id);
-      const invoiceNumber = await nextInvoiceNumber(tx, order.branch);
-      await tx.order.update({ where: { id: order.id }, data: { invoiceNumber } });
+      const { invoiceNumber, seriesPrefix } = await nextInvoiceNumber(tx, order.branch, billedAt);
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          invoiceNumber,
+          // Frozen in the SAME statement that assigns the number. A snapshot
+          // written afterwards could be lost to a crash, leaving an invoice
+          // number with no record of who issued it.
+          billingSnapshot: billingSnapshot({
+            branch: order.branch,
+            seller,
+            invoiceNumber,
+            seriesPrefix,
+            at: billedAt,
+          }),
+        },
+      });
     });
 
     const full = await prisma.order.findUnique({ where: { id: order.id }, include: ORDER_INCLUDE });
@@ -937,6 +979,11 @@ router.post(
       const payment = await tx.payment.create({
         data: {
           orderId: order.id,
+          // The store that issued the bill, copied from the order rather than
+          // from the request. It is the column the terminal and device
+          // references are checked against, so taking it from the caller would
+          // hand the caller the power to attribute money to another store.
+          branchId: order.branchId,
           method: body.method,
           amount: (applied / 100).toFixed(2),
           tendered: tendered === null ? null : (tendered / 100).toFixed(2),
@@ -946,6 +993,10 @@ router.post(
           // caller sent none, which the unique index permits any number of.
           idempotencyKey: body.idempotencyKey ?? null,
           receivedById: req.user.id,
+          // WHERE the money was actually taken. A day close reconciles cash per
+          // till, so this has to be the till that took THIS payment, not the one
+          // the order happened to be opened on.
+          ...deviceStamp(req),
         },
         include: { receivedBy: { select: { id: true, fullName: true } } },
       });

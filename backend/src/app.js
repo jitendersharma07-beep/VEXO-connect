@@ -24,6 +24,15 @@ import reportRoutes from './api/routes/reports.js';
 import displayRoutes from './api/routes/display.js';
 import gatewayRoutes from './api/routes/gateway.js';
 
+// LANE foundation — the organisation, device and permission surface.
+import legalEntityRoutes from './api/routes/legalEntities.js';
+import gstRegistrationRoutes from './api/routes/gstRegistrations.js';
+import brandRoutes from './api/routes/brands.js';
+import regionRoutes from './api/routes/regions.js';
+import terminalRoutes from './api/routes/terminals.js';
+import deviceRoutes from './api/routes/devices.js';
+import permissionRoutes from './api/routes/permissions.js';
+
 export const createApp = () => {
   const app = express();
 
@@ -117,6 +126,17 @@ export const createApp = () => {
   api.use('/discount-policies', discountPolicyRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
+
+  // LANE foundation — mounted after /branches so the store routes keep their
+  // place in the table; order is irrelevant to Express here, none of these
+  // paths is a prefix of another.
+  api.use('/legal-entities', legalEntityRoutes);
+  api.use('/gst-registrations', gstRegistrationRoutes);
+  api.use('/brands', brandRoutes);
+  api.use('/regions', regionRoutes);
+  api.use('/terminals', terminalRoutes);
+  api.use('/devices', deviceRoutes);
+  api.use('/permissions', permissionRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);

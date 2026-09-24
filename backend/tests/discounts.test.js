@@ -122,10 +122,10 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  d1 = await prisma.branch.create({ data: { companyId: delta.id, name: 'Delta One', code: 'D1' } });
-  d2 = await prisma.branch.create({ data: { companyId: delta.id, name: 'Delta Two', code: 'D2' } });
-  e1 = await prisma.branch.create({ data: { companyId: echo.id, name: 'Echo One', code: 'E1' } });
-  f1 = await prisma.branch.create({ data: { companyId: foxtrot.id, name: 'Foxtrot One', code: 'F1' } });
+  d1 = await prisma.branch.create({ data: { companyId: delta.id, publicId: 'VC-DI-0001', name: 'Delta One', code: 'D1' } });
+  d2 = await prisma.branch.create({ data: { companyId: delta.id, publicId: 'VC-DI-0002', name: 'Delta Two', code: 'D2' } });
+  e1 = await prisma.branch.create({ data: { companyId: echo.id, publicId: 'VC-DI-0003', name: 'Echo One', code: 'E1' } });
+  f1 = await prisma.branch.create({ data: { companyId: foxtrot.id, publicId: 'VC-DI-0004', name: 'Foxtrot One', code: 'F1' } });
 
   const mk = async (key, data) => {
     users[key] = await prisma.posUser.create({ data: { passwordHash, ...data } });

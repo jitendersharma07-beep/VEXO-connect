@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
+import { roleLabel } from '../lib/roles.js';
 
 export function FullScreenSpinner() {
   return (
@@ -55,6 +56,10 @@ const STATUS_STYLES = {
   EXPIRED: 'bg-red-100 text-red-700',
   CLOSED: 'bg-slate-200 text-slate-600',
   DISABLED: 'bg-slate-200 text-slate-600',
+  // LANE foundation — both are deliberate administrative states, so they read
+  // like CLOSED rather than like a fault. Red is for something that broke.
+  ARCHIVED: 'bg-slate-200 text-slate-600',
+  REVOKED: 'bg-slate-200 text-slate-600',
 };
 
 export function StatusBadge({ status }) {
@@ -65,14 +70,10 @@ export function DemoBadge() {
   return <span className="badge bg-pos-orange/15 text-pos-ember">DEMO</span>;
 }
 
+// LANE foundation — the label map moved to lib/permissions.jsx when the role
+// set grew to thirteen, so the badge and every role picker read one list.
 export function RoleBadge({ role }) {
-  const labels = {
-    POS_SUPER_ADMIN: 'VEXO Admin',
-    CUSTOMER_OWNER: 'Owner',
-    BRANCH_MANAGER: 'Branch Manager',
-    CASHIER: 'Cashier',
-  };
-  return <span className="badge bg-pos-royal/10 text-pos-royal">{labels[role] || role}</span>;
+  return <span className="badge bg-pos-royal/10 text-pos-royal">{roleLabel(role)}</span>;
 }
 
 export function ErrorNote({ message }) {

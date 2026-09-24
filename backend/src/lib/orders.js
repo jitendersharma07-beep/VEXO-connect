@@ -331,7 +331,16 @@ export const serializeOrderSummary = (o) => ({
 });
 
 // o must be loaded with ORDER_INCLUDE; company/branch carry name+address.
+//
+// LANE foundation, spec §3 — the seller block is read from the order's own
+// billingSnapshot whenever it has one, and from the live store record only when
+// it does not. That single `??` chain is what makes renaming a store leave its
+// issued invoices alone: the new name is in `branch`, the printed name is in the
+// snapshot, and the snapshot wins. Orders billed before the column existed fall
+// through to the live record and reprint exactly as they always did.
 export const buildReceipt = (company, branch, o) => {
+  const snap = o.billingSnapshot ?? null;
+  const store = snap?.store ?? null;
   const activeItems = o.items.filter((i) => i.status === 'ACTIVE');
   const breakup = new Map();
   for (const i of activeItems) {
@@ -354,11 +363,31 @@ export const buildReceipt = (company, branch, o) => {
     isDemo: Boolean(company.isDemo || branch.isDemo),
     company: { name: company.name },
     branch: {
-      name: branch.name,
-      code: branch.code,
-      addressLine: branch.addressLine,
-      city: branch.city,
+      name: store?.name ?? branch.name,
+      code: store?.code ?? branch.code,
+      addressLine: store?.addressLine ?? branch.addressLine,
+      city: store?.city ?? branch.city,
+      // Absent on a pre-snapshot receipt rather than filled from today's store
+      // record, so a reader can tell a real omission from a fabricated fact.
+      publicId: store?.publicId ?? branch.publicId ?? null,
+      state: store?.state ?? branch.state ?? null,
+      pincode: store?.pincode ?? branch.pincode ?? null,
     },
+    // The legal identity the bill was issued under. Null for an order billed
+    // before the snapshot existed, and null for a store with no entity mapped —
+    // never guessed from the store's current configuration.
+    seller: snap
+      ? {
+          legalName: snap.legalEntity?.legalName ?? null,
+          tradeName: snap.legalEntity?.tradeName ?? null,
+          pan: snap.legalEntity?.pan ?? null,
+          gstin: snap.gst?.gstin ?? null,
+          gstStateName: snap.gst?.stateName ?? null,
+          gstAddressLine: snap.gst?.addressLine ?? null,
+          fssaiLicenseNo: snap.fssai?.licenseNo ?? null,
+          fssaiValidUpto: snap.fssai?.validUpto ?? null,
+        }
+      : null,
     order: {
       id: o.id,
       type: o.type,
