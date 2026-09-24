@@ -68,18 +68,20 @@ profit" never appears except in the denial.
 server's. The only local arithmetic is unit rendering: paise → rupees,
 milli-paise → rupees, and milli-base-units → "0.15 L".
 
-## 2. Browser QA — 47/47 checks passed
+## 2. Browser QA — 48/48 checks passed
 
 Run: `qa/vc105-browser-qa.mjs`, headless Chrome against the running stack,
 screenshots in `qa/screens/`, machine-readable results in
 `qa/screens/results.json`.
 
 ```
-47/47 browser checks passed
+48/48 browser checks passed
 ```
 
 Every screenshot carries at least one assertion — a screenshot nobody asserted
-against is decoration.
+against is decoration. The last of the 48 asserts something about the
+screenshots themselves: that the twelve files are twelve different images. That
+check exists because they once were not (§3).
 
 | Brief's QA item | Evidence |
 |---|---|
@@ -114,7 +116,7 @@ per unit **₹18.00** — and ₹18.00 × 7 = **₹126.00**, the COGS in the tab
 | File | Shows |
 |---|---|
 | `01-owner-item-view.png` | the whole report: filters, synthetic banner, stat cards, coverage, chart, table |
-| `02-chart-and-coverage.png` | quadrant chart with thresholds, and the "cannot be placed" strip |
+| `02-chart-and-coverage.png` | coverage strip and quadrant chart, **clipped to those two panels** — see §3 |
 | `03-drilldown-latte.png` | recipe version 2, 95 % yield, ingredients, yield adjustment, cost per unit |
 | `04-drilldown-no-cost.png` | an uncosted item's drilldown refusing to invent a recipe |
 | `05-empty-period.png` | the empty-day state |
@@ -140,12 +142,26 @@ Recorded because a QA run that finds nothing usually means the QA is weak:
    the unit the recipe was written in — "0.15 L" — which is the point of a
    drilldown.
 
-And one defect in the **QA harness** rather than the app: pages in one browser
-share a cookie jar, so the manager and cashier checks were reusing the owner's
-session and would have passed for the wrong reason. Each user now gets its own
-browser context. The cashier assertion was also looking for a refusal page when
-the app's house pattern is to redirect; it now asserts the three things that
-should actually be true (off the route, no link, API 403).
+And two defects in the **QA harness** rather than the app.
+
+**Shared cookie jar.** Pages in one browser share a cookie jar, so the manager
+and cashier checks were reusing the owner's session and would have passed for
+the wrong reason. Each user now gets its own browser context. The cashier
+assertion was also looking for a refusal page when the app's house pattern is to
+redirect; it now asserts the three things that should actually be true (off the
+route, no link, API 403).
+
+**Two screenshots were one screenshot.** Found after this document was first
+written, while checking the delivery evidence file by file:
+`01-owner-item-view.png` and `02-chart-and-coverage.png` were byte-identical —
+both `fullPage` captures of a screen that nothing had changed between them, so
+the second proved nothing the first had not already proved. The checks around it
+were sound (the chart and coverage assertions read the DOM, and passed on their
+own merits); what failed was the evidence, and no check was looking at it. Shot
+02 is now clipped to the coverage strip and the chart, and the run ends by
+hashing every screenshot it captured and asserting the digests are all
+different. Verified by inverting it: with the clip removed the run goes 47/48
+and names the pair, `01-owner-item-view == 02-chart-and-coverage`.
 
 ## 4. Separation of what is proven
 

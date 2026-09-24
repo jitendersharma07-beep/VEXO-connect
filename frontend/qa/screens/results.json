@@ -1,8 +1,8 @@
 {
   "ui": "http://127.0.0.1:5387",
   "api": "http://127.0.0.1:5386",
-  "passed": 47,
-  "total": 47,
+  "passed": 48,
+  "total": 48,
   "results": [
     {
       "name": "table renders one row per menu item sold",
@@ -414,6 +414,13 @@
       "actual": 403,
       "expected": 403,
       "note": ""
+    },
+    {
+      "name": "every screenshot is a distinct image",
+      "pass": true,
+      "actual": [],
+      "expected": [],
+      "note": "12 screenshots captured"
     }
   ]
 }
