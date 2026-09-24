@@ -1,0 +1,84 @@
+{
+  "customer": {
+    "id": "cmufdws1y001p7mmuqv11d16l",
+    "name": "Anita Rao",
+    "phone": "+919876500011",
+    "email": null,
+    "note": null,
+    "archivedAt": null,
+    "addresses": [
+      {
+        "id": "cmufdws27001v7mmuong6p7wj",
+        "label": "Home",
+        "line1": "12 Church St",
+        "line2": null,
+        "landmark": "opp. bakery",
+        "city": "Bengaluru",
+        "pincode": "560001",
+        "isDefault": true,
+        "archivedAt": null
+      },
+      {
+        "id": "cmufdws2b001x7mmuvon4lpd0",
+        "label": "Old flat",
+        "line1": "4 Residency Rd",
+        "line2": null,
+        "landmark": null,
+        "city": "Bengaluru",
+        "pincode": "560025",
+        "isDefault": false,
+        "archivedAt": "2026-09-24T10:23:57.203Z"
+      }
+    ],
+    "history": [
+      {
+        "phoneOrderId": "cmufdwsxl00327mmu28f3bqsq",
+        "reference": "PH-000004",
+        "orderId": "cmufdwsx2002y7mmuw6mohvle",
+        "invoiceNumber": "CP/26-27/00001",
+        "branchId": "cmufdwrwn00037mmu6e8cua6n",
+        "branchName": "Church Street",
+        "total": 546,
+        "status": "BILLED",
+        "billedAt": "2026-09-24T10:23:58.362Z",
+        "fulfilment": "DELIVERY"
+      },
+      {
+        "phoneOrderId": "cmufdwsqb002s7mmugfhas30d",
+        "reference": "PH-000003",
+        "orderId": "cmufdwspp002o7mmun1q82nyv",
+        "invoiceNumber": null,
+        "branchId": "cmufdwrwn00037mmu6e8cua6n",
+        "branchName": "Church Street",
+        "total": 546,
+        "status": "OPEN",
+        "billedAt": null,
+        "fulfilment": "DELIVERY"
+      },
+      {
+        "phoneOrderId": "cmufdwskw002d7mmu44bc63dl",
+        "reference": "PH-000002",
+        "orderId": "cmufdwskd00297mmu22uyfdmq",
+        "invoiceNumber": null,
+        "branchId": "cmufdwrwn00037mmu6e8cua6n",
+        "branchName": "Church Street",
+        "total": 546,
+        "status": "OPEN",
+        "billedAt": null,
+        "fulfilment": "DELIVERY"
+      },
+      {
+        "phoneOrderId": "cmufdws6100237mmu9vntd1d8",
+        "reference": "PH-000001",
+        "orderId": "cmufdws5900207mmu5pofi3iw",
+        "invoiceNumber": null,
+        "branchId": "cmufdwrwv00077mmudtvool9g",
+        "branchName": "Koramangala",
+        "total": 2100,
+        "status": "OPEN",
+        "billedAt": null,
+        "fulfilment": "DELIVERY"
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "POS_IDEMPOTENCY_KEY_REUSED",
+    "message": "That submission key was already used for a different order"
+  }
+}

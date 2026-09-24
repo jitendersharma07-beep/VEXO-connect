@@ -105,6 +105,9 @@ model Company {
   devices           Device[]
   permissionRules   PermissionRule[]
   supportGrants     SupportAccessGrant[]
+  // LANE vc104-api
+  customers   Customer[]
+  phoneOrders PhoneOrder[]
 }
 
 model Branch {
@@ -177,6 +180,12 @@ model Branch {
   brandLinks      BranchBrand[]
   permissionRules PermissionRule[]
   userAssignments UserStoreAssignment[]
+  // LANE vc104-api
+  serviceAreas        BranchServiceArea[]
+  hours               BranchHours[]
+  prepCapacity        BranchPrepCapacity?
+  phoneOrdersRouted   PhoneOrder[]        @relation("PhoneOrderRouted")
+  phoneOrdersAccepted PhoneOrder[]        @relation("PhoneOrderAccepted")
 
   @@unique([companyId, code])
   // Referenced by everything that happens AT a store — terminals, devices,
@@ -252,6 +261,11 @@ model PosUser {
   devicesRevoked     Device[]             @relation("DeviceRevokedBy")
   supportGrants      SupportAccessGrant[] @relation("SupportGrantOperator")
   supportGrantsGiven SupportAccessGrant[] @relation("SupportGrantGrantedBy")
+  // LANE vc104-api
+  customersCreated    Customer[]   @relation("CustomerCreatedBy")
+  phoneOrdersOperated PhoneOrder[] @relation("PhoneOrderOperator")
+  phoneOrdersAccepted PhoneOrder[] @relation("PhoneOrderAcceptedBy")
+  phoneOrdersRejected PhoneOrder[] @relation("PhoneOrderRejectedBy")
 
   // Referenced by PermissionRule and UserStoreAssignment so a tenant's rule or
   // assignment can only name a principal of that same tenant.
@@ -625,6 +639,8 @@ model Order {
   payments Payment[]
   refunds  Refund[]
   intents  PaymentIntent[]
+  // LANE vc104-api
+  phoneOrder PhoneOrder?
 
   @@unique([companyId, invoiceNumber])
   // Lets a payment reference (orderId, branchId), which is what ties the money
@@ -1355,4 +1371,286 @@ model SupportAccessGrant {
 
   @@index([companyId, expiresAt])
   @@index([userId, expiresAt])
+}
+
+// ============================================================================
+// ==== LANE vc104-api ====
+// VC-104 Central phone-order centre (spec A§3 VC-104, "Update 5").
+//
+// The sidecar principle, and the reason nothing below touches Order's money:
+// a phone order IS an ordinary Order in the routed store from the moment it is
+// submitted. Pricing, tax, KOT, payment and refund therefore reuse the existing
+// lifecycle untouched, and recomputeOrder() in lib/orders.js stays the single
+// evaluator. Everything this module adds — who called, where it goes, when it
+// is wanted, which store accepted — hangs off PhoneOrder BESIDE that Order,
+// never inside it.
+// ============================================================================
+
+enum PhoneFulfilment {
+  PICKUP
+  DELIVERY
+}
+
+enum PhoneOrderStatus {
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+// C-6, unresolved. The GST treatment of a delivery charge turns on two facts
+// this project has not established: WHO supplies the delivery (the restaurant
+// itself, or a third party), and whether the charge is separate consideration
+// for a distinct supply or part of a composite supply of restaurant service.
+//
+// Those two answers point opposite ways, which is why neither is assumed here:
+//   - composite supply by the restaurant  -> the charge belongs INSIDE the
+//     order's tax base, at the restaurant rate
+//   - separate consideration, third-party supplier -> the charge is not the
+//     restaurant's supply at all and must never enter this invoice
+//
+// Recording the unknown as data rather than leaving it implicit in code means
+// the resolution is a backfill, not a schema change — and, because issued
+// invoices are immutable, it keeps us from issuing one we would have to correct.
+enum DeliverySupplier {
+  UNRESOLVED
+  RESTAURANT
+  THIRD_PARTY
+}
+
+enum DeliveryChargeTreatment {
+  // The temporary fallback: quoted alongside the order, never folded into
+  // Order.total, never taxed. Reversible toward either answer above.
+  UNRESOLVED_POST_TAX_FALLBACK
+  COMPOSITE_SUPPLY
+  SEPARATE_CONSIDERATION
+}
+
+model Customer {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name String
+  // One caller, one row per tenant. The unique pair below is what makes a
+  // repeat caller findable by the number they are ringing from, instead of
+  // quietly accumulating a second Anita Rao every time someone mistypes.
+  phone String
+  email String?
+  note  String?
+
+  createdById String?
+  createdBy   PosUser? @relation("CustomerCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  addresses   CustomerAddress[]
+  phoneOrders PhoneOrder[]
+
+  @@unique([companyId, phone])
+  // Composite tenant target. Children key on (id, companyId) so a child row
+  // straddling two tenants is a database impossibility, not a code review.
+  @@unique([id, companyId])
+  @@index([companyId, name])
+}
+
+model CustomerAddress {
+  id         String   @id @default(cuid())
+  companyId  String
+  customerId String
+  customer   Customer @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  label    String
+  line1    String
+  line2    String?
+  landmark String?
+  city     String
+  pincode  String
+
+  isDefault  Boolean   @default(false)
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  phoneOrders PhoneOrder[]
+
+  @@unique([id, companyId])
+  @@index([customerId])
+  @@index([companyId, pincode])
+}
+
+// Serviceability by pincode. Deliberately not geo: a radius needs coordinates
+// this product does not collect and a maps dependency it does not have, and an
+// untestable "is 2.4 km within 3 km" is worse than an explicit list the owner
+// can read. Radius/polygon can replace this behind the same API later.
+model BranchServiceArea {
+  id        String @id @default(cuid())
+  companyId String
+  branchId  String
+  branch    Branch @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  pincode        String
+  deliveryCharge Decimal  @default(0) @db.Decimal(10, 2)
+  minOrder       Decimal? @db.Decimal(10, 2)
+  active         Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([branchId, pincode])
+  @@index([companyId, pincode])
+}
+
+model BranchHours {
+  id        String @id @default(cuid())
+  companyId String
+  branchId  String
+  branch    Branch @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  // 0 = Sunday .. 6 = Saturday, in IST — the business day this product already
+  // runs on (istDateOf, UTC+05:30).
+  dayOfWeek Int
+  // Minutes from midnight IST. closesMinute may exceed 1440 for a store that
+  // trades past midnight, which is exactly why these are integers and not
+  // clock strings: 23:00-02:00 has to be expressible without a second row.
+  opensMinute  Int
+  closesMinute Int
+  closed       Boolean @default(false)
+
+  @@unique([branchId, dayOfWeek])
+  @@index([companyId])
+}
+
+// Preparation capacity as orders-per-slot. The spec names "preparation
+// capacity" without defining it; this is the narrowest reading that can be
+// enforced and tested, and it is per store because kitchens differ.
+model BranchPrepCapacity {
+  id        String @id @default(cuid())
+  companyId String
+  branchId  String
+  branch    Branch @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  slotMinutes      Int @default(15)
+  maxOrdersPerSlot Int @default(6)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Composite, not @@unique([branchId]): the relation above is defined on the
+  // (branchId, companyId) pair, and a one-to-one needs the unique to cover
+  // exactly the fields the relation uses.
+  @@unique([branchId, companyId])
+  @@index([companyId])
+}
+
+model PhoneOrder {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // What the operator reads back down the phone. Per tenant, never reused.
+  reference String
+
+  customerId String
+  customer   Customer         @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Cascade)
+  addressId  String?
+  address    CustomerAddress? @relation(fields: [addressId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  fulfilment PhoneFulfilment
+  // Explicit fulfilment time. NULL means as-soon-as-possible. The spec requires
+  // a SCHEDULED order to carry one, so the route refuses a scheduled order
+  // without it rather than inventing a default the caller never agreed to.
+  scheduledFor DateTime?
+
+  status PhoneOrderStatus @default(SUBMITTED)
+
+  routedBranchId String
+  routedBranch   Branch @relation("PhoneOrderRouted", fields: [routedBranchId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  // Written exactly once, by the winner of the accept race. Its NULL-ness is
+  // the guard the conditional UPDATE keys on, which is what makes "exactly one
+  // accepting store" a database outcome rather than an application hope.
+  acceptedBranchId String?
+  acceptedBranch   Branch?   @relation("PhoneOrderAccepted", fields: [acceptedBranchId, companyId], references: [id, companyId], onDelete: Cascade)
+  acceptedAt       DateTime?
+  acceptedById     String?
+  acceptedBy       PosUser?  @relation("PhoneOrderAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+  acceptedByName   String?
+
+  rejectedAt     DateTime?
+  rejectedById   String?
+  rejectedBy     PosUser?  @relation("PhoneOrderRejectedBy", fields: [rejectedById], references: [id], onDelete: SetNull)
+  rejectedByName String?
+  rejectReason   String?
+
+  // The real order. One per phone order, enforced by @unique: this is what
+  // makes a retried submission incapable of minting a second Order or KOT.
+  orderId String? @unique
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Operator attribution (A§3 VC-104: "with operator attribution").
+  //
+  // The NAME is the attribution and it is NOT NULL; the id is a convenience
+  // join that may go SetNull. Snapshotting follows the same reasoning as the
+  // invoice billing snapshot: attribution that depends on a mutable row being
+  // present is attribution that can be edited or lost after the fact. It also
+  // means a PosUser delete cannot be blocked by this table — which is what
+  // stops one suite's leftovers from failing every other suite's teardown.
+  operatorId   String?
+  operator     PosUser? @relation("PhoneOrderOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+  operatorName String
+  // INTEGRATION(foundation): the terminal the central desk worked from, when
+  // that desk is itself enrolled. No FK yet — foundation owns Terminal.
+  terminalId String?
+
+  // QUOTED, not billed. This never reaches Order.total or Order.taxAmount while
+  // the treatment below is UNRESOLVED — see the enum comment. recomputeOrder()
+  // remains the only thing that writes order money, and it never sees this.
+  deliveryCharge          Decimal                 @default(0) @db.Decimal(10, 2)
+  deliverySupplier        DeliverySupplier        @default(UNRESOLVED)
+  deliveryChargeTreatment DeliveryChargeTreatment @default(UNRESOLVED_POST_TAX_FALLBACK)
+  note                    String?
+
+  idempotencyKey String
+  // Fingerprint of the body this key first succeeded with. A replay carrying a
+  // DIFFERENT body is a caller bug, not a retry, and must not be answered with
+  // someone else's order.
+  requestHash String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events PhoneOrderEvent[]
+
+  @@unique([companyId, idempotencyKey])
+  @@unique([companyId, reference])
+  @@index([companyId, status])
+  @@index([companyId, routedBranchId, status])
+  @@index([customerId])
+  @@index([scheduledFor])
+}
+
+// Routing history. Separate from PosAuditLog on purpose: this is operational
+// narrative the operator screen shows back ("rejected by Indiranagar, moved to
+// Church Street"), whereas the audit log is the tamper-evident record. Both are
+// written; neither replaces the other.
+model PhoneOrderEvent {
+  id           String     @id @default(cuid())
+  companyId    String
+  phoneOrderId String
+  phoneOrder   PhoneOrder @relation(fields: [phoneOrderId], references: [id], onDelete: Cascade)
+
+  at      DateTime @default(now())
+  action  String
+  actorId String?
+
+  fromBranchId String?
+  toBranchId   String?
+  reason       String?
+  meta         Json?
+
+  @@index([phoneOrderId, at])
+  @@index([companyId, at])
 }

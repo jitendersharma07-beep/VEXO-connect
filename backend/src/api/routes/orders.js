@@ -169,7 +169,10 @@ const discountAudit = (policy, before, after, approver, reason) => ({
 
 // Snapshots product/variant/tax at add time — later catalog edits never touch
 // an existing order line.
-const resolveCatalogLine = async (companyId, { productId, variantId, qty }) => {
+// Exported for LANE vc104-api: the phone-order centre snapshots catalog lines
+// the same way the till does. Exporting beats copying - a second copy would
+// drift the day this gains modifiers, and both paths must price identically.
+export const resolveCatalogLine = async (companyId, { productId, variantId, qty }) => {
   const product = await prisma.product.findFirst({
     where: { id: productId, companyId, status: 'ACTIVE' },
     include: { taxRate: true, variants: true },

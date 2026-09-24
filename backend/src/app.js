@@ -32,6 +32,8 @@ import regionRoutes from './api/routes/regions.js';
 import terminalRoutes from './api/routes/terminals.js';
 import deviceRoutes from './api/routes/devices.js';
 import permissionRoutes from './api/routes/permissions.js';
+// LANE vc104-api
+import phoneOrderRoutes from './api/routes/phoneOrders.js';
 
 export const createApp = () => {
   const app = express();
@@ -137,6 +139,9 @@ export const createApp = () => {
   api.use('/terminals', terminalRoutes);
   api.use('/devices', deviceRoutes);
   api.use('/permissions', permissionRoutes);
+
+  // LANE vc104-api
+  api.use('/phone-orders', phoneOrderRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);
