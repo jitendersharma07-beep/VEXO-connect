@@ -36,14 +36,21 @@ code changes to verified areas; documentation only after the freeze.
 | 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`), and a saved day close reported as "Could not file the closing" (`114ffc9`; also live in deployed v1.0.1 since `2c3acb1`) | RC-verified; `114ffc9` found and re-checked by Window 1's browser run on an RC-1-built stack | ✅ fixed, each moved a check FAIL → PASS |
 | 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser evidence ACCEPTED by the owner** 2026-09-23 (atc-noc dev stack, not a lab run, not full RC browser acceptance); one display per counter |
 | 5 | Physical receipt / KOT print | Browser-verified only | ⏳ **PENDING** — `docs/PRINTER-UAT-RUNBOOK.md`, 2026-09-24 |
-| 6 | Off-host encrypted backup | One copy exists but is **not compliant** (Window 2's record @ `9ff94ac`) — see §Off-host backup | ⛔ **Not done** — re-send after the owner's new key; remediation stays with Window 2 and the owner |
+| 6 | Off-host encrypted backup | Scheduling and restore **re-measured 2026-09-24** — see §Off-host backup, which supersedes the `9ff94ac` bullets | 🟨 **Partly done** — installed, running, restore proven 16/16; **decryption still unproven** and destination-side deletion protection not verified |
 | 7 | Client onboarding (menu, stores, staff) | — | ⛔ **Blocked** — client data pack not supplied (B2) |
 | 8 | Reconcile against Product Master Specification v1.1 | — | ⛔ **Blocked** — document not held by anyone (B1) |
 | 9 | RC-1 in production | — | ⏸ **Owner decision**, then the deployment owner (B3) |
+| 10 | **Cloud readiness** — public HTTPS, real platform admin, email recovery, isolation, flow, backup restore | Staging-verified on `atc-noc` against `x/cloud-readiness` @ `1c7e8e6` — **a different candidate from this sheet's `114ffc9`** | ⛔ **NOT READY** — 3 blockers: no approved public staging hostname; no email password recovery in the build; archive decryption unproven. See `docs/CLOUD-READINESS-VERIFICATION.md` |
 
-**Release is GO at the RC tier** for rows 1–4. Rows 5–9 do not block the
+**Release is GO at the RC tier** for rows 1–4. Rows 5–10 do not block the
 candidate; they block specific claims — printing on paper, a backup that
-survives the host, real client data, and anything on production.
+survives the host, real client data, anything on production, and reaching the
+product over the internet.
+
+Row 10 is scored against a **different tree** from the rest of this sheet and
+is not comparable to rows 1–4. It is recorded here because cloud readiness is a
+release gate the sheet otherwise has no row for, not because the two candidates
+have been reconciled — they have not.
 
 ## VC-101 evidence — with provenance
 
@@ -177,6 +184,58 @@ supersedes the bullets above, which reflect `33ee8c2`:
 A report by session `7565dff8`
 (`vc101-browser-evidence-atc-noc-dev/LAB-BROWSER-EVIDENCE.md` §5) calls that copy "DONE". Window 2's own record does not, and Window 2's
 record governs. Status and remediation stay with Window 2 and the owner.
+
+**Re-measured on `atc-noc` 2026-09-24 by the cloud-readiness verification.**
+This supersedes the `9ff94ac` bullets above on the points it names, and is
+measurement on this host rather than a reading of another session's record.
+Full working: `docs/CLOUD-READINESS-VERIFICATION.md` §Backup and recovery.
+
+- **Scheduling: INSTALLED, enabled, active, and succeeding** — the "prepared,
+  NOT installed" bullet is obsolete. Nightly with a randomized delay and
+  `Persistent=true`; the last run exited 0 on both steps, 21 hours before the
+  check. Nothing was reinstalled and no archive, key or revocation certificate
+  was deleted. Local retention holds 11 archives.
+- **Restore: DONE FOR REAL — 16/16.** A real production archive restored into a
+  new isolated database and reconciled against *that archive's manifest*, not
+  against live: 23/23 table counts, payment total to the paisa, migration state
+  with none half-applied, staff password hashes, foreign keys, indexes, no
+  orphaned payment. Two controls carry the weight: a truncated archive exits 1
+  and leaves **0 tables** (`--exit-on-error`, without which `pg_restore` logs
+  and exits 0), and the retained archive is byte-identical afterwards. So "not
+  done for real" no longer holds; it needed no Mac key, because restore and
+  decryption are separate questions.
+- **Key custody: half the `9ff94ac` bullet is wrong.** The private half *is* on
+  this host — that much stands, and it contradicts the shipping tool's own
+  comment that "this host cannot do it". But it is **not unprotected**: it is
+  passphrase-protected, proven without asking for the passphrase by offering an
+  empty one and having it refused. One factor where the design claims two, not
+  an open door.
+- **Decryption: still UNPROVEN, and marked BLOCKED rather than inferred.** No
+  encrypted archive exists on this host to open (the staging directory is
+  cleared after each successful ship, correctly), and the encryption mechanism
+  round-trips only under a *rehearsal* key — which proves the mechanism, not
+  that archives encrypted to the owner's key can be opened. One reviewed,
+  guarded owner-run command closes it; it is written, checked, and prints a
+  single `RESULT:` line.
+- **Off-site separation: UNCONFIRMED — confirmed still unconfirmed.** The
+  destination is the lab box, so the only off-site copy of the POS production
+  database lands on the estate's virtualization lab, one host serving as both
+  lab and disaster-recovery target. Not verified from the destination side:
+  this task was instructed not to use that host, so destination facts were read
+  from local configuration and the sender's own receipts only.
+- **Deletion protection: NOT VERIFIED, and unlikely.** The sender declines to
+  prune, but that is voluntary, not enforced. The job authenticates with the
+  operator's **general-purpose SSH key** while a dedicated key pair for exactly
+  this job sits unused beside it — so anything that can SSH as the operator can
+  delete the off-site archives. The control that would make retention
+  enforceable is a `command="…",restrict` entry at the destination, which is
+  out of scope here and is reported rather than made.
+- **"The backups are encrypted" is true only of the off-site copy.** The
+  retained local archives are plaintext dumps at mode 600 — reasonable, since
+  the working copy has to be usable, but stated so the sentence is not read
+  more broadly than it is true.
+- **Root disk: still URGENT.** Re-read 2026-09-24: **88% of 98 GB** (12 GB
+  free) — unchanged from the 2026-09-23 reading, so the P1 stands.
 
 ## Physical printer — Window 3's result
 
