@@ -40,7 +40,7 @@ code changes to verified areas; documentation only after the freeze.
 | 7 | Client onboarding (menu, stores, staff) | — | ⛔ **Blocked** — client data pack not supplied (B2) |
 | 8 | Reconcile against Product Master Specification v1.1 | — | ⛔ **Blocked** — document not held by anyone (B1) |
 | 9 | RC-1 in production | — | ⏸ **Owner decision**, then the deployment owner (B3) |
-| 10 | **Cloud readiness** — public HTTPS, real platform admin, email recovery, isolation, flow, backup restore | Staging-verified on `atc-noc` against `x/cloud-readiness` @ `98c11a2` — **a different candidate from this sheet's `114ffc9`**. Superseded 2026-09-24T19:20Z; the `1c7e8e6` reading is kept in §Cloud readiness below | ⛔ **NOT READY** — 3 blockers: no approved public staging hostname; **no mail provider configured anywhere in the estate** (the recovery feature itself now passes); archive decryption unproven. See `docs/CLOUD-READINESS-VERIFICATION.md` |
+| 10 | **Cloud readiness** — public HTTPS, real platform admin, email recovery, isolation, flow, backup restore | Staging-verified on `atc-noc` against `x/cloud-readiness` @ `5550e1b` — **a different candidate from this sheet's `114ffc9`**. Superseded 2026-09-24T19:20Z; the `1c7e8e6` reading is kept in §Cloud readiness below | ⛔ **NOT READY** — 3 blockers: no approved public staging hostname; **no mail provider configured anywhere in the estate** (the recovery feature itself now passes); archive decryption unproven. See `docs/CLOUD-READINESS-VERIFICATION.md` |
 
 **Release is GO at the RC tier** for rows 1–4. Rows 5–10 do not block the
 candidate; they block specific claims — printing on paper, a backup that
@@ -60,12 +60,13 @@ reading stays in `docs/CLOUD-READINESS-VERIFICATION.md` because the verdict
 moved, not because it was wrong.
 
 The owner directed `x/accounts` to be merged. It was — `x/cloud-readiness` is
-now `98c11a2`, which is `8482de9` (everything rows above describe) merged with
-`x/accounts` @ `6ceab72`. The lane did not merge cleanly; four files conflicted
-and were resolved by hand.
+now `5550e1b`: `8482de9` (everything rows above describe) merged with
+`x/accounts` @ `6ceab72`, then with its next commit `650be16`. The first merge
+did **not** go cleanly; four files conflicted and were resolved by hand. The
+second was clean.
 
 - **Email password recovery: the software half is PASS**, staging-verified.
-  Regression suite on the merged tree **774/774 in 28 files** (up from 628/22),
+  Regression suite on the merged tree **785/785 in 29 files** (up from 628/22),
   and the lane's own browser harness `deploy/accounts-journey.mjs` is **47/47,
   0 failures** — headless Chromium against the real built bundle
   (`index-TZS0KpMt.js`) over HTTP, reading every recovery code out of a real
@@ -86,12 +87,17 @@ and were resolved by hand.
   byte-identical to its origin, and for the 17 models both lanes touched no
   semantic line dropped from either side. This is the control on the hand
   resolutions; the 774-test run is the second.
-- **One regression this merge introduces:** `deploy/e2e-workflow.mjs`, the till
-  money-path harness, is now **blocked**. It seeded its staff from the temporary
-  password `POST /api/users` used to return, and by design that password no
-  longer exists anywhere. The script refuses up front with the recipe for wiring
-  a mail sink rather than failing deep in the money path, so this is loud, not
-  silent. Row 1's evidence did not run through that harness and is unaffected.
+- **One regression this merge introduced — fixed upstream and taken.**
+  `deploy/e2e-workflow.mjs`, the till money-path harness, was blocked: it seeded
+  its staff from the temporary password `POST /api/users` used to return, and by
+  design that password no longer exists anywhere. The accounts lane fixed it
+  seven minutes later (`650be16`) by giving the harness a real local mail drop,
+  so it now seats staff through the same emailed-code path a real deployment
+  uses. That commit is merged here at **`5550e1b`**, suite re-run **785/785 in
+  29 files**. It still **cannot be run on `atc-noc`**: `deploy/e2e-isolated.sh`
+  refuses on this hostname because production POS runs here, and that guard was
+  not bypassed. Row 1's evidence did not run through that harness and is
+  unaffected.
 
 **Tier note:** this is staging-verified on `atc-noc` against a merged
 cloud-readiness tree. It is **not** RC-verified — none of it ran on the lab or

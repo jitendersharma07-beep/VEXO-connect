@@ -298,6 +298,12 @@ Tested build: `x/cloud-readiness` @ **`98c11a2`** = `8482de9` + `x/accounts`
 Migrations: 22 applied. Full evidence: `evidence/04-email-password-recovery.md`,
 section "After the merge".
 
+The lane then advanced once more and **`650be16` is also merged here**, at
+**`5550e1b`** — a clean merge, no conflicts, suite re-run green. It changes no
+product code; it fixes the till harness this merge broke, described at the foot
+of this section. The browser journey below was run against `98c11a2` and has not
+been re-run against `5550e1b`; the suite has.
+
 ### The merge was not trivial, and that is the finding
 
 `x/accounts` was ~7 hours behind `main` and **four files conflicted**. Two of
@@ -320,7 +326,7 @@ models both lanes touched.
 
 | Evidence | Result |
 |---|---|
-| Regression suite, merged tree | **774/774 pass, 28/28 files, 0 skipped** (was 628/22) |
+| Regression suite, merged tree | **774/774 pass, 28/28 files, 0 skipped** at `98c11a2` (was 628/22); **785/785 in 29 files** at `5550e1b` |
 | `deploy/accounts-journey.mjs` — real bundle, headless Chromium, real SMTP conversation | **47/47 PASS, 0 FAIL** |
 
 The journey is the load-bearing evidence: it proves the *screens* are wired to
@@ -367,14 +373,29 @@ already being served by the edge while the backend still ran pre-merge code, and
 that same endpoint answered `404`. Worth naming because a rebuilt frontend does
 not restart the API, and the mismatch is invisible until a route is probed.
 
-### One regression this merge introduces
+### One regression this merge introduced — since fixed upstream and taken
 
-`deploy/e2e-workflow.mjs`, the till money-path harness, **is now blocked.** It
-seeded its staff from the temporary password `POST /api/users` used to return,
-and by design that password no longer exists. The script refuses with the recipe
-for wiring a sink rather than failing deep in the money path — loud, not silent.
-Section 6's evidence did not run through it and is unaffected, but anyone
-re-running it on the merged tree will hit this.
+`deploy/e2e-workflow.mjs`, the till money-path harness, was blocked by the
+merge. It seeded its staff from the temporary password `POST /api/users` used to
+return, and by design that password no longer exists. The script refused with
+the recipe for wiring a sink rather than failing deep in the money path — loud,
+not silent.
+
+The accounts lane fixed it seven minutes later (`650be16`, "Unblock the till
+harness by giving its stack a mailbox, not a back door"): the harness now gets a
+real local mail drop and seats its staff through the same emailed-code path a
+real deployment uses, rather than through a bypass. That commit is **merged
+here** and the suite re-run as its control — **785/785 in 29 files**, up from
+774/28, the increase being the new `maildrop.test.js`.
+
+**It still cannot be run on this host, for an unrelated and correct reason.**
+`deploy/e2e-isolated.sh:19` refuses when `hostname` is `atc-noc`, because this
+host runs production POS — confirmed, `pos-prod-frontend-1`, `pos-prod-backend-1`
+and `pos-prod-postgres-1` are up here. The guard was not bypassed and the script
+was not edited. The harness targets the `atc-pos-dev-db` Postgres on :5439,
+which is a different product's dev stack from this lane's :5440. So the money
+path stays evidenced by section 6's own run against `1c7e8e6`, and re-running it
+through this harness needs a host that is not the production host.
 
 ### Revised blockers
 
