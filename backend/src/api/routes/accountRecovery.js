@@ -6,15 +6,15 @@ import { badRequest, asyncHandler, AppError } from '../../lib/errors.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { audit, auditRequired, clientIp } from '../../lib/audit.js';
 import { mailEnabled } from '../../config/env.js';
-import { sendMail, sendMailBestEffort } from '../../lib/mail/mailer.js';
+import { sendMailBestEffort } from '../../lib/mail/mailer.js';
 import { resetCodeEmail, passwordChangedEmail } from '../../lib/mail/templates.js';
 import {
   CHALLENGE_POLICY,
   CHALLENGE_RESULT,
   ChallengeThrottled,
   consumeAttempt,
-  createChallenge,
   emailField,
+  issuePasswordCode,
   issueResetAuthorization,
   passwordField,
   revokeAllSessions,
@@ -41,7 +41,7 @@ const ACCEPTED = {
   ok: true,
   message: 'If that email is registered, a verification code is on its way.',
   expiresInMinutes: CHALLENGE_POLICY.ttlMinutes,
-  codeLength: 8,
+  codeLength: CHALLENGE_POLICY.codeLength,
 };
 
 const requestSchema = z.object({ email: emailField });
@@ -82,30 +82,19 @@ const findRecoverable = async (email) => {
   return recoverable(user) ? user : null;
 };
 
-// Mints a challenge and mails it. The plaintext code travels from
-// createChallenge to the mail body and nowhere else — it is not returned, not
-// logged, and not stored in the outbox row.
+// Mints a challenge and mails it. The minting, the mail and the guarantee that
+// the plaintext code reaches nothing but the message body are all
+// issuePasswordCode's — shared with the two administrator-initiated paths in
+// routes/users.js, so a code issued here and a code issued there are the same
+// artifact and are verified by the same steps below.
+//
+// What stays here is the audit action, because "somebody asked to recover
+// their own account" is a different event from "an administrator cut a
+// credential", and the trail is where that difference has to survive.
 const issueCode = async (req, user) => {
-  const { challenge, code } = await prisma.$transaction((tx) =>
-    createChallenge(tx, {
-      userId: user.id,
-      purpose: 'PASSWORD_RESET',
-      sentTo: user.email,
-      ip: clientIp(req),
-    }),
-  );
-
-  await sendMail({
-    to: user.email,
+  const challenge = await issuePasswordCode(req, user, {
     template: 'password-reset-code',
-    message: resetCodeEmail({
-      code,
-      ttlMinutes: CHALLENGE_POLICY.ttlMinutes,
-      maxAttempts: CHALLENGE_POLICY.maxAttempts,
-    }),
-    companyId: user.companyId,
-    userId: user.id,
-    meta: { challengeId: challenge.id },
+    build: ({ code, ttlMinutes, maxAttempts }) => resetCodeEmail({ code, ttlMinutes, maxAttempts }),
   });
 
   await audit(req, {

@@ -4,7 +4,9 @@ import { env } from '../config/env.js';
 import { prisma } from './prisma.js';
 import { hashSecret } from './crypto.js';
 import { clientIp } from './audit.js';
+import { sendMail } from './mail/mailer.js';
 import {
+  CODE_LENGTH,
   CODE_MAX_ATTEMPTS,
   CODE_TTL_MINUTES,
   MAX_CHALLENGES_PER_HOUR,
@@ -80,6 +82,7 @@ export const CHALLENGE_POLICY = {
   maxAttempts: CODE_MAX_ATTEMPTS,
   resendCooldownSeconds: RESEND_COOLDOWN_SECONDS,
   maxPerHour: MAX_CHALLENGES_PER_HOUR,
+  codeLength: CODE_LENGTH,
 };
 
 export class ChallengeThrottled extends Error {
@@ -157,6 +160,52 @@ export const createChallenge = async (
     },
   });
   return { challenge, code };
+};
+
+// Mints a PASSWORD_RESET challenge and mails the code.
+//
+// ONE definition, because three callers hand out the same artifact: somebody
+// recovering their own account, an administrator resetting somebody else's
+// password, and the creation of an account that has no password yet. All three
+// end at the same /forgot-password code box, so all three must agree on the
+// expiry, the attempt ceiling and the purpose the verify step looks for. A
+// second copy is how one of them drifts into minting a code nothing accepts.
+//
+// `build` receives the plaintext code and returns a message. Passing a builder
+// rather than returning the code is the point: the code exists in
+// createChallenge's return value and in the message body, and never enters the
+// caller's scope, so no caller can accidentally put it in a response, a log
+// line or an audit row.
+//
+// Auditing is the caller's, not this function's — "a colleague was hired",
+// "an administrator cut a credential" and "somebody asked to recover" are
+// three different events, and collapsing them into one action would lose the
+// distinction the trail exists to keep. The challenge is returned so each
+// caller can name it in its own row.
+export const issuePasswordCode = async (req, user, { template, build, meta = {} }) => {
+  const { challenge, code } = await prisma.$transaction((tx) =>
+    createChallenge(tx, {
+      userId: user.id,
+      purpose: 'PASSWORD_RESET',
+      sentTo: user.email,
+      ip: clientIp(req),
+    }),
+  );
+
+  await sendMail({
+    to: user.email,
+    template,
+    message: build({
+      code,
+      ttlMinutes: CHALLENGE_POLICY.ttlMinutes,
+      maxAttempts: CHALLENGE_POLICY.maxAttempts,
+    }),
+    companyId: user.companyId,
+    userId: user.id,
+    meta: { challengeId: challenge.id, ...meta },
+  });
+
+  return challenge;
 };
 
 export const CHALLENGE_RESULT = {

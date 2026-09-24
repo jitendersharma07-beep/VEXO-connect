@@ -2,12 +2,17 @@
 //
 // Staff accounts that the new colleague creates for themselves.
 //
-// The older POST /users mints a temporary password and hands it back to the
-// creator, which means the account's first credential is known to somebody
-// other than its owner and travels through whatever the creator does next.
-// An invitation replaces that: the tenant names an email, a role and where it
-// applies, and the person on the other end proves they hold the mailbox and
-// chooses their own password. Nothing in this file ever knows that password.
+// The tenant names an email, a role and where it applies; the person on the
+// other end proves they hold the mailbox and chooses their own password.
+// Nothing in this file ever knows that password.
+//
+// The difference from POST /users, which also creates staff without handing
+// anyone a credential, is WHEN the account exists. An invitation creates no
+// user row until it is accepted, so a mistyped address lapses into nothing in
+// a week; a direct create puts the row in place immediately and mails the
+// person a code to set their password. Invitations are also revocable and
+// resendable, which is why this is the path the Companies screen uses to seat
+// an owner into a brand-new tenant.
 //
 // Who may invite whom is NOT decided here — it is the same reach rule that
 // governs direct creation, imported from lib/userAuthority.js so the two

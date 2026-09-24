@@ -28,7 +28,8 @@ export const verifierMatches = (value, storedVerifier) => {
 
 // Cryptographically random, uniformly distributed 8-digit code. randomInt is
 // rejection-sampled by node, so no modulo bias.
-export const newEmailCode = () => String(randomInt(0, 100000000)).padStart(8, '0');
+export const CODE_LENGTH = 8;
+export const newEmailCode = () => String(randomInt(0, 100000000)).padStart(CODE_LENGTH, '0');
 
 // Link/authorization token: URL-safe, 256-bit.
 export const newOpaqueToken = () => randomBytes(32).toString('base64url');

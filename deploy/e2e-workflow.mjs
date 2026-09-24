@@ -105,42 +105,66 @@ const sku = (s) => {
   return p.id;
 };
 
+// LANE accounts — THIS HARNESS NEEDS A MAIL-ENABLED STACK, AND SAYS SO.
+//
+// It used to create its two Cyber Hub staff through POST /api/users, read the
+// temporary password out of the response, sign in with it and change it. There
+// is no longer a password in that response: the route creates the account with
+// a hash no string satisfies and emails the PERSON an 8-digit code, so the only
+// way to a first session is the recipient's mailbox. That is the point of the
+// change, and a harness must not be given a back door around it — a back door
+// that exists for tests exists in production.
+//
+// So the accounts section below no longer tests a temporary-password dance that
+// the product does not do. What it must become is a code redemption, and that
+// needs a mailbox this stack does not yet have: deploy/e2e-isolated.sh brings up
+// a database and a backend with no SMTP at all, which is why the create call
+// itself now answers 503 POS_MAIL_NOT_CONFIGURED.
+//
+// Refusing here, by name, beats dying forty lines later inside the money path
+// with an error about a missing token. The money-path checks are unaffected by
+// the accounts work and are worth keeping runnable; wiring a sink into
+// e2e-isolated.sh (backend/scripts/lib/smtpSink.js, as deploy/accounts-journey.mjs
+// and the unit suite both do) is what unblocks them.
 const createStaff = async (role, tag, branchId) => {
   const email = `e2e.${tag}.${RUN}@atcpos.example`;
   const body = must(
     await api(owner.token, 'POST', '/users', { email, fullName: `E2E ${tag}`, role, branchId }),
     `create ${tag}`,
   );
-  return { email, temp: body.tempPassword, id: body.user.id };
+  // `passwordSetup` describes the delivery — sent, to whom, for how long. It
+  // carries no code, which is why it is safe to hold and useless for signing in.
+  return { email, id: body.user.id, setup: body.passwordSetup };
 };
+
+// The one step this process cannot take yet. Both Cyber Hub sessions are
+// load-bearing for the branch-isolation and approval checks below, so there is
+// no useful subset to run without them — hence a refusal with the recipe rather
+// than a skip that would quietly shrink what the harness proves.
+const seatByEmailedCode = async () =>
+  refuse(
+    'staff accounts are seated by emailed code, and this stack has no mailbox to read.\n' +
+      '          deploy/e2e-isolated.sh brings up a database and a backend with no SMTP, so\n' +
+      '          POST /api/users answers 503 POS_MAIL_NOT_CONFIGURED; configure mail and it\n' +
+      '          answers 201 and sends the code, which this process still cannot read.\n' +
+      '          TO UNBLOCK: run backend/scripts/lib/smtpSink.js beside the backend, point\n' +
+      '          SMTP_HOST/SMTP_PORT at it with SMTP_SECURITY=none and a MAIL_FROM, give this\n' +
+      '          script a way to read captured messages, then finish each account with\n' +
+      '          POST /auth/forgot-password/verify and /reset using the 8-digit code —\n' +
+      '          the same two calls deploy/accounts-journey.mjs drives through a browser.',
+  );
+
 const chCashAcct = await createStaff('CASHIER', 'cashier-ch', CH.id);
 const chMgrAcct = await createStaff('BRANCH_MANAGER', 'manager-ch', CH.id);
 
 // --- 1. accounts -------------------------------------------------------------
 
-const chCashTemp = await login(chCashAcct.email, chCashAcct.temp);
-check('AUTH-1', 'accounts', 'a new staff account must change its temporary password',
-  chCashTemp.user.mustChangePassword === true);
+check('AUTH-1', 'accounts', 'creating a staff account hands its creator no credential',
+  chCashAcct.setup?.sent === true && chCashAcct.setup?.sentTo === chCashAcct.email);
 
-const early = await api(chCashTemp.token, 'POST', '/orders', {
-  type: 'TAKEAWAY',
-  items: [{ productId: sku('CHA-01'), qty: 1 }],
-});
-if (early.status === 201) {
-  observe('OBS-1', 'The first-login password change is enforced by the browser only',
-    `POST /orders with the unchanged temporary password → HTTP 201; the API accepts work before the change`);
-}
-
-const changePassword = async (acct) => {
-  const s = await login(acct.email, acct.temp);
-  const pw = newPassword();
-  must(await api(s.token, 'POST', '/auth/change-password', { currentPassword: acct.temp, newPassword: pw }),
-    `change password ${acct.email}`);
-  return login(acct.email, pw);
-};
-const chCash = await changePassword(chCashAcct);
-const chMgr = await changePassword(chMgrAcct);
-check('AUTH-2', 'accounts', 'after the change the account signs in without the flag',
+const chCash = await seatByEmailedCode(chCashAcct);
+const chMgr = await seatByEmailedCode(chMgrAcct);
+check('AUTH-2', 'accounts', 'a seated account signs in with the password its owner chose',
   chCash.user.mustChangePassword === false && chMgr.user.mustChangePassword === false);
 
 // --- 2. sale + deny-by-default ----------------------------------------------

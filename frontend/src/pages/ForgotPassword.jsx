@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { CheckCircle2, MailCheck, ShieldAlert } from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
 import PublicShell from '../components/PublicShell.jsx';
 import { ErrorNote } from '../components/ui.jsx';
+import { digitsPhrase } from '../lib/pos.js';
 
 // Password recovery, in the three steps the API actually has:
 //
@@ -32,8 +33,18 @@ const useCountdown = () => {
 
 export default function ForgotPassword() {
   const navigate = useNavigate();
-  const [step, setStep] = useState('request'); // request | code | password | done
-  const [email, setEmail] = useState('');
+  // Arriving from an email that ALREADY carries a code — the one an
+  // administrator sends when they create an account or reset a password.
+  //
+  // Those people must not be dropped on step one. Asking for a code they are
+  // holding mints a second one and supersedes the first, or, inside the resend
+  // cooldown, refuses and tells them to wait — either way the code in front of
+  // them stops working for a reason the screen never explains. Only `step` and
+  // `email` come from the URL; the code itself is typed, never linked.
+  const [params] = useSearchParams();
+  const sentAlready = params.get('step') === 'code' && Boolean(params.get('email'));
+  const [step, setStep] = useState(sentAlready ? 'code' : 'request'); // request | code | password | done
+  const [email, setEmail] = useState(params.get('email') ?? '');
   const [code, setCode] = useState('');
   const [resetToken, setResetToken] = useState('');
   const [policy, setPolicy] = useState({ expiresInMinutes: 10, codeLength: 8 });
@@ -180,12 +191,27 @@ export default function ForgotPassword() {
       <PublicShell title="Enter your verification code" subtitle={email}>
         {/* Worded so it says exactly what the backend's answer means. It is
             NOT a confirmation that the address is registered, and it must not
-            read like one. */}
+            read like one.
+
+            The link case is different and may be plainer: that code was sent
+            because somebody who is already signed in asked for it, so there is
+            no address to give away — the person reading it is holding the mail. */}
         <div className="mb-5 flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50 p-3">
           <MailCheck className="mt-0.5 h-4 w-4 shrink-0 text-pos-royal" />
           <p className="text-xs leading-relaxed text-slate-600">
-            If that address belongs to an active account, an {policy.codeLength}-digit code has been
-            sent to it. It is valid for {policy.expiresInMinutes} minutes.
+            {sentAlready ? (
+              <>
+                Enter the {policy.codeLength}-digit code from the email just sent to this address.
+                It is valid for {policy.expiresInMinutes} minutes from when it was sent.
+                {/* "the …-digit code" needs no article, so this branch is safe
+                    to interpolate directly; the one below is not. */}
+              </>
+            ) : (
+              <>
+                If that address belongs to an active account, {digitsPhrase(policy.codeLength)} code
+                has been sent to it. It is valid for {policy.expiresInMinutes} minutes.
+              </>
+            )}
           </p>
         </div>
         <form onSubmit={verify} className="space-y-4">

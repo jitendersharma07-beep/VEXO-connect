@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { roleLabel } from '../lib/roles.js';
+import { digitsPhrase } from '../lib/pos.js';
 
 export function FullScreenSpinner() {
   return (
@@ -170,19 +171,45 @@ export function ReasonModal({ open, title, hint, busyLabel = 'Confirm', onSubmit
   );
 }
 
-export function TempPasswordReveal({ credential }) {
-  if (!credential) return null;
-  return (
-    <div className="rounded-lg border border-pos-orange/40 bg-pos-orange/10 p-4">
-      <div className="text-xs font-bold uppercase tracking-wide text-pos-ember">
-        Temporary password — shown only once
+// What an administrator sees after creating an account or resetting a
+// password: confirmation that a code is on its way to the person, and never a
+// credential.
+//
+// This replaced a TempPasswordReveal panel that printed the new password on
+// screen for the creator to "share securely" — which meant every staff
+// account began life with a credential known to two people and travelling by
+// whatever channel came to hand, and put a password on a screen that gets
+// screenshotted. Nothing to reveal is the point; there is no plaintext
+// anywhere to put here.
+export function CodeSentNote({ outcome }) {
+  if (!outcome) return null;
+  const { sent, sentTo, expiresInMinutes, codeLength } = outcome;
+  return sent ? (
+    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+      <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">Code sent</div>
+      <div className="mt-2 text-sm text-emerald-900">
+        {digitsPhrase(codeLength, { capital: true })} code is on its way to{' '}
+        <span className="font-semibold">{sentTo}</span>.
+        The link in that email takes them straight to the box they type it into.
       </div>
-      <div className="mt-2 font-mono text-sm text-pos-ink">
-        <div>{credential.email}</div>
-        <div className="mt-1 select-all text-base font-bold">{credential.tempPassword}</div>
+      <div className="mt-2 text-xs text-emerald-800">
+        It is valid for {expiresInMinutes} minutes. They choose their own password — nobody else,
+        here or at VEXO Connect, ever sees it. If it expires, use this button again.
       </div>
-      <div className="mt-2 text-xs text-slate-600">
-        Share it securely. The user must change it at first sign-in; it is not stored anywhere else.
+    </div>
+  ) : (
+    <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+      <div className="text-xs font-bold uppercase tracking-wide text-amber-800">
+        Email not delivered
+      </div>
+      <div className="mt-2 text-sm text-amber-900">
+        The account is in place, but the code could not be sent to{' '}
+        <span className="font-semibold">{sentTo}</span>
+        {outcome.reason === 'throttled' ? ' — one was sent very recently.' : '.'}
+      </div>
+      <div className="mt-2 text-xs text-amber-800">
+        They can get in themselves with “Forgot password?” on the sign-in page, or you can try
+        again in a minute.
       </div>
     </div>
   );

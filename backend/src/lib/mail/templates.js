@@ -123,6 +123,68 @@ export const resetCodeEmail = ({ code, ttlMinutes, maxAttempts }) => ({
   ),
 });
 
+// The link that opens the recovery page ALREADY ON the code step, with the
+// address filled in.
+//
+// Without it the person would start "Forgot password?" from the top, and step
+// one mints a SECOND code that supersedes the one they are holding — or, if
+// they click within the resend cooldown, refuses to mint anything and tells
+// them to wait. Either way the code in their hand stops working for a reason
+// they cannot see. The address is not a secret from the mailbox it was sent
+// to, and no code is in the URL.
+const codeEntryLink = (email) => appLink(`/forgot-password?step=code&email=${encodeURIComponent(email)}`);
+
+// Sent when an administrator creates an account for somebody, and when one
+// resets somebody else's password. Both used to hand the administrator a
+// temporary password to pass along; both now hand the PERSON a code instead,
+// so the only credential the account ever has is one they chose themselves.
+export const staffPasswordCodeEmail = ({
+  code,
+  ttlMinutes,
+  maxAttempts,
+  email,
+  companyName,
+  byName,
+  isNewAccount,
+}) => {
+  const where = companyName ? `${companyName} on ${env.APP_NAME}` : env.APP_NAME;
+  const by = byName ? ` by ${byName}` : '';
+  const url = codeEntryLink(email);
+  const opening = isNewAccount
+    ? `An account has been created for you on ${where}${by}. Choose your own password to sign in for the first time.`
+    : `Your password for ${where} was reset${by}. Your previous password no longer works and you have been signed out everywhere.`;
+  const closing =
+    `No password is ever sent by email, and nobody at ${env.APP_NAME} or at your company can see the one you choose. ` +
+    'Never share this code.';
+  return {
+    subject: isNewAccount
+      ? `Set your password for ${env.APP_NAME}`
+      : `Your ${env.APP_NAME} password was reset`,
+    text: [
+      opening,
+      '',
+      'Open this page and enter the code below:',
+      url,
+      '',
+      `    ${code}`,
+      '',
+      `The code expires in ${ttlMinutes} minutes and allows ${maxAttempts} attempts.`,
+      '',
+      closing,
+    ].join('\n'),
+    html: layout(isNewAccount ? 'Set your password' : 'Your password was reset', [
+      // Escaped: companyName and byName are typed by a customer, and this is
+      // the one template whose body carries text from one.
+      para(esc(opening)),
+      button(url, isNewAccount ? 'Set my password' : 'Choose a new password'),
+      para('Enter this code on that page:'),
+      codeBlock(code),
+      para(`The code expires in <strong>${ttlMinutes} minutes</strong> and allows ${maxAttempts} attempts.`),
+      muted(esc(closing)),
+    ].join('')),
+  };
+};
+
 export const passwordChangedEmail = ({ when, ip }) => ({
   subject: `Your ${env.APP_NAME} password was changed`,
   text: [

@@ -20,14 +20,17 @@
 //      by invitation, and can sign in.
 //   2. The last active administrator cannot be disabled — in the UI, and by
 //      the server when the UI is bypassed.
-//   3. Creating a customer company and inviting its owner sends a message that
-//      reaches a mailbox, and that message carries no password.
+//   3. Creating a customer company, licensing it, and inviting its owner sends
+//      a message that reaches a mailbox, and that message carries no password.
 //   4. The invited owner opens the link, sees who invited them and to what,
 //      chooses their own password, and lands on a sign-in page — NOT a session.
 //   5. That owner signs in with the password they chose, with no forced change.
 //   6. The same owner can lose it and recover by 8-digit email code, after
 //      which the old password is dead and the new one works.
-//   7. Recovery answers an unregistered address exactly as a registered one.
+//   7. That owner hires a colleague and is shown no credential for them: the
+//      colleague gets an emailed code, the link opens the code box directly,
+//      and they choose their own password and sign in with it.
+//   8. Recovery answers an unregistered address exactly as a registered one.
 //
 // ISOLATION
 //
@@ -248,9 +251,11 @@ const stamp = randomBytes(3).toString('hex');
 const ADMIN = `root.${stamp}@journey.test`;
 const OWNER = `owner.${stamp}@journey.test`;
 const pw = () => `${randomBytes(12).toString('base64url')}Aa1`;
+const STAFF = `finance.${stamp}@journey.test`;
 const ADMIN_PW = pw();
 const OWNER_PW = pw();
 const OWNER_PW2 = pw();
+const STAFF_PW = pw();
 
 const finish = async (code) => {
   await new Promise((r) => api.close(r));
@@ -382,6 +387,22 @@ await page.click(`tr:has-text("${slug}") a:has-text("Manage")`);
 await page.waitForSelector('button:has-text("Invite owner")', { timeout: 20000 });
 await shot(page, 'admin-05-company');
 
+// The licence, BEFORE the owner is invited — the order the onboarding sequence
+// specifies, and not a formality. A company with no licence is readable but
+// not writable: its owner signs in, sees the whole console, and is refused
+// with POS_LICENSE_MISSING the moment they try to do anything, including hire
+// their first colleague. Leaving this step out of the rehearsal is how a
+// customer's first working day becomes a support call.
+await page.click('button:has-text("Issue licence")');
+await page.selectOption('#l-plan', 'MULTI_STORE');
+const expiry = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+await page.fill('#l-expiry', expiry);
+await page.fill('#l-limit', '5');
+await page.click('form button[type=submit]');
+await page.waitForSelector('text=/ACTIVE|Active/', { timeout: 20000 });
+pass('a licence is issued before the owner is invited', `MULTI_STORE to ${expiry}`);
+await shot(page, 'admin-05b-licensed');
+
 await page.click('button:has-text("Invite owner")');
 await page.fill('#o-name', 'Journey Owner');
 await page.fill('#o-email', OWNER);
@@ -457,7 +478,106 @@ await ownerSignIn(OWNER_PW2);
 await ownerPage.waitForURL(/dashboard|licence|branches|sell/, { timeout: 20000 });
 pass('the recovered password signs in');
 
-// --- 7. recovery is not an account oracle -----------------------------------
+// --- 7. the owner hires staff, and never holds their credential -------------
+//
+// The OTHER way an account comes into being. Section 3 covered invitations,
+// where no user row exists until the link is accepted. This is the direct
+// create a manager uses for somebody standing in front of them: the row is in
+// place immediately, but with a password hash no string satisfies, and the
+// person is mailed a code.
+//
+// Worth driving in a browser rather than trusting the unit suite, because the
+// join under test spans both halves of the product and neither half can see
+// the other break. The backend composes /forgot-password?step=code&email=…;
+// the frontend reads those two parameters to open ALREADY on the code step. If
+// either side drifts, every unit test still passes and the person who clicks
+// the link lands on step one — where asking for a code mints a second one that
+// supersedes the one in their hand, or trips the 60-second cooldown and
+// refuses. The screen would never explain why the code stopped working.
+const staffBefore = messages.length;
+await ownerPage.goto(`${BASE}/team`, { waitUntil: 'networkidle' });
+await ownerPage.click('button:has-text("Add team member")');
+await ownerPage.fill('#u-name', 'Journey Finance');
+await ownerPage.fill('#u-email', STAFF);
+// A company-level role on purpose. This tenant has no store yet — a freshly
+// onboarded customer does not — and the store-pinned roles require one, so
+// CASHIER here would fail on a missing branch and prove nothing about codes.
+await ownerPage.selectOption('#u-role', 'FINANCE');
+await ownerPage.click('form button[type=submit]');
+// A screen that refuses tells you WHY, in the box it puts the message in. A
+// bare selector timeout throws that away and reports only that something did
+// not appear, which is the least useful half of what the page is saying.
+try {
+  await ownerPage.waitForSelector('text=Code sent', { timeout: 20000 });
+} catch {
+  const visible = (await ownerPage.locator('body').innerText()).replace(/\n{2,}/g, '\n').trim();
+  fail('hiring a colleague mails them a setup code', `the screen said instead:\n      ${visible.slice(0, 600).replace(/\n/g, '\n      ')}`);
+  await shot(ownerPage, 'owner-10-hire-failed');
+  await browser.close();
+  console.log(`\nscreenshots: ${SHOTS}`);
+  await finish(1);
+}
+const hireScreen = await ownerPage.locator('body').innerText();
+check(
+  !/temporary password|password is|[A-Za-z0-9_-]{16,}Aa1/.test(hireScreen),
+  'hiring reveals no credential to the manager who did the hiring',
+);
+check(hireScreen.includes(STAFF), 'it names the address the code went to, so a typo is visible now');
+await shot(ownerPage, 'owner-10-hired');
+
+// The badge lives in the table, which reloads when the dialog closes — read it
+// there rather than through the open dialog, where the row is not yet present.
+await ownerPage.click('button:has-text("Done")');
+await ownerPage.waitForSelector(`tr:has-text("${STAFF}")`, { timeout: 20000 });
+const rosterRow = await ownerPage.locator(`tr:has-text("${STAFF}")`).innerText();
+check(/Awaiting password/.test(rosterRow), 'the roster shows the new account awaiting its own password');
+
+const staffMail = await waitForMail(STAFF, (m) => /password|account/i.test(m.subject), 'staff setup code');
+if (!staffMail) await finish(1);
+check(messages.length > staffBefore, 'a setup message reaches the new colleague', `${messages.length - staffBefore} new`);
+const staffCode = /\b(\d{8})\b/.exec(staffMail.text)?.[1] || '';
+check(staffCode.length === 8, 'the staff setup code is 8 digits, like every other code');
+
+// The link as the recipient would click it: taken out of the MIME body, not
+// reconstructed here — reconstructing it would test this script, not the mail.
+const staffLink = /https?:\/\/\S*forgot-password\S*/.exec(staffMail.text)?.[0]?.replace(/[)>.,]+$/, '') || '';
+check(
+  staffLink.startsWith(`${BASE}/forgot-password?step=code`),
+  'the mail links straight to the code box, beneath APP_URL',
+  staffLink ? `observed: ${staffLink.split('?')[0]}?${staffLink.split('?')[1]?.split('&')[0]}…` : 'no link found',
+);
+check(!staffLink.includes(staffCode), 'the code itself is not in the link — it is typed, never carried in a URL');
+
+const staffPage = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+await staffPage.goto(staffLink, { waitUntil: 'networkidle' });
+await staffPage.waitForSelector('#code', { timeout: 20000 });
+pass('the link opens the recovery page already on the code step');
+check(
+  (await staffPage.locator('#email').count()) === 0,
+  'and does not ask again for the address the code was sent to',
+);
+await shot(staffPage, 'staff-11-code-step');
+
+await staffPage.fill('#code', staffCode);
+await staffPage.click('button[type=submit]');
+await staffPage.waitForSelector('#confirmPassword', { timeout: 20000 });
+pass('the emailed staff code is accepted');
+await staffPage.fill('#password', STAFF_PW);
+await staffPage.fill('#confirmPassword', STAFF_PW);
+await staffPage.click('button[type=submit]');
+await staffPage.waitForSelector('text=Password updated', { timeout: 20000 });
+pass('the new colleague chooses their own password');
+
+await staffPage.goto(`${BASE}/login`, { waitUntil: 'networkidle' });
+await staffPage.fill('#email', STAFF);
+await staffPage.fill('#password', STAFF_PW);
+await staffPage.click('button[type=submit]');
+await staffPage.waitForURL(/dashboard|licence|branches|sell|team/, { timeout: 20000 });
+pass('and signs in with it, with no forced change — it was never temporary');
+await shot(staffPage, 'staff-12-signed-in');
+await staffPage.close();
+
+// --- 8. recovery is not an account oracle -----------------------------------
 //
 // Compared against ADMIN rather than OWNER on purpose. OWNER has just been
 // through a recovery, so a second request would hit the per-account cooldown
