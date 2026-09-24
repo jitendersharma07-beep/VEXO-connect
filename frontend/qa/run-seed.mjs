@@ -72,7 +72,9 @@ const plan = sqlc(`SELECT plan FROM "License"
 //   CH (11:00–22:00, closed Mondays) — the harness is better behaved here and
 //   records SKIP, but the blocks it skips are the two that carry the open
 //   backend defects: the CP→CH reassign + re-price block (D-1) and the
-//   capacity block (D-2, including the ASAP tripwire). A night run therefore
+//   capacity block (D-2). Both are fixed now, which makes holding CH open
+//   matter more, not less — those same two blocks are the regression cover.
+//   A night run therefore
 //   produced a PASSING artifact that had never executed the evidence the
 //   defects doc leans on. The 18:01 UTC run on 2026-09-24 scored 61/61 with
 //   4 skips where the daytime lane run scored 72/72 with none.

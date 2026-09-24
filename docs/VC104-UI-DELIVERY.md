@@ -74,6 +74,21 @@ house frontend before a line of UI depended on it.
 > logs `/tmp/vcx-qa-20260924-180847/`. Executed via
 > `bash frontend/qa/run-all.sh` (§6) against a per-run reset demo DB.
 >
+> **That 72 is historical and no longer reproduces.** D-1 and D-2 were fixed
+> later the same day, and §11's ASAP pin — which asserted the D-2 defect — was
+> replaced by the §11b fill described below, so the harness carries a different
+> set of checks than the one that scored 72.
+>
+> RE-RUN 2026-09-24 against the FIXED backend (`"at":
+> "2026-09-24T19:15:48.164Z"`, `baseSha` `d5b1cb0`, tree `…/main-merge`):
+> **VC-104 75/75, 0 skipped; VC-105 48/48.** The three checks that matter here
+> are new and all passed, none skipped: *one ASAP submission moves the booked
+> count by exactly one (D-2)*, *a full CH slot refuses ASAP too, with Kitchen
+> full*, and *the ASAP refusal carries the full count*. The §9 check *the
+> re-price banner appears after the move* also still passes with the client-side
+> D-1 workaround **removed** — which is the point of removing it: the observable
+> behaviour was already right, only the place it was computed moved.
+>
 > **This run is against this tree's own backend.** The results file says so
 > itself — `tree` `…/main-merge`, `branch` `main`, `baseSha` `0115898` — which
 > matters because the previously quoted 72/72 (`"at": "…T14:19:48.479Z"`) was
@@ -108,15 +123,20 @@ in D-4:
 8. Accept exactly-once: manager accepts; the deliberately-stale second decider
    gets the 409 surfaced as a toast and then sees the truth.
 9. Manager rejects with a reason; owner moves the order CP→CH; the quote
-   visibly re-prices (₹40 → ₹65) — the banner rises on payable-quote drift
-   because the server's `priceChanged` cannot see it (D-1) — and history
-   shows the move between named stores.
+   visibly re-prices (₹40 → ₹65), the banner rises on the server's
+   `priceChanged` (D-1, fixed 09-24), and history shows the move between
+   named stores.
 10. Manager scope after the move (routed-or-accepted only).
-11. Capacity, on the scheduled path (see D-2): two ₹360 baskets scheduled
-    into one shared future 15-min slot fill CH (cap 2); a third basket in
-    that slot is refused "Kitchen full" with the 2/2 count while CP is
-    untouched — plus a D-2 tripwire pin: the same basket flipped to ASAP
-    books 0/2 despite §9's live ASAP CH order.
+11. Capacity on the scheduled path: two ₹360 baskets scheduled into one
+    shared future 15-min slot fill CH (cap 2); a third basket in that slot is
+    refused "Kitchen full" with the 2/2 count while CP is untouched.
+11b. Capacity on the ASAP path (D-2, fixed 09-24 for the ordinary case): CH's
+    booked count is read, the kitchen is topped up with ASAP orders submitted
+    **natively at CH** one at a time — each must move the count by exactly one
+    — and the full slot is then refused "Kitchen full" with the 2/2 count.
+    Fillers are native by design: building them by reassignment would exercise
+    the late-transfer hole that is still open, and the block would look broken
+    when it is not. Replaces the old tripwire pin that asserted the defect.
 12. Cashier: no nav item, bounced route, 403 on read AND write APIs.
 13. 390px responsive pass on both pages (no horizontal overflow).
 
@@ -130,7 +150,7 @@ Not browser-exercisable with this seed, by design: `POS_HQ_ROUTING_NOT_ENTITLED`
 > `x/vc104-api` @ `c40683b`, the reason W1's suite stays green on both, and
 > suggested fixes with their trade-offs.
 
-### D-1 — backend `priceChanged` ignores the delivery charge (W1's tree; REPORTED, not fixed)
+### D-1 — backend `priceChanged` ignores the delivery charge (REPORTED here, FIXED 09-24)
 
 `POST /phone-orders/:id/reassign` answers
 `priceChanged: Number(after.total) !== before.total || Number(after.taxAmount) !== before.tax`
@@ -143,15 +163,27 @@ the flag is `false` on exactly the moves that change what the caller pays
 First seen as the §9 banner timeout in run `20260924-135119` (66 passes, then
 the harness died waiting for `po-move-banner`).
 
-W1's backend is read-only from this lane, so the fix here is UI-side and rule-
-compliant: `PhoneOrders.jsx` derives
+At QA time W1's backend was read-only from this lane, so the fix was UI-side and
+rule-compliant: `PhoneOrders.jsx` derived
 `quoteChanged = Boolean(priceChanged) || payableQuote !== previous payableQuote`
 — an inequality between two server-computed numbers, no client money
-arithmetic — and raises the re-price banner on either signal. W1 should either
-fold `deliveryCharge` into the flag or the contract should bless the
-quote-drift definition.
+arithmetic — and raised the re-price banner on either signal.
 
-### D-2 — backend capacity never counts ASAP orders (W1's tree; REPORTED, not fixed)
+**Resolved 09-24 (backend, option 1).** `priceChanged` now also compares the
+payable built by `buildQuote` before and after the move, so the flag means
+"what the caller was quoted moved". Details and the two-directional tests:
+`docs/VC104-BACKEND-DEFECTS.md` §D-1.
+
+**The UI workaround has been removed, deliberately.** With the server reporting
+the payable drift, re-deriving it in `onDone` would be two sources of truth for
+one rule — the disease D-3 was about. It also compared against `detail`, so a
+stale or not-yet-loaded detail made `payableQuote !== undefined` true and raised
+the banner on a move that cost the caller nothing. `PhoneOrders.jsx` now reads
+`data.priceChanged` and nothing else. The §9 banner assertion is unchanged and
+still passes, which is the point: the observable behaviour was already correct,
+only the place it was computed moved.
+
+### D-2 — backend capacity never counts ASAP orders (REPORTED here, FIXED 09-24)
 
 `loadBranchDecision` counts slot bookings with
 `scheduledFor: { gte: start, lt: end }` (`src/api/routes/phoneOrders.js:178–185`),
@@ -165,14 +197,39 @@ CH-routed orders sat in that wall-clock window — the DB showed
 `scheduledFor` NULL on all three of the run's orders. W1's own unit tests
 pass because they schedule explicitly.
 
-QA consequence: §11 now proves the capacity UI on the scheduled path (two
-₹360 baskets scheduled into one shared future slot; the third basket is
-refused with "Kitchen full" and the 2/2 count) and pins the ASAP hole as an
-explicit tripwire check that will FAIL the day W1 changes the semantics —
-the pin's failure note says to retire it and re-prove ASAP with real
-fillers. Suggested backend fix (W1's call): anchor ASAP orders to their
-submission slot (persist `scheduledFor = now`) or extend the count with
-`OR (scheduledFor IS NULL AND createdAt within the window)`.
+**Mostly resolved 09-24 (backend, option 2)** — not "fixed" flat, and the
+qualifier matters. The count was extended with
+`OR (scheduledFor IS NULL AND createdAt within the window)`, so an ASAP order
+occupies the slot it was *taken* in and the column keeps its meaning
+(NULL = ASAP, which `scheduled:` still reads). The rejected alternative — persist
+`scheduledFor = now` — would have made an ASAP order indistinguishable from one
+scheduled for now. See `docs/VC104-BACKEND-DEFECTS.md` §D-2.
+
+**What that covers, and what it does not.** Orders taken at a store, and orders
+moved into it inside the same slot — the ordinary case — are now counted. A
+**late transfer is still invisible**: reassign judges the target against the slot
+containing *now*, while the count anchors an ASAP order to its `createdAt`, so an
+order moved in an hour after it was taken lands in a slot that has already
+elapsed. W1 measured it: cap 2, one native order plus three back-dated orders
+reassigned in, and all three transfers were accepted — four live orders at a
+store still reporting `booked = 1, available = true`. So the guard can still
+show a kitchen as open while it holds double its cap, just no longer on the
+ordinary path. Closing it needs a slot-anchor column that survives a move;
+that is a schema decision and is pinned, unendorsed, by a backend test.
+
+**QA consequence — the tripwire fired and has been retired.** §11 used to prove
+capacity only on the scheduled path and pin the ASAP hole as a check asserting
+`available && 0/2`, written to FAIL the day the semantics changed. That day
+came. Per the pin's own instructions it is gone, replaced by §11b, which proves
+ASAP with real fillers: read CH's booked count, top the kitchen up one ASAP
+order at a time, and require the refusal. Its load-bearing assertion is the
+**increment** — one ASAP submission must move `booked` by exactly one — because
+that is the defect stated positively (the old behaviour held it at 0 forever)
+and it also catches a counter that double-books, which "is it full yet" would
+not. The top-up loop is bounded: a count that never moves would otherwise submit
+orders forever. The ASAP slot is "now" and therefore moves, so the block mirrors
+the server's epoch-floored bucket and SKIPS rather than fails if the run crosses
+a boundary mid-block (~1 run in 15).
 
 ### Harness defect — a timeout destroyed its own evidence (fixed)
 

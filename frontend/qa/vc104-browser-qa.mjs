@@ -580,13 +580,24 @@ if (MANAGER && chOpen) {
 }
 
 // --- 11. Capacity: CH takes 2 per 15-min slot -------------------------------
-// D-2 (backend, REPORTED — W1's tree is read-only from this lane): ASAP
-// submissions persist scheduledFor = NULL, and the booked count filters
-// `scheduledFor: { gte, lt }`, which NULL can never match — so an ASAP order
-// can NEVER fill a kitchen (run 140702 measured CH "0/2 booked" with 2 live
-// ASAP CH orders in the slot's wall-clock window). Capacity is therefore
-// proven on the SCHEDULED path, where the backend does enforce, and the ASAP
-// hole is pinned as an explicit tripwire at the end of this section.
+// D-2 (backend) was fixed on 2026-09-24 for the ordinary case: the booked count
+// now matches ASAP orders by `createdAt` as well as scheduled ones by
+// `scheduledFor`, so an ASAP order occupies the slot it was taken in. This
+// section therefore proves capacity on BOTH paths — scheduled first, with
+// fillers booked into a shared future slot, then ASAP in the current slot.
+//
+// Still open, deliberately, and NOT asserted here: a LATE TRANSFER is invisible
+// to the count. Reassign judges the target against the slot containing now,
+// while an ASAP order is anchored to its `createdAt`, so an order moved in an
+// hour after it was taken lands in an elapsed slot and occupies nothing. That
+// is why §11b's fillers are submitted natively at CH — building them by
+// reassignment would exercise the hole instead of the fix and fail this block
+// for the wrong reason.
+//
+// It used to prove only the scheduled path and pin the ASAP hole as tripwire
+// `15b`, which asserted the defect ("ASAP always shows 0/2") and was written to
+// go red the day the semantics changed. That day came, so the pin is retired
+// and replaced below with a real fill, per its own instructions.
 const capacitySlotAt = () => {
   // One shared timestamp for both fillers AND the probe: same 15-min bucket
   // by construction, no boundary maths. The only backend constraint on
@@ -661,20 +672,109 @@ if (chOpen) {
         `CH row: ${chFull?.text}`);
       check('CP is untouched by CH capacity', cpStill?.available, true);
       await shot(owner, '15-capacity');
-      // D-2 tripwire: the SAME basket flipped to ASAP books 0/2 even though
-      // §9's moved order is a live SUBMITTED ASAP order routed to CH. The day
-      // this check FAILS, W1 changed the capacity semantics — retire the pin
-      // and re-prove the ASAP path with real fillers instead.
-      await owner.evaluate(() => {
-        [...document.querySelectorAll('button')].find((b) => b.innerText.includes('As soon as possible'))?.click();
-      });
-      await sleep(300);
-      const optsAsap = await checkStores(owner);
-      const chAsap = optsAsap.find((o) => o.testid === 'po-option-BSC-CH');
-      check('D-2 pin: ASAP orders never occupy a slot (backend counts scheduledFor only)',
-        chAsap?.available === true && /0\/2/.test(chAsap?.text ?? ''), true,
-        `CH row: ${chAsap?.text} — a live ASAP CH order exists (§9's move) yet booked shows 0`);
-      await shot(owner, '15b-capacity-asap-d2');
+
+      // --- 11b. The ASAP path occupies the slot too (D-2, fixed 09-24) -------
+      // The starting count is deliberately NOT asserted. §9's move leaves a
+      // live ASAP order routed to CH, and a long run can straddle a 15-min
+      // boundary, so how many ASAP orders already sit in the CURRENT slot is
+      // not knowable in advance. The harness reads the count, tops the kitchen
+      // up to its cap one order at a time, and requires the refusal.
+      //
+      // The load-bearing assertion is the INCREMENT: one ASAP submission must
+      // move `booked` by exactly one. That is the defect stated positively —
+      // before the fix the ASAP count stayed 0 however many orders existed, so
+      // this check is 0-vs-1 against the old behaviour. It also catches the
+      // opposite error, a count that double-books, which a plain "is it full
+      // yet" assertion would wave through.
+      //
+      // Note the scheduled fillers above do NOT pollute this: they carry a
+      // non-null scheduledFor 45 min out, so neither arm of the backend's OR
+      // matches them in the current slot. The two halves of this section are
+      // measuring two different buckets on purpose.
+      const bookedOf = (row) => {
+        const m = /(\d+)\/(\d+) booked this (\d+)-min slot/.exec(row?.text ?? '');
+        return m ? { booked: Number(m[1]), cap: Number(m[2]), slotMinutes: Number(m[3]) } : null;
+      };
+      // The ASAP slot is "now", so it MOVES while this block runs, and a count
+      // taken either side of a boundary is two different buckets — the earlier
+      // orders drop out and `booked` falls. The server floors the slot on epoch
+      // ms (`slotBoundsFor`, lib/phoneOrders.js), which is timezone-free, so the
+      // harness can mirror the bucket exactly and skip rather than report a
+      // failure it cannot attribute. ~1 run in 15 at this block's length.
+      const bucketAt = (slotMinutes) => Math.floor(Date.now() / (slotMinutes * 60000));
+      // A fresh form per probe: same reason as the scheduled fillers, each
+      // mount is a fresh idempotency key (§4). Basket is 2 × Cappuccino = ₹360,
+      // over CH's ₹300 minimum, so AT_CAPACITY stays the only possible refusal.
+      const asapProbeCh = async () => {
+        await owner.goto(`${UI}/phone-orders/new`, { waitUntil: 'networkidle0' });
+        await pickCaller(owner, 'Anita', 'Anita Rao');
+        await addItems(owner, ['Cappuccino', 'Cappuccino']);
+        await owner.evaluate(() => {
+          [...document.querySelectorAll('button')].find((b) => b.innerText.includes('As soon as possible'))?.click();
+        });
+        await sleep(200);
+        const rows = await checkStores(owner);
+        return rows.find((o) => o.testid === 'po-option-BSC-CH');
+      };
+
+      let chRow = await asapProbeCh();
+      const opening = bookedOf(chRow);
+      check('the ASAP probe reports a booked count for CH at all', Boolean(opening), true,
+        `CH row: ${chRow?.text} — no "n/m booked" means the server sent no capacity block`);
+      if (opening) {
+        const { cap, slotMinutes } = opening;
+        const bucket0 = bucketAt(slotMinutes);
+        let seen = opening.booked;
+        let firstStep = null;
+        let fillProblem = null;
+        // Bounded on purpose. If the count does not move — which is exactly
+        // what the pre-fix backend did — an unbounded top-up loop would submit
+        // real orders forever. `cap` attempts is one more than a correct
+        // backend can need from a count of zero.
+        for (let attempt = 0; seen < cap; attempt += 1) {
+          if (attempt >= cap) {
+            fillProblem = `booked stuck at ${seen}/${cap} after ${attempt} ASAP submissions — the counter is not seeing them`;
+            break;
+          }
+          if (!chRow?.available) { fillProblem = `CH refused at ${seen}/${cap}: ${chRow?.text}`; break; }
+          await selectStore(owner, 'BSC-CH');
+          await owner.click('[data-testid="po-submit"]');
+          const ok = await owner
+            .waitForSelector('[data-testid="po-success"]', { visible: true, timeout: 15000 })
+            .then(() => true)
+            .catch(() => false);
+          if (!ok) { fillProblem = `an ASAP submission to CH was not accepted at ${seen}/${cap}`; break; }
+          chRow = await asapProbeCh();
+          const next = bookedOf(chRow);
+          if (!next) { fillProblem = `the count vanished from the CH row: ${chRow?.text}`; break; }
+          if (firstStep === null) firstStep = next.booked - seen;
+          seen = next.booked;
+        }
+        const crossed = bucketAt(slotMinutes) !== bucket0;
+        if (crossed) {
+          skip('ASAP capacity (D-2)',
+            `the run crossed a ${slotMinutes}-min slot boundary mid-block, so the counts either side are different buckets`);
+        } else if (opening.booked >= cap) {
+          skip('one ASAP submission moves the booked count by one',
+            `CH was already at ${opening.booked}/${cap} before this block could submit anything`);
+          check('a CH slot already full of ASAP orders is refused', chRow?.available, false,
+            `CH row: ${chRow?.text}`);
+        } else {
+          check('one ASAP submission moves the booked count by exactly one (D-2)', firstStep, 1,
+            `CH went ${opening.booked}/${cap} → ${seen}/${cap}; before the fix an ASAP order was invisible to the counter and this stayed 0`);
+          if (fillProblem) {
+            check('the ASAP fillers were accepted up to the cap', fillProblem, 'all accepted',
+              'a refusal before the cap means the counter is over-counting, or another store took the order');
+          } else {
+            check('a full CH slot refuses ASAP too, with Kitchen full',
+              chRow?.available === false && /Kitchen full/.test(chRow?.text ?? ''), true,
+              `CH row: ${chRow?.text}`);
+            check('the ASAP refusal carries the full count',
+              new RegExp(`${cap}\\/${cap}`).test(chRow?.text ?? ''), true, `CH row: ${chRow?.text}`);
+          }
+        }
+        await shot(owner, '15b-capacity-asap-d2');
+      }
     }
   }
 } else {

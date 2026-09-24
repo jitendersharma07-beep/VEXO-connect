@@ -122,6 +122,27 @@ const baseSubmission = (over = {}) => ({
   ...over,
 });
 
+// Capacity fixtures tear down in a finally, and clear before they build as well
+// as after. Without both, one failing assertion leaves a cap row and orders
+// behind and the NEXT capacity test dies on the fixture instead of its subject
+// — which makes a negative-control run unreadable, since a cascade failure and
+// a real one look identical in the output.
+const withCapacity = async (branchId, maxOrdersPerSlot, fn) => {
+  const clear = async () => {
+    await prisma.phoneOrder.deleteMany({ where: { routedBranchId: branchId } });
+    await prisma.branchPrepCapacity.deleteMany({ where: { branchId } });
+  };
+  await clear();
+  await prisma.branchPrepCapacity.create({
+    data: { companyId: companyA.id, branchId, slotMinutes: 15, maxOrdersPerSlot },
+  });
+  try {
+    await fn();
+  } finally {
+    await clear();
+  }
+};
+
 beforeAll(async () => {
   await wipe();
   const passwordHash = await hashPassword(PW);
@@ -332,6 +353,24 @@ describe('branch options explain themselves', () => {
 
     await prisma.phoneOrder.deleteMany({ where: { routedBranchId: a2.id } });
     await prisma.branchPrepCapacity.deleteMany({ where: { branchId: a2.id } });
+  });
+
+  it('counts ASAP orders against the slot as well (D-2)', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      // No scheduledFor, so this is an ASAP order and persists scheduledFor
+      // NULL. The sibling test above proves the SCHEDULED path; this one is the
+      // path almost every real caller takes, and NULL never falls in a range.
+      const first = await submit(baseSubmission({ branchId: a2.id }));
+      expect(first.status, JSON.stringify(first.body)).toBe(201);
+      expect(first.body.phoneOrder.scheduledFor).toBeNull();
+
+      const res = await options({ fulfilment: 'DELIVERY', addressId: addrA.id });
+      const a2opt = res.body.options.find((o) => o.branchId === a2.id);
+      // The kitchen holds one order per slot and is holding one, so the next
+      // one has to be refused. A guard that cannot see the booking fails OPEN.
+      expect(a2opt.capacity.booked).toBe(1);
+      expect(a2opt.unavailableReasons.map((r) => r.code)).toContain('AT_CAPACITY');
+    });
   });
 });
 
@@ -869,6 +908,110 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
     // carried over: the tax figure is re-derived from the lines.
     expect(Number(order.total)).toBe(420);
     expect(Number(order.taxAmount)).toBe(20);
+  });
+
+  it('reports a price change when only the delivery charge moved (D-1)', async () => {
+    const created = await submit(baseSubmission());
+    const po = created.body.phoneOrder;
+    expect(po.deliveryCharge).toBe(40);
+    expect(po.payableQuote).toBe(460);
+
+    const res = await request(app)
+      .post(`/api/phone-orders/${po.id}/reassign`)
+      .set(auth(tokens.ownerA))
+      .send({ branchId: a2.id, reason: 'original store rejected' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    // The caller pays 480 now instead of 460, and the operator has to be told
+    // before they hang up. Food and tax CANNOT move on a reassignment — the
+    // catalog is company-wide (C-7) and each line's tax rate is snapshotted at
+    // submit — so the delivery charge is the only thing a reassignment changes.
+    // A priceChanged derived from total and tax alone is therefore not merely
+    // inaccurate here; it can never be true on any reassignment at all.
+    expect(res.body.phoneOrder.payableQuote).toBe(480);
+    expect(res.body.priceChanged).toBe(true);
+  });
+
+  it('stays quiet when the move costs the caller nothing (D-1 control)', async () => {
+    // Two stores serving one pincode at the same charge. Without this, a flag
+    // hardwired to true would satisfy the test above and still be useless — the
+    // operator would re-quote every caller on every move and learn to ignore it.
+    await prisma.branchServiceArea.updateMany({
+      where: { branchId: a2.id, pincode: '560001' },
+      data: { deliveryCharge: '40.00' },
+    });
+
+    const created = await submit(baseSubmission());
+    const po = created.body.phoneOrder;
+    expect(po.payableQuote).toBe(460);
+
+    const res = await request(app)
+      .post(`/api/phone-orders/${po.id}/reassign`)
+      .set(auth(tokens.ownerA))
+      .send({ branchId: a2.id, reason: 'balancing the load' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.phoneOrder.payableQuote).toBe(460);
+    expect(res.body.priceChanged).toBe(false);
+
+    await prisma.branchServiceArea.updateMany({
+      where: { branchId: a2.id, pincode: '560001' },
+      data: { deliveryCharge: '60.00' },
+    });
+  });
+
+  const moveToA2 = async (reason, backdateMs = 0) => {
+    const c = await submit(baseSubmission());
+    if (backdateMs) {
+      await prisma.phoneOrder.update({
+        where: { id: c.body.phoneOrder.id },
+        data: { createdAt: new Date(Date.now() - backdateMs) },
+      });
+    }
+    return request(app)
+      .post(`/api/phone-orders/${c.body.phoneOrder.id}/reassign`)
+      .set(auth(tokens.ownerA))
+      .send({ branchId: a2.id, reason });
+  };
+
+  it('counts a reassigned ASAP order against the slot it was taken in (D-2)', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      // One order taken natively at a2, leaving room for exactly one more.
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      // Two moved in from a1 within the same slot. The first fits; the second
+      // must be refused, which is the point of counting ASAP orders at all.
+      expect((await moveToA2('load balancing')).status).toBe(200);
+      expect((await moveToA2('load balancing')).status).toBe(409);
+    });
+  });
+
+  // KNOWN LIMITATION, recorded not endorsed — see D-2 "What this does not
+  // settle" in docs/VC104-BACKEND-DEFECTS.md. An ASAP order is anchored to its
+  // createdAt, but a reassignment is checked against the slot containing NOW.
+  // Move an order after its own slot has elapsed and it lands in a store
+  // without occupying anything there. Closing this needs a slot-anchor column,
+  // which is a schema decision, not a patch — so this test pins today's
+  // behaviour and will go red the day someone makes it.
+  it('does NOT count an ASAP order moved after its slot elapsed (D-2 limitation)', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      for (let i = 0; i < 3; i += 1) {
+        const res = await moveToA2('moved late', 3600_000);
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+      }
+
+      // Four live orders against a cap of two, reported as one and still open.
+      expect(
+        await prisma.phoneOrder.count({
+          where: { routedBranchId: a2.id, status: { in: ['SUBMITTED', 'ACCEPTED'] } },
+        }),
+      ).toBe(4);
+      const opt = await options({ fulfilment: 'DELIVERY', addressId: addrA.id });
+      const a2opt = opt.body.options.find((o) => o.branchId === a2.id);
+      expect(a2opt.capacity.booked).toBe(1);
+      expect(a2opt.available).toBe(true);
+    });
   });
 
   it('clears a prior acceptance so the new store must accept for itself', async () => {
