@@ -111,6 +111,11 @@ Not browser-exercisable with this seed, by design: `POS_HQ_ROUTING_NOT_ENTITLED`
 
 ## 3. Defects found during QA
 
+> The two backend defects below are also written up for W1 as a standalone
+> report — `docs/VC104-BACKEND-DEFECTS.md` — with line numbers pinned to
+> `x/vc104-api` @ `c40683b`, the reason W1's suite stays green on both, and
+> suggested fixes with their trade-offs.
+
 ### D-1 — backend `priceChanged` ignores the delivery charge (W1's tree; REPORTED, not fixed)
 
 `POST /phone-orders/:id/reassign` answers
