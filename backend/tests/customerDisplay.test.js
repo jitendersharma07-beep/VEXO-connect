@@ -19,6 +19,15 @@ const { _expireCodeForTest } = await import('../src/lib/displayState.js');
 const app = createApp();
 
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   await prisma.dayClose.deleteMany();
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
