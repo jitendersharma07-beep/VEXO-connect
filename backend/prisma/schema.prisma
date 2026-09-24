@@ -524,6 +524,16 @@ model Product {
   taxRateId  String?
   taxRate    TaxRate?      @relation(fields: [taxRateId], references: [id])
   status     CatalogStatus @default(ACTIVE)
+  // Public path of the menu photo (/api/media/products/<company>/<file>.webp),
+  // or NULL for the no-photo case every product starts in and most stay in.
+  // Under /api because that is the only prefix both Vite and the production
+  // nginx forward to this service — see PRODUCT_IMAGE_URL_PREFIX.
+  // The bytes live on disk under POS_PRODUCT_IMAGE_DIR, never in this row: the
+  // Sell grid loads the entire catalogue in one query, so inlining even small
+  // images here would push megabytes through it on every till refresh. The
+  // filename carries a content hash, so replacing a photo yields a new URL and
+  // no cache anywhere has to be invalidated.
+  imageUrl   String?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 

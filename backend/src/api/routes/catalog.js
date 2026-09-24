@@ -12,6 +12,12 @@ import { audit } from '../../lib/audit.js';
 import { requirePosAuth, resolveCompanyScope } from '../../middleware/auth.js';
 import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
 import { num } from '../../lib/orders.js';
+import {
+  MAX_IMAGE_BYTES,
+  decodeProductImage,
+  removeProductImage,
+  storeProductImage,
+} from '../../lib/productImage.js';
 
 const router = Router();
 router.use(requirePosAuth, resolveCompanyScope);
@@ -252,6 +258,11 @@ const publicProduct = (p) => ({
     ? { id: p.taxRate.id, name: p.taxRate.name, ratePercent: num(p.taxRate.ratePercent) }
     : null,
   status: p.status,
+  // null is the ordinary case, not an error: most products have no photo. The
+  // grid distinguishes "no photo" from "photo failed to load" and renders a
+  // labelled tile for the first, so this must stay null rather than becoming a
+  // placeholder path here.
+  imageUrl: p.imageUrl ?? null,
   variants: (p.variants ?? []).map(publicVariant),
   modifierGroups: (p.modifierGroups ?? []).map((g) => ({
     id: g.id,
@@ -426,6 +437,101 @@ router.delete(
       entityId: row.id,
       companyId: req.companyScope.id,
       meta: { name: row.name },
+    });
+    res.json({ product: publicProduct(product) });
+  }),
+);
+
+// --- product image ----------------------------------------------------------
+// PUT rather than POST: a product has at most one photo, and setting it twice
+// with the same file must leave the same single result rather than
+// accumulating. The client sends a base64 data URL as JSON — see
+// lib/productImage.js for why this is not a multipart upload.
+
+const productImageBody = z.object({
+  // Bounded before the regex runs. An unbounded string here would let a large
+  // body reach the pattern matcher, and the real byte limit cannot be applied
+  // until after base64 decoding. 4/3 covers base64 expansion, plus the header.
+  //
+  // It names the same KB limit the decoder's own check does. Whichever guard
+  // fires first is an implementation detail — to the person at the till it is
+  // one rule, so quoting the number here keeps them from being told only that
+  // the photo was "too large" with no idea what would fit.
+  dataUrl: z
+    .string()
+    .min(1)
+    .max(
+      Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 128,
+      `Image is too large; the limit is ${MAX_IMAGE_BYTES / 1024} KB`,
+    ),
+});
+
+router.put(
+  '/products/:id/image',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    // loadProduct first: it scopes by companyId, so a product belonging to
+    // another tenant is a 404 BEFORE any bytes are examined or written. Doing
+    // the decode first would let a foreign caller probe our validation rules,
+    // and would write a file for a product they cannot see.
+    const row = await loadProduct(req);
+    const { dataUrl } = productImageBody.parse(req.body);
+    const image = decodeProductImage(dataUrl);
+
+    const imageUrl = await storeProductImage({
+      companyId: req.companyScope.id,
+      productId: row.id,
+      buffer: image.buffer,
+      ext: image.ext,
+    });
+
+    const product = await prisma.product.update({
+      where: { id: row.id },
+      data: { imageUrl },
+      include: PRODUCT_INCLUDE,
+    });
+
+    // Only after the row points at the new file. If this ran first and the
+    // update then failed, the row would reference a file that no longer
+    // exists; this way the worst case is an orphaned file, which costs disk
+    // rather than showing a broken image at the till. Skipped when the hash
+    // matched, because then old and new are the same path.
+    if (row.imageUrl && row.imageUrl !== imageUrl) await removeProductImage(row.imageUrl);
+
+    await audit(req, {
+      action: 'PRODUCT_IMAGE_SET',
+      entity: 'Product',
+      entityId: row.id,
+      companyId: req.companyScope.id,
+      meta: {
+        name: row.name,
+        type: image.type,
+        bytes: image.buffer.length,
+        width: image.width,
+        height: image.height,
+      },
+    });
+    res.json({ product: publicProduct(product) });
+  }),
+);
+
+router.delete(
+  '/products/:id/image',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const row = await loadProduct(req);
+    const product = await prisma.product.update({
+      where: { id: row.id },
+      data: { imageUrl: null },
+      include: PRODUCT_INCLUDE,
+    });
+    await removeProductImage(row.imageUrl);
+    await audit(req, {
+      action: 'PRODUCT_IMAGE_CLEAR',
+      entity: 'Product',
+      entityId: row.id,
+      companyId: req.companyScope.id,
+      meta: { name: row.name, had: Boolean(row.imageUrl) },
     });
     res.json({ product: publicProduct(product) });
   }),

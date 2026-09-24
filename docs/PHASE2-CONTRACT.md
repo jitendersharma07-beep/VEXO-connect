@@ -166,6 +166,9 @@ below), already recalculated — render from it directly.
 | GET/POST `/api/catalog/categories`; PATCH/DELETE `/api/catalog/categories/:id` | POST `{name, sortOrder?}`. DELETE is hard, 409 if it still has products. |
 | GET/POST `/api/catalog/products`; GET/PATCH/DELETE `/api/catalog/products/:id` | POST `{categoryId, name, sku?, basePrice, taxRateId?}`. GET list filters: `?categoryId=&q=&status=` (default ACTIVE, name-contains search, variants + taxRate embedded). DELETE archives. |
 | POST `/api/catalog/products/:id/variants`; PATCH/DELETE `.../variants/:variantId` | POST `{name, price}` — price is the **absolute** unit price (not a delta). DELETE archives. |
+| PUT/DELETE `/api/catalog/products/:id/image` | PUT `{dataUrl}` — a base64 `data:` URL, **not** multipart; JPEG/PNG/WebP only, ≤512 KB decoded, ≤2000 px per edge, all re-checked server-side from the magic bytes. Idempotent: the filename is a content hash, so re-sending the same photo yields the same URL. Both return the full product; `imageUrl` is null when there is no photo. Files are written under `POS_PRODUCT_IMAGE_DIR` and served **unauthenticated** from `/api/media/products/...` (immutable, 1-year cache) — see §5.1n. |
+
+<a id="51n"></a>**§5.1n — why menu photos are public.** They are `<img src>` targets on the till *and* on the paired customer display, which has no POS session, so a session gate would blank the screen the diner looks at. The path carries a cuid plus a content hash, so it is unguessable though not secret, and the contents are a shop's own menu pictures. The static mount sits **above** the 300 req/min global limiter deliberately: every till in one café shares a public IP under `trust proxy`, and a cache-cold grid of forty photos must not be able to spend the API's budget. A miss still falls through to the limiter and the normal JSON 404.
 
 ### 5.2 Tables (writes: BRANCH_MANAGER own branch / CUSTOMER_OWNER; reads: all)
 

@@ -1,0 +1,12 @@
+-- Menu photos on the Sell grid.
+--
+-- Additive and nullable on purpose: every existing product predates this
+-- column and must keep working with no photo, so there is no backfill and no
+-- default. NULL is the normal state, not a missing value — the grid renders a
+-- labelled placeholder tile for it.
+--
+-- The column holds a PATH (/api/media/products/<company>/<product>-<hash>.webp),
+-- not image bytes. Bytes live on disk under POS_PRODUCT_IMAGE_DIR. Nothing
+-- reads the prefix out of this column, so a future move only needs the files
+-- and PRODUCT_IMAGE_URL_PREFIX changed plus a one-line UPDATE here.
+ALTER TABLE "Product" ADD COLUMN "imageUrl" TEXT;
