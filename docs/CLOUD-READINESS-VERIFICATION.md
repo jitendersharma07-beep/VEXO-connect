@@ -11,13 +11,21 @@ Nothing here blocks the product's core; what is blocked is *cloud* readiness —
 reaching it over the internet, and recovering an account or an archive without
 an administrator standing next to the machine.
 
+> **Update 2026-09-24T19:20Z — blocker 2 is closed in code.** The owner directed
+> `x/accounts` to be merged; it was, and email password recovery now works end to
+> end. See [After the merge](#after-the-merge--email-recovery-now-works) at the
+> foot of this document. The verdict stays **NOT READY**, because one of the two
+> remaining blockers is unchanged and recovery still has no mail provider to
+> deliver through. Everything between here and that section describes the
+> pre-merge build and is kept as written.
+
 ## The build that was tested
 
 | | |
 |---|---|
 | Branch / commit | `x/cloud-readiness` @ **`1c7e8e6`** — identical to `main` and `github/main` at the time of the run |
 | Frontend bundle | `dist/assets/index-aCB18xDB.js`, sha256 `4d8f8d25…96d19d`, API root `/api` |
-| Migrations | 12 applied, shadow-DB diff clean |
+| Migrations | 21 applied, shadow-DB diff clean |
 | Databases | `vcx_staging` (app), `vcx_staging_test` (suite), `vcx_staging_shadow` — all created for this run, all on the existing loopback dev Postgres |
 | Backend suite | **628/628 pass, 22/22 files, 0 skipped** |
 
@@ -278,3 +286,87 @@ other lane. The restore drill is `restore_drill.py` in the same directory.
 
 Production activation remains subject to the owner's approval of the tested
 release, separately from this verification.
+
+## After the merge — email recovery now works
+
+The owner directed `x/accounts` to be merged rather than left as a release
+decision. This section records that, and supersedes the "Email password
+recovery — BLOCKED" section above. It does **not** supersede anything else.
+
+Tested build: `x/cloud-readiness` @ **`98c11a2`** = `8482de9` + `x/accounts`
+@ `6ceab72`. Bundle rebuilt: `index-TZS0KpMt.js` (636.4 kB, up from 612.6 kB).
+Migrations: 22 applied. Full evidence: `evidence/04-email-password-recovery.md`,
+section "After the merge".
+
+### The merge was not trivial, and that is the finding
+
+`x/accounts` was ~7 hours behind `main` and **four files conflicted**. Two of
+them were quiet enough to be worth naming:
+
+- `vitest.config.js` auto-merged into **two `globalSetup` keys**. That is
+  silent last-wins in JavaScript, not an error, so one of the two lanes' setup
+  mechanisms would have vanished with no failing test to say so.
+- `backend/tests/globalSetup.js` was an add/add of two different safeguards —
+  this lane's cross-worktree advisory lock, and the accounts lane's
+  truncate-at-start. Picking either side would have silently dropped a real
+  protection. Both are kept, with the truncate ordered *after* lock acquisition.
+
+`schema.prisma` was resolved as a union and then verified as one rather than
+eyeballed: all 100 models and enums from both sides present, every single-side
+model byte-identical to its origin, and no semantic line dropped from the 17
+models both lanes touched.
+
+### What now passes
+
+| Evidence | Result |
+|---|---|
+| Regression suite, merged tree | **774/774 pass, 28/28 files, 0 skipped** (was 628/22) |
+| `deploy/accounts-journey.mjs` — real bundle, headless Chromium, real SMTP conversation | **47/47 PASS, 0 FAIL** |
+
+The journey is the load-bearing evidence: it proves the *screens* are wired to
+the endpoints, which the unit suite cannot. Code delivered to a mailbox and read
+back out of the SMTP conversation; 8-digit code accepted; new password set
+through the browser; the replaced password 401s; the recovered password signs
+in; every session revoked; and an unregistered address answered byte-identically
+to a registered one, so the screen is not an account oracle.
+
+### What is still blocked — and it is not the code
+
+Real-provider delivery is **unproven**. Every message went to a loopback sink
+that relays nothing.
+
+The reason is now measured rather than assumed: **no SMTP sender is configured
+anywhere in the estate.** A read-only search for a live `SMTP_HOST` / `MAIL_HOST`
+/ `EMAIL_HOST` assignment across the POS trees, `/opt/atc`, Netstay, AGR and
+VEXO ONE returns zero hits in a real env file — every match is a `.env.example`
+or a deployment document. Only key presence was checked; no values were read.
+
+So this is an owner input of the same shape as the Netstay SMS gap, and the code
+fails **closed** on it rather than pretending: with `SMTP_HOST` unset,
+`POST /api/auth/forgot-password` answers `503 POS_MAIL_NOT_CONFIGURED` and the
+platform-admin bootstrap refuses to create an administrator nobody can reach.
+`docs/ACCOUNTS-GO-LIVE.md` §1 is the exact configuration. Credentials go in the
+deployment's secret store — **not into chat, a tracked file, or a terminal that
+keeps scrollback.**
+
+### One regression this merge introduces
+
+`deploy/e2e-workflow.mjs`, the till money-path harness, **is now blocked.** It
+seeded its staff from the temporary password `POST /api/users` used to return,
+and by design that password no longer exists. The script refuses with the recipe
+for wiring a sink rather than failing deep in the money path — loud, not silent.
+Section 6's evidence did not run through it and is unaffected, but anyone
+re-running it on the merged tree will hit this.
+
+### Revised blockers
+
+1. **No approved public staging hostname** — unchanged.
+2. ~~No email password recovery in the candidate~~ → **merged and passing.**
+   Now: **no mail provider configured anywhere in the estate**, so delivery to a
+   real inbox cannot be proven. Owner input, not code.
+3. **Encrypted archive decryption unproven** — unchanged.
+
+**Verdict is unchanged: NOT READY for owner acceptance.** Blocker 2 moved from
+"the feature does not exist" to "the feature exists, is tested end to end, and
+has nothing to send through", which is a materially better position but is not
+the same as closed.
