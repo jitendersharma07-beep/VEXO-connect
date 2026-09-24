@@ -23,7 +23,7 @@ exists so the fix is a decision W1 makes with the evidence in hand.
 | D-3 | Phone orders cannot sell a product with a REQUIRED modifier group | Such products are refused on the phone path with "Choose at least N"; the caller cannot complete the order | Medium — fails CLOSED, so no mispricing; a catalogue subset is simply unsellable by phone | `backend/src/api/routes/orders.js` `resolveCatalogLine` minSelect loop, called from `phoneOrders.js` |
 | D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
 | D-5 | ~~The catalog API can leave a required modifier group permanently unsatisfiable~~ **FIXED 09-24** | The product became unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it was reachable by an ordinary catalogue edit | Fix: `assertSatisfiable` in `backend/src/api/routes/catalog.js`, three call sites |
-| D-6 | Archiving a promotion permanently burns its code | The code cannot be republished, edited, or reused by a new promotion — the offer is unrecoverable and the till's code stops working for good | Medium — fails CLOSED, no mispricing; one code per mistake, not the catalogue | `backend/src/api/routes/promotions.js:353` with `:196`, `:229`, `:281`, `:167–172` |
+| D-6 | Archiving a promotion permanently burns its code | The code cannot be republished, edited, or reused by a new promotion — the offer is unrecoverable and the till's code stops working for good | Medium — fails CLOSED, no mispricing; one code per mistake, not the catalogue | `backend/src/api/routes/promotions.js:353` with `:196`, `:229`, `:281`, `:167–172`. **Open, now pinned** by `promotions.test.js`; unfixed pending an owner decision — no VC-102 spec exists to settle intent |
 
 §3 is the part worth reading first: **the phone-order suite already builds D-1's
 exact conditions and simply never looks at the flag.**
@@ -631,6 +631,41 @@ worktree:
 Control 2 is the one that matters: it proves the tests distinguish ACTIVE from
 merely-existing options, which is the entire content of the bug.
 
+##### Re-verified independently, and one gap found and closed
+
+The above was re-run from a clean checkout of `0115898` against a throwaway
+Postgres of its own: **639/639 across 22 files**, reproducing the figure exactly.
+Two further controls were then run, asking a question the first three do not —
+*does a refused edit write anything?* The guard is called before the write on all
+three call sites, so nothing is half-done today; the question is whether the
+suite would notice if that ever stopped being true.
+
+| Control | Perturbation | Tests that caught it |
+|---------|--------------|----------------------|
+| 4 | guard moved *below* the write in `PATCH .../:groupId` | 1 |
+| 5 | guard moved *below* the create in `POST .../modifier-groups` | **0** |
+
+Control 4 is caught because that test sells the product after the refusal — the
+comment at the option-route test says exactly why ("a guard that 409s after
+writing would pass every assertion above"). **Control 5 was caught by nothing.**
+The create-path test asserted the 409 and the message but never that the refusal
+wrote nothing, and selling afterwards cannot cover it: the group under test is
+the refused one, so there is nothing to sell against. A guard that moved below
+the create would answer 409 and still leave an unsatisfiable group on the
+product — the precise state D-5 is about — with all 51 tests green.
+
+Closed by asserting the absence directly, in that same test:
+
+```js
+expect(groupsOf(await getProduct(tokens.ownerA, p.id))).toEqual([]);
+expect(await prisma.modifierGroup.count({ where: { productId: p.id } })).toBe(0);
+```
+
+Control 5 now fails (`expected [ { …(6) } ] to deeply equal []`), which is the
+evidence that the new assertion does work. **No production behaviour changed —
+the fix was already correct; what was missing was the proof that it stays
+correct.**
+
 #### What this does not settle
 
 D-3 is still open. It asks the neighbouring question — *what should happen when a
@@ -738,6 +773,11 @@ $ grep -rn "archive" backend/tests/promotions.test.js
 (no output)
 ```
 
+That grep is **as it stood when the sweep ran**, and it is the whole reason this
+survived. It no longer returns nothing: `describe('archiving a campaign (D-6)')`
+in that file now drives the route. What the tests pin, and what they pointedly do
+not, is under "Status of the claim" below.
+
 A corroborating detail, and the reason to trust that nobody has ever walked this
 path: the refusal message is built as `` `A ${status.toLowerCase()} promotion
 cannot be ${action}d` `` (`:332`). It was written for verbs ending in *e* —
@@ -748,12 +788,54 @@ put that string in an assertion.
 
 ### Status of the claim
 
-Every line above is a quotation of the committed source and the migration SQL in
-this tree. Unlike D-5, **no test pins this** — the sweep that found it was
-research only, and no tripwire was added. So D-6 is proven by reading, not by
-running; the closed set of three refusals follows from the three cited guards
-rather than from an observed run. That is a weaker standard than D-5's and is
-recorded as such deliberately.
+**As first written**, every line above was a quotation of the committed source
+and the migration SQL, and **no test pinned any of it** — the sweep that found
+D-6 was research only. It was proven by reading, not by running, and was recorded
+as the weaker standard it was.
+
+**That is no longer the case.** The behaviour has since been reproduced over HTTP
+against an isolated database and is now pinned by five tests in
+`describe('archiving a campaign (D-6)')` in `backend/tests/promotions.test.js`.
+The claim stands as written — every refusal the reading predicted, a run
+reproduced:
+
+| What the reading claimed | What the run found |
+|---|---|
+| Archive is reachable from DRAFT, PUBLISHED and PAUSED | 200 from all three |
+| An archived promotion cannot be edited (`:196`) | 409, "An archived promotion cannot be edited" |
+| It cannot be republished or paused, and is terminal (`:332`) | 409 on `/publish`, `/pause` and a second `/archive` |
+| A new promotion cannot take the code (`:167–172`) | 409, "Code BURN-38 is already in use" |
+| The archived row still holds the code | row present, `status: ARCHIVED`, code intact |
+
+Two things the reading did **not** establish, which the run settles:
+
+- **Applied discounts are untouched.** A bill that took the offer before the
+  archive keeps its discount, its total and its snapshot afterwards. This is what
+  holds the severity at Medium: D-6 costs a code, never money.
+- **Uncoded campaigns reserve nothing.** `code` is nullable and Postgres permits
+  many NULLs under a unique index, so the defect is bounded to coded campaigns.
+
+**The tests take no position on whether this behaviour is right.** They pin what
+ships, so that the policy decision below changes a test deliberately rather than
+silently. D-6 stays **open**.
+
+### What a fix has to touch — measured, not assumed
+
+Fix (1) below was checked by building half of it and running the suite against
+it, and the result rules that half out. **Filtering the route's duplicate check
+without also replacing the index turns a clean refusal into a crash:** the
+`POST /promotions` guard at `:167–172` stops firing, the request reaches the
+database, and `Promotion_companyId_code_key` rejects it as an unhandled unique
+violation — **500 `POS_INTERNAL_ERROR`**, not 409.
+
+```
+control: dup check becomes findFirst({ …, status: { not: 'ARCHIVED' } })
+result:  expected 500 to be 409   ← the index is still total
+```
+
+So option (1) is a **migration plus a route change, together or not at all**. The
+route filter alone is strictly worse than today's behaviour: same dead end, worse
+error, and an entry in the error log every time an operator retries a burnt code.
 
 ### Suggested fixes — not applied, this is a product decision
 
@@ -774,6 +856,46 @@ recorded as such deliberately.
 (1) is the one that matches how the rest of this codebase behaves — D-5's
 suggested fix (1) refuses at the moment of the mistake; here there is no mistake
 to refuse, so the equivalent move is to stop manufacturing the dead end.
+
+### Why none of them was implemented
+
+D-5 was fixed the same day it was found because the owner chose an option. D-6
+has no such instruction, and — unlike D-5 — **there is nothing in this repository
+to check the intent against.** Promotions have no written contract:
+
+```
+$ grep -c -i promotion docs/PHASE2-CONTRACT.md docs/VC104-API-CONTRACT.md
+docs/PHASE2-CONTRACT.md:0
+docs/VC104-API-CONTRACT.md:0
+```
+
+Phase 2 is where VC-102 lives, and its contract does not mention promotions at
+all. The only mentions anywhere in `docs/` are incidental — migration number
+ranges, dev ports, a list of models W2 must not touch — and none describes the
+lifecycle. It exists solely in the `PromotionStatus` enum and the `transition`
+factory. So the question *is permanent code reservation intended, or is it an
+oversight?* cannot be answered from the tree, and implementing either answer
+would be inventing policy:
+
+- If reservation is **intended**, the work is option (3) plus documentation and,
+  eventually, a UI that says so before the operator archives — not a code change
+  to the constraint.
+- If it is an **oversight**, the work is option (1), whole: migration and route
+  filter together, per the measurement above.
+
+A third possibility is worth naming because it is what an operator usually wants
+and no option above delivers: **restoring an archived campaign to DRAFT** under
+its own identity, keeping its code, its `redemptionCount` and its redemption
+history, and requiring a fresh `promo.publish` to go live again. That is a
+lifecycle capability rather than a constraint change, it is a larger decision
+than the three above, and it is **deliberately not designed here** — no other
+entity in this codebase has an unarchive route, so there is no house pattern to
+follow and picking one would be setting precedent by stealth.
+
+**What is owed to the owner is a decision, not a patch.** Until then the
+behaviour is pinned by tests, the reasoning is here, and nothing in the database
+has been changed: no code renamed, no archived campaign deleted, no redemption
+counter reset, no historical bill rewritten.
 
 ---
 
@@ -892,9 +1014,15 @@ no test can judge: creating a required modifier group is now three API calls
 instead of one, and if that turns out to be wrong for real menu maintenance, it
 is option 3 in the D-5 section that should be revisited, not this guard.
 
-D-6 is **unfixed and unpinned**. It is the one entry here with no test of any
-kind behind it — see "Status of the claim" under D-6 for what that does and does
-not establish.
+D-6 is **unfixed, but no longer unpinned**. It was the one entry here with no
+test of any kind behind it; it is now reproduced over HTTP by five tests in
+`promotions.test.js`, which record the shipped behaviour without endorsing it.
+Unfixed is deliberate and not an omission: there is no VC-102 specification in
+this repository to check the intent against, so whether permanent code
+reservation is wanted is an owner decision, and a measurement recorded under D-6
+shows the obvious half-fix (filtering the route's duplicate check alone) makes
+things worse rather than better — 500 instead of 409. See "Status of the claim"
+and "Why none of them was implemented" under D-6.
 
 ---
 
@@ -908,7 +1036,7 @@ nothing. All 25 files in `backend/src/api/routes/` were checked against both.
 
 | Route | Where | Verdict |
 |---|---|---|
-| `POST /api/promotions/:id/archive` | `promotions.js:353` | **D-6** — one-way door, code burned |
+| `POST /api/promotions/:id/archive` | `promotions.js:353` | **D-6** — one-way door, code burned. *Second property now closed:* the route is driven over HTTP by `describe('archiving a campaign (D-6)')`. The behaviour is unchanged and still owner-gated |
 | `PATCH /api/atc/licenses/:licenseId/status` | `atc.js:230` | Reversible (the route also accepts `ACTIVE`), so no trap. Widest blast radius on this list — it flips every `requireUsableLicense` route for a tenant. It is also the only route in `atc.js` that loads its target by bare id with no company scope; safe today only because of `router.use(requirePosAuth, requireAtc)` at `:16`, and nothing pins that |
 | `GET /api/kitchen/stations` | `kitchen.js:88` | Untested only. The file's four `/stations` test hits are all POSTs. Worth one look: it is the one route in the file carrying no role guard, unlike its `...managerUp` / `...operate` siblings — but it is a read |
 | `GET /api/devices/:id` | `devices.js:147` | Untested only. The Devices page lists via `GET /devices` and never fetches one by id |

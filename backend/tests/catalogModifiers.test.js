@@ -139,6 +139,9 @@ const patchOption = (token, productId, groupId, optionId, body) =>
     .set(auth(token))
     .send(body);
 
+const getProduct = (token, productId) =>
+  request(app).get(`/api/catalog/products/${productId}`).set(auth(token));
+
 // Every one of the four routes answers with the whole product, so the group is
 // read back out of the response rather than out of the database — that is what
 // a client sees, and a route that wrote correctly but serialised wrongly would
@@ -292,6 +295,14 @@ describe('creating a modifier group', () => {
     // The remedy has to be in the message: without it this reads as "required
     // groups are banned", which would be a worse bug than D-5.
     expect(res.body.error.message).toMatch(/add its options, then raise the minimum/);
+
+    // The refusal must also have written nothing. The sibling paths pin this by
+    // selling the product afterwards, which cannot work here: the group under
+    // test is the one that was refused, so there is nothing to sell against.
+    // Assert the absence directly instead — a guard moved below the create
+    // would still answer 409 and still leave an unsatisfiable group behind.
+    expect(groupsOf(await getProduct(tokens.ownerA, p.id))).toEqual([]);
+    expect(await prisma.modifierGroup.count({ where: { productId: p.id } })).toBe(0);
   });
 
   it('builds an exactly-one group the supported way, and it sells', async () => {
