@@ -65,6 +65,14 @@ router.post('/stations', ...managerUp, asyncHandler(async (req, res) => {
   }).parse(req.body);
   const branchId = await callerBranchId(req, body.branchId);
   const station = await prisma.$transaction(async (tx) => {
+    // (branchId, name) is unique. Without this the create raises a raw P2002
+    // that nothing catches, and adding a station that already exists answers
+    // 500 — the same mistake reads as "the system is broken" instead of
+    // "you already have one of these".
+    const clash = await tx.kitchenStation.findUnique({
+      where: { branchId_name: { branchId, name: body.name } },
+    });
+    if (clash) throw conflict(`Station "${body.name}" already exists in this branch`);
     if (body.isDefault) {
       await tx.kitchenStation.updateMany({
         where: { defaultForBranch: branchId },
