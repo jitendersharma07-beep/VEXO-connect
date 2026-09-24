@@ -459,6 +459,39 @@ describe('transitions, refunds and voids', () => {
     expect(add.body.order.items[0].qty).toBe(3);
   });
 
+  // The merge above is product+variant only, which was the whole of the rule
+  // until VC-102 added modifiers. The till's key was updated for them and the
+  // phone centre's copy was not — that is D-3. The key is one shared function
+  // now, but a shared function is only as good as both call sites still using
+  // it, so this pins the till's end of it; phoneOrders.test.js pins the other.
+  it('a different modifier keeps the lines apart, the same one merges them', async () => {
+    const p = await request(app).post('/api/catalog/products').set(auth(tokens.ownerA))
+      .send({ categoryId: cat.food, name: 'Toastie', basePrice: 100, taxRateId: cat.gst5 });
+    expect(p.status, JSON.stringify(p.body)).toBe(201);
+    const g = await request(app).post(`/api/catalog/products/${p.body.product.id}/modifier-groups`)
+      .set(auth(tokens.ownerA)).send({ name: 'Bread', maxSelect: 1 });
+    expect(g.status, JSON.stringify(g.body)).toBe(201);
+    const groupId = g.body.product.modifierGroups.find((x) => x.name === 'Bread').id;
+    const optionId = async (name, price) => {
+      const res = await request(app)
+        .post(`/api/catalog/products/${p.body.product.id}/modifier-groups/${groupId}/options`)
+        .set(auth(tokens.ownerA)).send({ name, price });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return res.body.product.modifierGroups.find((x) => x.id === groupId).options.find((o) => o.name === name).id;
+    };
+    const rye = await optionId('Rye', 20);
+    const sourdough = await optionId('Sourdough', 30);
+
+    const o = await takeaway([
+      { productId: p.body.product.id, qty: 1, modifierOptionIds: [rye] },
+      { productId: p.body.product.id, qty: 1, modifierOptionIds: [sourdough] },
+      { productId: p.body.product.id, qty: 1, modifierOptionIds: [rye] },
+    ]);
+    expect(o.items).toHaveLength(2);
+    expect(o.items.map((i) => [Number(i.unitPrice), i.qty]).sort((a, b) => a[0] - b[0]))
+      .toEqual([[120, 2], [130, 1]]);
+  });
+
   it('payments only on BILLED; overpay by amount is refused', async () => {
     const o = await takeaway();
     const early = await request(app).post(`/api/orders/${o.id}/payments`).set(auth(tokens.cashierA1))

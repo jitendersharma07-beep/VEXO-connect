@@ -18,7 +18,7 @@ import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
 import { deviceContext } from '../../middleware/device.js';
 import { toPaise } from '../../lib/money.js';
 import { recomputeOrder } from '../../lib/orders.js';
-import { resolveCatalogLine } from './orders.js';
+import { resolveCatalogLine, mergeCatalogItems, createLineData } from './orders.js';
 import {
   rolesFor,
   hqRoutingEntitled,
@@ -68,15 +68,25 @@ const hqNotEntitled = () =>
 // --- shared helpers ----------------------------------------------------------
 
 const pincodeSchema = z.string().trim().regex(/^\d{6}$/, 'Pincode must be 6 digits');
+// D-3 (docs/VC104-BACKEND-DEFECTS.md): the modifier field the phone path was
+// missing. Bounds are the till's, deliberately identical — a basket an operator
+// can take by phone and a basket a cashier can take at the counter must be the
+// same set, or "we can't do that over the phone" becomes a shape of the API
+// rather than a decision anyone made.
 const itemsSchema = z
   .array(
     z.object({
       productId: z.string().min(1),
       variantId: z.string().min(1).optional(),
       qty: z.number().int().min(1).max(999).default(1),
+      modifierOptionIds: z.array(z.string().min(1)).max(30).optional(),
     }),
   )
   .min(1);
+
+// Dedupe + sort, used wherever a set of chosen options has to become a stable
+// string: the idempotency hash here, and the line-merge key in orders.js.
+const modKeyOf = (item) => [...new Set(item.modifierOptionIds ?? [])].sort();
 
 // The operator's own store, when they have one. A CUSTOMER_OWNER has none and
 // may route anywhere in their tenant.
@@ -201,9 +211,41 @@ const loadBranchDecision = async ({ req, fulfilment, address, when, items }) => 
     const foundIds = new Set(found.map((p) => p.id));
     unavailableProductNames = wanted.filter((id) => !foundIds.has(id)).map((id) => `#${id.slice(-6)}`);
     const priceById = new Map(found.map((p) => [p.id, p.basePrice]));
+
+    // Modifier prices are part of what the caller pays, so they are part of the
+    // basket a minimum-order-value rule is judged against. Counting base price
+    // alone would under-count every basket with a paid extra on it and refuse
+    // deliveries that do clear the minimum — a new wrong answer created by
+    // allowing modifiers here at all, so it is fixed in the same change.
+    // Company-scoped, so another tenant's option id cannot inflate the basket.
+    // Unknown ids contribute zero rather than throwing: this is the pre-flight
+    // estimate, the same treatment unknown PRODUCTS already get above, and
+    // resolveCatalogLine rejects them properly at submit.
+    //
+    // Deliberately NOT filtered on ACTIVE. This helper serves two callers: a
+    // new basket, where an archived option makes the submit fail anyway so its
+    // price here changes nothing; and reassign, which replays an EXISTING
+    // order's options, some of which may have been archived since it was taken
+    // and are still part of what that caller agreed to pay. Filtering would
+    // under-count the second case to protect the first from nothing.
+    const chosenOptionIds = [...new Set(items.flatMap((i) => i.modifierOptionIds ?? []))];
+    const optionPrice = new Map();
+    if (chosenOptionIds.length > 0) {
+      const options = await prisma.modifierOption.findMany({
+        where: { id: { in: chosenOptionIds }, group: { product: { companyId } } },
+        select: { id: true, price: true },
+      });
+      for (const o of options) optionPrice.set(o.id, o.price);
+    }
+
     basketPaise = items.reduce((a, i) => {
       const price = priceById.get(i.productId);
-      return price ? a + toPaise(String(price)) * i.qty : a;
+      if (!price) return a;
+      const extras = (i.modifierOptionIds ?? []).reduce(
+        (s, id) => (optionPrice.has(id) ? s + toPaise(String(optionPrice.get(id))) : s),
+        0,
+      );
+      return a + (toPaise(String(price)) + extras) * i.qty;
     }, 0);
   }
 
@@ -531,9 +573,16 @@ const hashOf = (body) =>
         branchId: body.branchId,
         scheduledFor: body.scheduledFor ?? null,
         note: body.note ?? null,
+        // `m` is part of the hash because it is part of the order. Without it
+        // a retry of the same key carrying DIFFERENT toppings hashes equal,
+        // passes the replay check, and hands back the first order as though it
+        // were the one just asked for — the caller is told "extra cheese"
+        // succeeded and receives the plain one. Sorted into the sort key too,
+        // so two lines of the same product differing only by modifier cannot
+        // swap places between two otherwise identical submissions.
         items: [...body.items]
-          .map((i) => ({ p: i.productId, v: i.variantId ?? null, q: i.qty }))
-          .sort((a, b) => `${a.p}${a.v}`.localeCompare(`${b.p}${b.v}`)),
+          .map((i) => ({ p: i.productId, v: i.variantId ?? null, q: i.qty, m: modKeyOf(i) }))
+          .sort((a, b) => `${a.p}${a.v}${a.m}`.localeCompare(`${b.p}${b.v}${b.m}`)),
       }),
     )
     .digest('hex');
@@ -599,7 +648,7 @@ router.post(
     if (!chosen.available) throw branchUnavailable(chosen.unavailableReasons);
 
     const lines = [];
-    for (const item of mergeItems(body.items)) {
+    for (const item of mergeCatalogItems(body.items)) {
       lines.push(await resolveCatalogLine(companyId, item));
     }
 
@@ -617,25 +666,15 @@ router.post(
             openedById: req.user.id,
           },
         });
-        // resolveCatalogLine gained a `modifiers` breakdown when VC-102 landed
-        // (this is a consolidation-merge consequence, not a VC-104 change).
-        // createMany cannot write nested relation rows, and the till's
-        // createLineData — which folds that array into a nested create — is a
-        // per-row `create`, so it is not usable here. Phone orders cannot carry
-        // modifiers today: the API has no field for them, and a product with a
-        // REQUIRED group is refused upstream (D-3). The array is therefore
-        // always empty on this path and dropping it is exact rather than lossy.
-        // If that ever stops being true this must become per-row creates; it
-        // refuses instead of silently discarding the caller's choices.
-        const rows = lines.map(({ modifiers, ...line }) => {
-          if (modifiers?.length) {
-            throw new Error(
-              'phone-order line carries modifiers; createMany cannot persist them — use per-row creates',
-            );
-          }
-          return { orderId: order.id, ...line };
-        });
-        await tx.orderItem.createMany({ data: rows });
+        // Was `createMany` with a guard that threw if any line carried
+        // modifiers — correct while the API had no modifier field, and the
+        // guard is what made D-3's blast radius knowable instead of silent.
+        // Now that phone orders can carry them, the nested snapshot rows rule
+        // createMany out and this is the till's own per-row writer. Still one
+        // transaction, so a half-written order is not reachable.
+        for (const l of lines) {
+          await tx.orderItem.create({ data: createLineData(l, order.id) });
+        }
         await recomputeOrder(tx, order.id);
 
         const phoneOrder = await tx.phoneOrder.create({
@@ -685,17 +724,6 @@ router.post(
     res.status(201).json({ phoneOrder: phoneOrderPublic(created, await orderOf(created.orderId)) });
   }),
 );
-
-const mergeItems = (items) => {
-  const merged = new Map();
-  for (const item of items) {
-    const key = `${item.productId}|${item.variantId ?? ''}`;
-    const cur = merged.get(key);
-    if (cur) cur.qty += item.qty;
-    else merged.set(key, { ...item });
-  }
-  return [...merged.values()];
-};
 
 // The reference is per tenant and human-readable, so it is derived from a count
 // rather than a random string. Two operators submitting at the same instant can
@@ -857,9 +885,18 @@ router.post(
       ? await prisma.customerAddress.findFirst({ where: { id: po.addressId, companyId } })
       : null;
     const when = po.scheduledFor ?? new Date();
+    // Modifiers come along so the new store's minimum-order-value rule is
+    // judged against what this basket actually costs. Nothing is re-priced from
+    // them — the line's unitPrice was snapshotted at submit and recomputeOrder
+    // works off the stored rows — they only feed the availability estimate.
     const items = await prisma.orderItem.findMany({
       where: { orderId: order.id, status: 'ACTIVE' },
-      select: { productId: true, variantId: true, qty: true },
+      select: {
+        productId: true,
+        variantId: true,
+        qty: true,
+        modifiers: { select: { optionId: true } },
+      },
     });
 
     const options = await loadBranchDecision({
@@ -867,7 +904,12 @@ router.post(
       fulfilment: po.fulfilment,
       address,
       when,
-      items: items.map((i) => ({ productId: i.productId, variantId: i.variantId ?? undefined, qty: i.qty })),
+      items: items.map((i) => ({
+        productId: i.productId,
+        variantId: i.variantId ?? undefined,
+        qty: i.qty,
+        modifierOptionIds: i.modifiers.map((m) => m.optionId),
+      })),
     });
     const chosen = options.find((o) => o.branchId === body.branchId);
     if (!chosen) throw notFound('Branch not found');

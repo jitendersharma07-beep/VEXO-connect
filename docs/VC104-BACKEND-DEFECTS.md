@@ -20,7 +20,7 @@ exists so the fix is a decision W1 makes with the evidence in hand.
 |---|--------|--------|----------|-------|
 | D-1 | `priceChanged` on reassign ignores the delivery charge | The caller is re-quoted nothing on exactly the moves that change what they pay | Medium — quote-facing, not billing (the charge is not billable while C-6 is open) | `backend/src/api/routes/phoneOrders.js:858,879,914` |
 | D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
-| D-3 | Phone orders cannot sell a product with a REQUIRED modifier group | Such products are refused on the phone path with "Choose at least N"; the caller cannot complete the order | Medium — fails CLOSED, so no mispricing; a catalogue subset is simply unsellable by phone | `backend/src/api/routes/orders.js` `resolveCatalogLine` minSelect loop, called from `phoneOrders.js` |
+| D-3 | ~~Phone orders cannot sell a product with a REQUIRED modifier group~~ **FIXED 09-24** | Such products were refused on the phone path with "Choose at least N"; the caller could not complete the order | Medium — failed CLOSED, so no mispricing; a catalogue subset was simply unsellable by phone | Fix: `modifierOptionIds` on `phoneOrders.js` `itemsSchema`, plus the three places that had encoded "modifiers cannot arrive here" |
 | D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
 | D-5 | ~~The catalog API can leave a required modifier group permanently unsatisfiable~~ **FIXED 09-24** | The product became unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it was reachable by an ordinary catalogue edit | Fix: `assertSatisfiable` in `backend/src/api/routes/catalog.js`, three call sites |
 | D-6 | Archiving a promotion permanently burns its code | The code cannot be republished, edited, or reused by a new promotion — the offer is unrecoverable and the till's code stops working for good | Medium — fails CLOSED, no mispricing; one code per mistake, not the catalogue | `backend/src/api/routes/promotions.js:353` with `:196`, `:229`, `:281`, `:167–172`. **Open, now pinned** by `promotions.test.js`; unfixed pending an owner decision — no VC-102 spec exists to settle intent |
@@ -37,10 +37,15 @@ the first HTTP-level tests for the modifier catalog routes
 (`backend/tests/catalogModifiers.test.js`). It is filed here because it is the
 other half of D-3's question — *what should happen when a required modifier
 group cannot be satisfied* — and the two looked best answered once, together.
-**D-5 was then fixed the same day** on the owner's instruction; D-3 was not, and
-remains open. The full account is kept rather than deleted, because implementing
-the fix turned up two more ways into the bad state than the investigation had
-found, which is worth knowing next time.
+**Both were then fixed the same day** on the owner's instruction, D-5 first and
+D-3 straight after. The full accounts are kept rather than deleted, because in
+each case implementing the fix found more than the investigation had: D-5 had two
+more ways into the bad state than were written up, and D-3 had three more places
+to change — and unlike the reported symptom, all three of those fail *silently*.
+The pattern is worth naming, since it caught the same author twice in one day:
+**a write-up enumerates the paths that a failing test happened to walk, not the
+paths that exist.** Both fixes were sized by grepping every route that writes the
+fields named in the invariant.
 
 **D-6 was found by looking for D-5's shape elsewhere** (09-24, after D-5 was
 closed): a route with no frontend caller *and* no HTTP test, so that nothing —
@@ -189,6 +194,17 @@ path, which is all the client needs.
 
 ## D-3 — a required modifier group makes a product unsellable by phone
 
+> **FIXED 09-24.** Phone orders now carry `modifierOptionIds`, priced by the same
+> function the till uses. The account below is left in the present tense as
+> written; what changed is in **"Fixed 09-24"** at the end.
+>
+> **Read that section even if you only want the summary**, because the fix was
+> four times the size of this write-up. The field was one of four places that had
+> encoded "modifiers cannot arrive on this path", and the other three fail
+> **silently** — the opposite of the fail-closed property this section uses to
+> justify holding D-3 at Medium. Shipping only the field would have traded a
+> visible refusal for three quiet wrong answers.
+
 **Created by the consolidation merge, not by either lane.** VC-104 deliberately
 reuses the till's line-pricing function rather than copying it:
 
@@ -228,6 +244,129 @@ existing validation starts doing useful work for that path too. Passing an empty
 array would not help — the guard would still trip. Skipping the guard for phone
 orders would make the phone path price differently from the till, which is the
 exact drift the export was chosen to prevent.
+
+### Fixed 09-24
+
+`modifierOptionIds` is now on `phoneOrders.js` `itemsSchema`, with the till's own
+bounds (`max(30)`) deliberately rather than a new number: a basket an operator
+can take by phone and a basket a cashier can take at the counter must be the same
+set, or *"we can't do that over the phone"* becomes a shape of the API rather
+than a decision anyone made.
+
+#### The field was one of four places, and it was the only loud one
+
+The paragraph above says the fix is "a modifier field on its line items". That is
+true and it is not sufficient. Three other pieces of `phoneOrders.js` had been
+written against the invariant *modifiers never arrive here*, and each of them
+silently produces a wrong answer once they do:
+
+| # | Where | What it did once modifiers arrived | Loud or silent? |
+|---|-------|-----------------------------------|-----------------|
+| 1 | `itemsSchema` | Stripped the field; the product stays unsellable | **Loud** — the reported symptom, 400 |
+| 2 | `hashOf` | Same key + different toppings hashes equal → replay check passes → hands back the **first** order, 200 | **Silent** |
+| 3 | `mergeItems` | Key was `product\|variant`, so two different-topping lines collapse onto one at whichever was seen first | **Silent** |
+| 4 | `loadBranchDecision` | Minimum-order-value basket counted base price only, under-counting every paid extra | **Silent** |
+
+Only #1 is in the write-up above. The severity argument in this section —
+*"Medium because it fails CLOSED"* — describes #1 exactly and describes none of
+the other three. Had the field been added on its own, D-3 would have been closed
+as a Medium and would have shipped a mispricing: the phone path *does* move money
+wrongly once it can carry modifiers at all, just not before.
+
+Worked example of #2, which is the worst of them. An operator submits a Large
+pizza with extra cheese under key `K`; the caller changes their mind; the
+operator resubmits under `K` with a plain Regular. The hash ignores modifiers, so
+it matches, and the API answers **200 with the first order**. The operator's
+screen says the change succeeded. The caller is billed ₹450 for a ₹300 pizza, and
+the kitchen makes the wrong food. There is no error anywhere. This is reproduced
+as a test, and the negative control below shows the exact response body.
+
+`createMany` was the fifth place, and it is the one that behaved well. It could
+not write the nested modifier snapshot rows, and the previous author had put an
+explicit `throw` there rather than letting the array be dropped:
+
+> *"If that ever stops being true this must become per-row creates; it refuses
+> instead of silently discarding the caller's choices."*
+
+That guard is why D-3's blast radius was knowable instead of a data-loss bug
+found months later. It is now replaced by the till's own `createLineData`, which
+is a per-row create — the guard was an instruction for exactly this change, and
+following it is what retires it.
+
+#### What is now shared rather than duplicated
+
+D-3's own origin is *the same rule written twice and only one copy maintained*.
+Fixing it by writing a third copy of the merge key in `phoneOrders.js` would have
+reproduced the defect on a one-year delay, so two functions moved to
+`orders.js` and are now imported by both paths:
+
+- `mergeCatalogItems(items)` — dedupe-and-sort the chosen option ids into the
+  line key, so `["a","b"]`, `["b","a"]` and `["a","a","b"]` are one basket choice.
+- `createLineData(line, orderId)` — the nested-snapshot row writer, which rules
+  out `createMany` on **every** path that writes order items.
+
+The same dedupe-and-sort is applied inside `hashOf`, which matters in both
+directions: without it a retry listing the same two options the other way round
+would be refused as a key clash — a *new* wrong answer invented by the fix. There
+is a test for that false refusal, not only for the true one.
+
+#### Deliberate decisions worth challenging
+
+- **The reassign basket is not filtered on `status: 'ACTIVE'`.** Reassignment
+  replays an existing order whose options may have been archived since it was
+  taken, and the caller still agreed to pay for them. Filtering would under-count
+  that real case to protect a new-basket case that `resolveCatalogLine` already
+  refuses at submit.
+- **Unknown option ids contribute zero to the pre-flight basket** rather than
+  throwing, matching the treatment unknown *products* already had two lines
+  above. `resolveCatalogLine` rejects them properly at submit; the selector is an
+  estimate and should not 500 on a stale screen.
+- **Reassignment does not re-price the lines.** `recomputeOrder` works off the
+  stored rows, so modifier prices snapshotted at submit survive a move between
+  stores. Only the availability estimate consumes the option ids.
+
+#### Verification
+
+`backend/tests/phoneOrders.test.js` 41 → 52; `backend/tests/phase2.test.js`
+66 → 67. Full backend suite **656 passed / 22 files**.
+
+Green on the first run is a claim, not evidence, so each part was inverted in the
+*implementation* — not in the assertions — and the failures counted:
+
+| Control | Inverted | Failures | Which |
+|---------|----------|----------|-------|
+| 1 | `hashOf` drops `m` | 1 | the reused-key test, failing **200 instead of 409**, body showing the ₹450 order returned for a ₹300 request |
+| 2 | `mergeCatalogItems` ignores the modifier key | 2 | the phone merge test **and** the new till merge test |
+| 3 | `basketPaise` drops the extras | 2 | store-minimum, and reassign |
+| 4 | reassign stops passing option ids through | 1 | reassign only |
+| 5 | `modifierOptionIds` removed from the schema | 10 | everything except the over-fix guard |
+
+Two things the controls caught that the tests alone would not have:
+
+- **The first attempt at control 1 was a no-op.** It was written `m: [] && modKeyOf(i)`, and `[]` is truthy in JavaScript, so the expression returned `modKeyOf(i)` unchanged and the suite went green — a control that "passes" is a broken control, not a passing fix. It is only because a green control was treated as a failure that this was caught.
+- **One test passed spuriously under control 5.** *"refuses an archived option, another product's option and another tenant's"* asserted status 400 and `field: modifierOptionIds` — both of which an API that ignores the field entirely also produces, because the Size group is then unsatisfied. It now asserts the message names the reason, and it discriminates. The lesson generalises: on a route where several different faults share one error shape, status-plus-field is not evidence about which fault fired.
+
+Control 2 also answered a question nobody had asked. When the merge key was
+inverted, `phase2.test.js` and `catalogModifiers.test.js` stayed **green** — the
+till's modifier-aware merge key had no test either. The till's only merge test
+was `product+variant`, written before VC-102. So D-3 is not "the phone path was
+behind"; it is *one rule, two copies, neither pinned, and the copy that happened
+to be wrong was the one nobody drove*. A till-side test was added for that reason:
+the key is one shared function now, but a shared function is only as good as both
+call sites still calling it.
+
+#### What this does not settle
+
+- **No live data was inspected.** Whether any demo or production product
+  currently carries a `minSelect >= 1` group is still unverified, exactly as the
+  section above says. The fix does not depend on the answer, but the *urgency*
+  of having shipped it does.
+- **D-1 and D-2 remain open** and are W1's call; D-6 is recorded and now pinned
+  by tests, but unfixed pending a policy decision on code reservation.
+- **The front end was not touched.** The phone-order operator screen has no
+  modifier picker, so this fix makes the *API* able to sell these products; a
+  human operator still cannot, from the UI, today. That is the next piece of work
+  D-3 implies and it is not done here.
 
 ---
 
@@ -497,6 +636,11 @@ available to a caller, so the product is stuck.
 
 ### Why it matters more than D-3
 
+*(Written while D-3 was open. Both are fixed now; the comparison is kept because
+it is how the two were prioritised, and because the judgement below turned out to
+be right about D-5 and **wrong about D-3** — see D-3's "Fixed 09-24", where the
+reported symptom proved to be the only fail-closed part of it.)*
+
 D-3 costs a channel — a required-modifier product cannot be sold *by phone*.
 D-5 costs the product outright, on the till too, and it is reachable by a
 customer doing normal menu maintenance rather than by a merge. The failure also
@@ -668,10 +812,11 @@ correct.**
 
 #### What this does not settle
 
-D-3 is still open. It asks the neighbouring question — *what should happen when a
-required group cannot be satisfied **by a particular channel***  — and this fix
-does not answer it. A group with two active options is perfectly satisfiable and
-still unsellable by phone.
+D-3 is still open *(as of this section's writing — it was fixed a few hours
+later; see its own "Fixed 09-24")*. It asks the neighbouring question — *what
+should happen when a required group cannot be satisfied **by a particular
+channel*** — and this fix does not answer it. A group with two active options is
+perfectly satisfiable and still unsellable by phone.
 
 ### Note on how this went unnoticed
 
@@ -986,9 +1131,14 @@ whose evidence is committed here (from `x/vc104-ui` @ `f344ef4`).
 
 D-1 and D-2 were reported against `c40683b` and are **still unfixed** in this
 consolidated tree — the merge carried them forward untouched, as W2 wrote them.
-D-3 is the merge's own doing and is likewise unfixed. None of the three is
-pinned by an assertion, so the phone-order suite's 41/41 here says nothing about
-them either way.
+Neither is pinned by an assertion, so the phone-order suite says nothing about
+them either way; its figure has since moved from 41 to 52 and **none of those 11
+new tests touches D-1 or D-2**, which is exactly the trap a rising count sets.
+
+D-3 was the merge's own doing and is **FIXED** (09-24, same day, after D-5) —
+that is where 11 of those tests came from. A twelfth was added to
+`phase2.test.js` because the negative control showed the till shared the same
+unpinned merge key.
 
 D-4 is half fixed: the evidence files no longer overwrite each other, but no
 VC-105 browser run has been executed against this tree, so that row of the UI
