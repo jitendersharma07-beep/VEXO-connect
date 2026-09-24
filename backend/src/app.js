@@ -23,6 +23,9 @@ import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
 import displayRoutes from './api/routes/display.js';
 import gatewayRoutes from './api/routes/gateway.js';
+// ==== LANE inventory ====
+import inventoryRoutes from './api/routes/inventory/index.js';
+// ==== END LANE inventory ====
 
 export const createApp = () => {
   const app = express();
@@ -117,6 +120,9 @@ export const createApp = () => {
   api.use('/discount-policies', discountPolicyRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
+  // ==== LANE inventory ====
+  api.use('/inventory', inventoryRoutes);
+  // ==== END LANE inventory ====
 
   app.use('/api', api);
   app.use('/health', healthRoutes);
