@@ -22,6 +22,8 @@ import orderRoutes from './api/routes/orders.js';
 import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
 import displayRoutes from './api/routes/display.js';
+import kitchenRoutes from './api/routes/kitchen.js';
+import { printAgentsRouter, printJobsRouter } from './api/routes/printing.js';
 import gatewayRoutes from './api/routes/gateway.js';
 
 // LANE foundation — the organisation, device and permission surface.
@@ -129,6 +131,9 @@ export const createApp = () => {
   api.use('/discount-policies', discountPolicyRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
+  api.use('/kitchen', kitchenRoutes);
+  api.use('/print-agents', printAgentsRouter);
+  api.use('/print-jobs', printJobsRouter);
 
   // LANE foundation — mounted after /branches so the store routes keep their
   // place in the table; order is irrelevant to Express here, none of these
