@@ -108,6 +108,9 @@ model Company {
   promotions        Promotion[]
   customers         Customer[]
   phoneOrders       PhoneOrder[]
+
+  // LANE accounts
+  invitations UserInvitation[]
 }
 
 model Branch {
@@ -230,6 +233,27 @@ model PosUser {
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
 
+  // ---- LANE accounts ------------------------------------------------------
+  // Proof that this mailbox answered: set when an invitation is accepted or an
+  // email change is confirmed, never by an administrator typing an address.
+  // Password recovery is only sent to a verified address, so an unverified row
+  // cannot be used to mail a code to an attacker-supplied mailbox.
+  emailVerifiedAt DateTime?
+  // An email change in flight. The address moves into `email` only after a
+  // code sent TO THE NEW ADDRESS is verified; until then the old address still
+  // signs in, so a mistyped change cannot lock anyone out.
+  pendingEmail    String?
+
+  // Invitation-pending is deliberately NOT a PosUserStatus: statuses are a
+  // Postgres enum written into live rows, and the pending state is a fact
+  // about an open UserInvitation, not about the user. A PosUser row is only
+  // created when the invitation is accepted.
+  invitationsSent UserInvitation[]  @relation("InvitationCreatedBy")
+  invitations     UserInvitation[]  @relation("InvitationAcceptedBy")
+  authChallenges  AuthChallenge[]
+  totpCredential  TotpCredential?
+  recoveryCodes   MfaRecoveryCode[]
+
   sessions PosSession[]
 
   ordersOpened     Order[]         @relation("OrderOpenedBy")
@@ -306,6 +330,21 @@ model License {
   createdById     String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
+
+  // ---- LANE accounts ------------------------------------------------------
+  // Days a lapsed licence stays usable after expiresAt. Grace is a property of
+  // the licence that was sold, not a global constant, so a customer who was
+  // promised a fortnight gets a fortnight without editing code. 0 = none.
+  graceDays             Int      @default(0)
+  // Entitled extension modules, from EXTENSION_POINTS in lib/permissions.js
+  // (INVENTORY, PURCHASE, KITCHEN, DELIVERY). Empty = core POS only. A module
+  // absent here is refused at the permission layer, not merely hidden.
+  modules               String[] @default([])
+  // Per-store hardware ceilings. null = unlimited, which is what every
+  // pre-existing licence means: this column arrived after they were sold, and
+  // a silent 0 would strand live tills.
+  maxTerminalsPerBranch Int?
+  maxDevicesPerBranch   Int?
 
   addons LicenseAddon[]
 
@@ -2208,4 +2247,191 @@ model PhoneOrderEvent {
 
   @@index([phoneOrderId, at])
   @@index([companyId, at])
+}
+// ---------------------------------------------------------------------------
+// LANE accounts — how a real person gets an account, and gets back into one.
+//
+// The shared rule across every model below: this database never holds anything
+// that could be replayed if it leaked. Invitation tokens and reset codes are
+// stored as keyed HMAC verifiers (lib/authcodes.js), keyed off POS_JWT_SECRET,
+// which is not in the database. A dump yields verifiers that cannot be
+// reversed and cannot be presented. The one recoverable secret — the TOTP seed,
+// which verification has to recompute from — is encrypted with AES-256-GCM
+// under a key derived from the same application secret.
+// ---------------------------------------------------------------------------
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  // Expiry is derived from expiresAt, exactly as LicenseStatus derives EXPIRED:
+  // there is no EXPIRED value here, so no forgotten job can resurrect a stale
+  // invitation by failing to run.
+}
+
+model UserInvitation {
+  id        String   @id @default(cuid())
+  // null = an invitation to the platform team (a POS_SUPER_ADMIN operator),
+  // which has no tenant. Every customer invitation carries its company.
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  email    String
+  fullName String
+  role     PosRole
+  // Store pinning for the invited role, applied when the invitation is
+  // accepted. Null for company-wide and platform roles.
+  branchId String?
+  regionId String?
+  // Store ids for an explicit multi-store scope, materialised into
+  // UserStoreAssignment rows at acceptance. Empty = scope by role alone.
+  storeIds String[] @default([])
+
+  // sha256(token) — same idiom as PosSession.tokenHash. Rotated on every
+  // resend, which is what makes the previous link stop working.
+  tokenHash  String           @unique
+  status     InvitationStatus @default(PENDING)
+  expiresAt  DateTime
+  sentCount  Int              @default(1)
+  lastSentAt DateTime         @default(now())
+
+  createdById  String?
+  createdBy    PosUser?  @relation("InvitationCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  // The account the acceptance created, kept so the audit trail joins up.
+  acceptedById String?
+  acceptedBy   PosUser?  @relation("InvitationAcceptedBy", fields: [acceptedById], references: [id], onDelete: Restrict)
+  acceptedAt   DateTime?
+  revokedAt    DateTime?
+  revokedById  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // "One open invitation per email" is enforced in the create transaction
+  // (prior PENDING rows are revoked first), not by a partial unique index:
+  // Prisma cannot express one, and a hand-written index would be dropped by
+  // the next `migrate diff` — silently, because the drift check passes.
+  @@index([companyId, status])
+  @@index([email, status])
+}
+
+enum AuthChallengePurpose {
+  PASSWORD_RESET
+  EMAIL_CHANGE
+  MFA_LOGIN
+}
+
+// A short-lived, single-account, single-purpose email-code challenge.
+//
+// Purpose is part of the row, so a code minted to confirm an email change can
+// never be presented to reset a password. Attempts are counted in the database
+// rather than in memory, so a restart does not hand an attacker a fresh budget,
+// and the counter is incremented in the same transaction that checks the code.
+model AuthChallenge {
+  id      String               @id @default(cuid())
+  userId  String
+  user    PosUser              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose AuthChallengePurpose
+
+  // Keyed HMAC of the 8-digit code (lib/authcodes.js). An 8-digit code behind
+  // a plain hash would be enumerable offline in milliseconds from a dump.
+  codeHash String
+  // The address the code was sent to. For EMAIL_CHANGE this is the NEW
+  // address — the one being proven — not the account's current email.
+  sentTo   String
+
+  attempts     Int       @default(0)
+  expiresAt    DateTime
+  // Set when a later challenge for the same user+purpose replaced this one. A
+  // resend therefore invalidates its predecessor rather than leaving two live
+  // codes, which would double an attacker's guessing budget.
+  supersededAt DateTime?
+  verifiedAt   DateTime?
+  // Set the moment the resulting authorization is spent. Consumption is a
+  // conditional UPDATE ... WHERE consumedAt IS NULL, so two concurrent requests
+  // cannot both spend one challenge.
+  consumedAt   DateTime?
+
+  // PASSWORD_RESET only: sha256 of the opaque authorization handed back after
+  // the code verifies. Verifying a code does NOT create a session — it creates
+  // this, which can do exactly one thing: set a new password.
+  resetTokenHash String?   @unique
+  resetExpiresAt DateTime?
+
+  requestIp String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+// An enrolled authenticator app. Secrets are encrypted, never hashed, because
+// verification recomputes the expected code from the seed.
+model TotpCredential {
+  id     String  @id @default(cuid())
+  userId String  @unique
+  user   PosUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // AES-256-GCM "iv.tag.ciphertext", key derived from POS_JWT_SECRET.
+  secretEnc    String
+  // Enrolment is two-step: the row exists from the moment the QR is shown, but
+  // MFA is only enforced once a code from the app has been proven here.
+  confirmedAt  DateTime?
+  // The last TOTP step accepted for this user. Verification requires a
+  // strictly greater step, so a code observed over someone's shoulder is
+  // already spent by the login that revealed it.
+  lastUsedStep BigInt    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Single-use fallbacks for a lost authenticator. Stored as HMAC verifiers and
+// deleted as they are spent, so the row count is the remaining count.
+model MfaRecoveryCode {
+  id     String  @id @default(cuid())
+  userId String
+  user   PosUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  codeHash  String    @unique
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+// Delivery ledger. Deliberately no body column: every message this system
+// sends carries a code, a token or a link, and a table of them would be a
+// second place to steal from. What is kept is enough to answer "did it go, and
+// what happened" — recipient, template, timing, provider response, error.
+model EmailOutbox {
+  id               String      @id @default(cuid())
+  to               String
+  template         String
+  subject          String
+  status           EmailStatus @default(QUEUED)
+  attempts         Int         @default(0)
+  // The SMTP server's own acceptance line, e.g. "250 2.0.0 Ok: queued as ...".
+  // Provider acceptance is not inbox receipt, and this column is the evidence
+  // of the former only.
+  providerResponse String?
+  messageId        String?
+  lastError        String?
+  sentAt           DateTime?
+  // Joins a message back to what caused it, without naming a secret.
+  companyId        String?
+  userId           String?
+  meta             Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([to, createdAt])
 }

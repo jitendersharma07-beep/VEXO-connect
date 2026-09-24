@@ -27,3 +27,12 @@ dist/
 # a lane could land a stale PID in the release repo. Ignored by directory.
 # Evidence meant to outlive the lane belongs in docs/, not here.
 .devlogs/
+
+# Captured mail. backend/scripts/mail-sink.mjs writes every message it accepts
+# as .eml, and those bodies hold live 8-digit sign-in codes until redeemed.
+# deploy/e2e-isolated.sh points it under .devlogs/ (ignored above), but the
+# script's own default is ./.maildrop, so running the sink by hand from a lane
+# root would otherwise leave working credentials one `git add -A` away from a
+# PUBLIC repo. Ignored by directory and by extension, at every depth.
+.maildrop/
+*.eml

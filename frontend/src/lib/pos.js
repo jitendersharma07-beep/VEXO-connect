@@ -60,6 +60,23 @@ export const fmtINR = (v) => {
   return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
+// "an 8-digit", "a 6-digit", or "An 8-digit" to open a sentence.
+//
+// LANE accounts — the code length is configuration the server reports, not a
+// constant these screens can read, so the article in front of it cannot be
+// typed by hand. It was, and the panel that confirms a new colleague's setup
+// code read "A 8-digit code is on its way" to every administrator who hired
+// somebody. Written this way, changing the policy to six cannot strand an
+// "an" in front of it either.
+//
+// Only 8, 11 and 18 take "an": eight, eleven and eighteen are the digit counts
+// that begin with a vowel sound. Nothing plausible reaches the hundreds.
+const TAKES_AN = new Set([8, 11, 18]);
+export const digitsPhrase = (n, { capital = false } = {}) => {
+  const article = TAKES_AN.has(Number(n)) ? 'an' : 'a';
+  return `${capital ? `${article[0].toUpperCase()}${article.slice(1)}` : article} ${n}-digit`;
+};
+
 // Business dates are IST per contract §3.
 const IST = 'Asia/Kolkata';
 
