@@ -1,0 +1,91 @@
+{
+  "options": [
+    {
+      "branchId": "cmufdwrwn00037mmu6e8cua6n",
+      "branchName": "Church Street",
+      "branchCode": "CP",
+      "available": true,
+      "deliveryCharge": 40,
+      "minOrder": 200,
+      "hours": {
+        "opensAt": "09:00",
+        "closesAt": "23:00",
+        "openAtFulfilment": true
+      },
+      "capacity": null,
+      "unavailableReasons": []
+    },
+    {
+      "branchId": "cmufdwrws00057mmuf4eb85qn",
+      "branchName": "Indiranagar",
+      "branchCode": "IN",
+      "available": false,
+      "deliveryCharge": null,
+      "minOrder": null,
+      "hours": {
+        "opensAt": "11:00",
+        "closesAt": "22:00",
+        "openAtFulfilment": true
+      },
+      "capacity": null,
+      "unavailableReasons": [
+        {
+          "code": "NOT_SERVICEABLE",
+          "message": "Does not deliver to 560001"
+        }
+      ]
+    },
+    {
+      "branchId": "cmufdwrwv00077mmudtvool9g",
+      "branchName": "Koramangala",
+      "branchCode": "KR",
+      "available": false,
+      "deliveryCharge": 55,
+      "minOrder": 1000,
+      "hours": {
+        "opensAt": "09:00",
+        "closesAt": "23:00",
+        "openAtFulfilment": true
+      },
+      "capacity": {
+        "slotMinutes": 15,
+        "maxOrdersPerSlot": 1,
+        "booked": 1
+      },
+      "unavailableReasons": [
+        {
+          "code": "BELOW_MIN_ORDER",
+          "message": "Minimum order for delivery here is ₹1000.00"
+        },
+        {
+          "code": "AT_CAPACITY",
+          "message": "Kitchen is full for that time (1/1)"
+        }
+      ]
+    },
+    {
+      "branchId": "cmufdwrwy00097mmudvq2af85",
+      "branchName": "Whitefield",
+      "branchCode": "WF",
+      "available": false,
+      "deliveryCharge": null,
+      "minOrder": null,
+      "hours": {
+        "opensAt": "09:00",
+        "closesAt": "23:00",
+        "openAtFulfilment": true
+      },
+      "capacity": null,
+      "unavailableReasons": [
+        {
+          "code": "BRANCH_INACTIVE",
+          "message": "Whitefield is not an active store"
+        },
+        {
+          "code": "NOT_SERVICEABLE",
+          "message": "Does not deliver to 560001"
+        }
+      ]
+    }
+  ]
+}

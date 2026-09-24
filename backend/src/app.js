@@ -34,6 +34,8 @@ import regionRoutes from './api/routes/regions.js';
 import terminalRoutes from './api/routes/terminals.js';
 import deviceRoutes from './api/routes/devices.js';
 import permissionRoutes from './api/routes/permissions.js';
+// LANE vc104-api
+import phoneOrderRoutes from './api/routes/phoneOrders.js';
 
 // LANE foundation, Phase 2 — VC-102.
 import promotionRoutes from './api/routes/promotions.js';
@@ -146,6 +148,9 @@ export const createApp = () => {
   api.use('/devices', deviceRoutes);
   api.use('/permissions', permissionRoutes);
   api.use('/promotions', promotionRoutes);
+
+  // LANE vc104-api
+  api.use('/phone-orders', phoneOrderRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);

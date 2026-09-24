@@ -1,0 +1,35 @@
+{
+  "phoneOrder": {
+    "id": "cmufdwskw002d7mmu44bc63dl",
+    "reference": "PH-000002",
+    "status": "ACCEPTED",
+    "customerId": "cmufdws1y001p7mmuqv11d16l",
+    "addressId": "cmufdws27001v7mmuong6p7wj",
+    "fulfilment": "DELIVERY",
+    "scheduledFor": null,
+    "routedBranchId": "cmufdwrwn00037mmu6e8cua6n",
+    "acceptedBranchId": "cmufdwrwn00037mmu6e8cua6n",
+    "acceptedAt": "2026-09-24T10:23:57.979Z",
+    "acceptedById": "cmufdwrx4000d7mmuz5vlylta",
+    "acceptedByName": "Ravi K",
+    "rejectedAt": null,
+    "rejectedByName": null,
+    "rejectReason": null,
+    "operatorId": "cmufdwrx1000b7mmurarjz5ps",
+    "operatorName": "Priya N",
+    "note": "ring the bell twice",
+    "deliverySupplier": "UNRESOLVED",
+    "deliveryChargeTreatment": "UNRESOLVED_POST_TAX_FALLBACK",
+    "order": {
+      "id": "cmufdwskd00297mmu22uyfdmq",
+      "status": "OPEN",
+      "subtotal": 520,
+      "taxAmount": 26,
+      "total": 546,
+      "invoiceNumber": null
+    },
+    "deliveryCharge": 40,
+    "deliveryChargeBillable": false,
+    "payableQuote": 586
+  }
+}

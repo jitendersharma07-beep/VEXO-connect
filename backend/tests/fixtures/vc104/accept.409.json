@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "POS_PHONE_ORDER_ALREADY_DECIDED",
+    "message": "This phone order has already been decided"
+  }
+}
