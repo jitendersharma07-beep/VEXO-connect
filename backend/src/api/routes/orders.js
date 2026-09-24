@@ -32,6 +32,7 @@ import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
 import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber, sellerOfRecord, billingSnapshot } from '../../lib/invoice.js';
+import { routeKotItems } from '../../lib/kitchen.js';
 import {
   ORDER_INCLUDE,
   SUMMARY_INCLUDE,
@@ -180,7 +181,20 @@ const discountAudit = (policy, before, after, approver, reason) => ({
 // shares and the promotion eligible base — sees the modifier-inclusive price
 // by construction (spec VC-102 modifier treatment). The rows returned in
 // `modifiers` are the printed breakdown of that fold.
-const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifierOptionIds }) => {
+//
+// Exported for LANE vc104-api: the phone-order centre snapshots catalog lines
+// the same way the till does. Exporting beats copying — a second copy would
+// drift the day this gains modifiers, and both paths must price identically.
+// That day was the a406 consolidation, and it drifted exactly as predicted:
+// vc104 had written its caller against the pre-modifier signature, so the
+// minSelect loop below refused every product with a REQUIRED group on the
+// phone path (D-3). Fixed 09-24 — `phoneOrders.js` now passes
+// modifierOptionIds, and shares `mergeCatalogItems` and `createLineData` with
+// the till below rather than keeping its own copies. The lesson the defect
+// actually taught: exporting the PRICING function was not enough, because the
+// line-merge key and the row writer encode the same modifier semantics and
+// those had been duplicated.
+export const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifierOptionIds }) => {
   const product = await prisma.product.findFirst({
     where: { id: productId, companyId, status: 'ACTIVE' },
     include: {
@@ -244,7 +258,27 @@ const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifi
 // A line only merges with another line carrying the SAME modifier choice.
 const modifierKeyOf = (mods) => (mods ?? []).map((m) => m.optionId).sort().join(',');
 
-const createLineData = ({ modifiers, ...line }, orderId) => ({
+// The same rule stated over a REQUEST item rather than a resolved line: dedupe
+// and sort, because ["a","b"], ["b","a"] and ["a","a","b"] are one basket
+// choice and must land on one line. Shared with the phone path — D-3 came from
+// the phone centre carrying its own merge key that knew nothing about
+// modifiers, so two "same product, different topping" entries would have
+// collapsed into one line at whichever topping was seen first.
+export const mergeCatalogItems = (items) => {
+  const merged = new Map();
+  for (const item of items) {
+    const modKey = [...new Set(item.modifierOptionIds ?? [])].sort().join(',');
+    const key = `${item.productId}|${item.variantId ?? ''}|${modKey}`;
+    const cur = merged.get(key);
+    if (cur) cur.qty += item.qty;
+    else merged.set(key, { ...item });
+  }
+  return [...merged.values()];
+};
+
+// Exported for the same reason: a line's modifier snapshots are nested relation
+// rows, which rules out `createMany` on EVERY path that writes order items.
+export const createLineData = ({ modifiers, ...line }, orderId) => ({
   ...line,
   orderId,
   ...(modifiers.length
@@ -316,15 +350,8 @@ router.post(
     }
 
     // Merge duplicate product+variant+modifier entries into one line.
-    const merged = new Map();
-    for (const item of data.items) {
-      const key = `${item.productId}|${item.variantId ?? ''}|${[...new Set(item.modifierOptionIds ?? [])].sort().join(',')}`;
-      const cur = merged.get(key);
-      if (cur) cur.qty += item.qty;
-      else merged.set(key, { ...item });
-    }
     const lines = [];
-    for (const item of merged.values()) {
+    for (const item of mergeCatalogItems(data.items)) {
       lines.push(await resolveCatalogLine(req.companyScope.id, item));
     }
 
@@ -720,6 +747,15 @@ router.post(
       await tx.orderItem.updateMany({
         where: { id: { in: unsent.map((i) => i.id) } },
         data: { kotId: created.id },
+      });
+      // Kitchen routing rides the same transaction: KOT and its ticket lines
+      // exist together or not at all. Zero stations configured = no-op.
+      await routeKotItems(tx, {
+        companyId: req.companyScope.id,
+        branchId: order.branchId,
+        order,
+        kot: created,
+        items: unsent,
       });
       return { ...created, items: unsent };
     });

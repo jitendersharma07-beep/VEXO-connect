@@ -168,7 +168,8 @@ person can use "Forgot password?" themselves.
 
 ## 6. What is proven, and what is not
 
-**Proven.** 628 backend tests, and `deploy/accounts-journey.mjs`: 46 checks
+**Proven.** 818 backend tests — the whole suite on the merged tree, not the
+accounts files alone — and `deploy/accounts-journey.mjs`: 46 checks
 driving the real built bundle in headless Chromium against a real backend over
 HTTP, reading mail out of a real SMTP conversation, on a fresh database. It
 covers bootstrap → last-admin protection → company → licence → owner invitation

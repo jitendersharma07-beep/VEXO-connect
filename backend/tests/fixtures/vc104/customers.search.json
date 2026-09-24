@@ -1,0 +1,22 @@
+{
+  "customers": [
+    {
+      "id": "cmufdws1y001p7mmuqv11d16l",
+      "name": "Anita Rao",
+      "phone": "+919876500011",
+      "email": null,
+      "note": null,
+      "archivedAt": null,
+      "addressCount": 2
+    },
+    {
+      "id": "cmufdws25001t7mmubnyqnymn",
+      "name": "Anita Sharma",
+      "phone": "+919876500013",
+      "email": null,
+      "note": null,
+      "archivedAt": null,
+      "addressCount": 0
+    }
+  ]
+}

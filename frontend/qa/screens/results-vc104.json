@@ -1,0 +1,549 @@
+{
+  "ui": "http://127.0.0.1:5383",
+  "api": "http://127.0.0.1:5382",
+  "at": "2026-09-24T19:15:48.164Z",
+  "tree": "/home/atc-noc/vexo-connect-x-lanes/main-merge",
+  "branch": "main",
+  "baseSha": "d5b1cb04789e4adb94b3e57e3374d62b904f4069",
+  "dirty": true,
+  "passed": 75,
+  "skipped": 0,
+  "total": 75,
+  "results": [
+    {
+      "name": "owner session is CUSTOMER_OWNER",
+      "pass": true,
+      "actual": "CUSTOMER_OWNER",
+      "expected": "CUSTOMER_OWNER",
+      "note": ""
+    },
+    {
+      "name": "demo licence plan is MULTI_STORE (HQ routing entitled)",
+      "pass": true,
+      "actual": "MULTI_STORE",
+      "expected": "MULTI_STORE",
+      "note": "owner cross-store submission depends on this; a FAIL here invalidates the rest of the run"
+    },
+    {
+      "name": "owner nav offers Phone orders",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "status chips are exactly All/Submitted/Accepted/Rejected (§4: no CANCELLED chip)",
+      "pass": true,
+      "actual": [
+        "All",
+        "Submitted",
+        "Accepted",
+        "Rejected"
+      ],
+      "expected": [
+        "All",
+        "Submitted",
+        "Accepted",
+        "Rejected"
+      ],
+      "note": ""
+    },
+    {
+      "name": "empty centre says so",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "default address is pre-selected for delivery",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the pre-selected address is Home (110001)",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "basket holds two lines after adding items",
+      "pass": true,
+      "actual": 2,
+      "expected": 2,
+      "note": ""
+    },
+    {
+      "name": "every store is rendered with a verdict (none hidden)",
+      "pass": true,
+      "actual": 2,
+      "expected": 2,
+      "note": "§5.6: unavailable stores are shown with reasons, never dropped"
+    },
+    {
+      "name": "Connaught Place is available for 110001",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "QA fixture holds CP open around the clock — this asserts service-area match, not hours"
+    },
+    {
+      "name": "CP quotes the seeded ₹40 delivery charge",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "CP states the seeded ₹200 minimum order",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "Cyber Hub quotes the seeded ₹65 delivery charge",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "110001 is deliberately dual-serviced so a move visibly re-prices"
+    },
+    {
+      "name": "submission answered 201 Created",
+      "pass": true,
+      "actual": 201,
+      "expected": 201,
+      "note": ""
+    },
+    {
+      "name": "reference has the PH- shape",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "order status starts SUBMITTED",
+      "pass": true,
+      "actual": "SUBMITTED",
+      "expected": "SUBMITTED",
+      "note": ""
+    },
+    {
+      "name": "delivery charge is quoted, not billable (C-6 open)",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "payable on screen is the SERVER quote, formatted",
+      "pass": true,
+      "actual": "₹565.00",
+      "expected": "₹565.00",
+      "note": ""
+    },
+    {
+      "name": "food-and-tax on screen is order.total",
+      "pass": true,
+      "actual": "₹525.00",
+      "expected": "₹525.00",
+      "note": ""
+    },
+    {
+      "name": "delivery on screen is the quoted charge",
+      "pass": true,
+      "actual": "₹40.00",
+      "expected": "₹40.00",
+      "note": ""
+    },
+    {
+      "name": "server invariant payableQuote = total + deliveryCharge held on this order",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "a server number, asserted as evidence; the client never computes it"
+    },
+    {
+      "name": "C-6 caveat is read to the operator",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the submit request body was captured",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "an exact replay answers 200, not 201",
+      "pass": true,
+      "actual": 200,
+      "expected": 200,
+      "note": "§5.7: same key + same hash = same order back"
+    },
+    {
+      "name": "the replay returns the SAME order id",
+      "pass": true,
+      "actual": "cmufwv31h000b12y6rxwqrquu",
+      "expected": "cmufwv31h000b12y6rxwqrquu",
+      "note": ""
+    },
+    {
+      "name": "exactly one order exists for that reference after the replay",
+      "pass": true,
+      "actual": 1,
+      "expected": 1,
+      "note": ""
+    },
+    {
+      "name": "changing the basket withdraws the store list and the choice",
+      "pass": true,
+      "actual": null,
+      "expected": null,
+      "note": "options are point-in-time; a stale verdict is never left clickable"
+    },
+    {
+      "name": "re-check renders both stores again",
+      "pass": true,
+      "actual": 2,
+      "expected": 2,
+      "note": ""
+    },
+    {
+      "name": "order 2 submitted to CP",
+      "pass": true,
+      "actual": "SUBMITTED",
+      "expected": "SUBMITTED",
+      "note": ""
+    },
+    {
+      "name": "order 2 got its own idempotency key (fresh form = fresh key)",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "§5.7: \"Take another order\" mints a new key; nothing else does"
+    },
+    {
+      "name": "a 409 duplicate offers to open the existing caller",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "§5.2: POS_CONFLICT carries details.customerId"
+    },
+    {
+      "name": "opening the duplicate lands on Anita Rao",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "both stores still rendered for an out-of-area caller",
+      "pass": true,
+      "actual": 2,
+      "expected": 2,
+      "note": ""
+    },
+    {
+      "name": "CP is unavailable for 122001",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "CP names the reason: Out of area",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "badge label + the server message beside it"
+    },
+    {
+      "name": "CH is available for 122001 at ₹45",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the centre lists both submitted orders",
+      "pass": true,
+      "actual": 2,
+      "expected": 2,
+      "note": ""
+    },
+    {
+      "name": "detail shows the caller fetched by id",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "detail says the store has not decided yet",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "detail shows who took the call",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "detail To-collect equals the server quote",
+      "pass": true,
+      "actual": "₹565.00",
+      "expected": "₹565.00",
+      "note": ""
+    },
+    {
+      "name": "detail carries the C-6 delivery caveat",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the URL carries the open order (deep-linkable)",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "manager nav offers Phone orders",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "manager acceptance shows the decider BY NAME",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "§9: attribution is snapshotted names"
+    },
+    {
+      "name": "accepted status is shown",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "owner card is stale on purpose (still offers Accept)",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "second decider is told, not silently ignored",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "server 409 POS_PHONE_ORDER_ALREADY_DECIDED surfaced as a toast: [\"This phone order has already been decided\"]"
+    },
+    {
+      "name": "after the refusal the owner sees the real decision",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the Accept button is gone once decided",
+      "pass": true,
+      "actual": null,
+      "expected": null,
+      "note": ""
+    },
+    {
+      "name": "rejection shows decider name and the typed reason",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "owner is offered the move on a REJECTED order",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "reassign is owner-only (rolesFor phone.order.reassign)"
+    },
+    {
+      "name": "the routed store is badged Current store and not selectable",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the modal says the preview is basket-less",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "the sidecar carries no lines; the server re-judges with the basket on the move"
+    },
+    {
+      "name": "the re-price banner appears after the move",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "server priceChanged OR a payableQuote drift must raise it — the operator re-reads the quote"
+    },
+    {
+      "name": "the move re-routed the order to CH and reset it to SUBMITTED",
+      "pass": true,
+      "actual": "SUBMITTED",
+      "expected": "SUBMITTED",
+      "note": ""
+    },
+    {
+      "name": "the re-priced quote reflects CH delivery ₹65 (was ₹40)",
+      "pass": true,
+      "actual": 65,
+      "expected": 65,
+      "note": ""
+    },
+    {
+      "name": "the operator is told to read the NEW quote to the caller",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "banner: The move re-priced this order for the new store. Read the new quote to the caller: ₹443.00."
+    },
+    {
+      "name": "history shows the move between named stores",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "CP manager still sees the order accepted at CP",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "CP manager no longer sees the order moved to CH",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": "branch scope is routedBranchId OR acceptedBranchId — the moved order left both"
+    },
+    {
+      "name": "the capacity probe form armed with the shared slot time",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "a full CH slot is refused with Kitchen full",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+    },
+    {
+      "name": "the refusal carries the 2/2 count",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+    },
+    {
+      "name": "CP is untouched by CH capacity",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the ASAP probe reports a booked count for CH at all",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 0/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Available — no \"n/m booked\" means the server sent no capacity block"
+    },
+    {
+      "name": "one ASAP submission moves the booked count by exactly one (D-2)",
+      "pass": true,
+      "actual": 1,
+      "expected": 1,
+      "note": "CH went 0/2 → 2/2; before the fix an ASAP order was invisible to the counter and this stayed 0"
+    },
+    {
+      "name": "a full CH slot refuses ASAP too, with Kitchen full",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+    },
+    {
+      "name": "the ASAP refusal carries the full count",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+    },
+    {
+      "name": "cashier nav never offers Phone orders",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "cashier is bounced off /phone-orders",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": "landed on /dashboard"
+    },
+    {
+      "name": "the API refuses a cashier regardless of the UI guard",
+      "pass": true,
+      "actual": 403,
+      "expected": 403,
+      "note": ""
+    },
+    {
+      "name": "the customer-write API refuses a cashier too",
+      "pass": true,
+      "actual": 403,
+      "expected": 403,
+      "note": ""
+    },
+    {
+      "name": "no horizontal page overflow on the list at 390px",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "no horizontal page overflow on the entry form at 390px",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    }
+  ]
+}

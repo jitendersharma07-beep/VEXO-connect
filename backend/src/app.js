@@ -21,7 +21,10 @@ import tableRoutes from './api/routes/tables.js';
 import orderRoutes from './api/routes/orders.js';
 import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
+import menuProfitabilityRoutes from './api/routes/menuProfitability.js';
 import displayRoutes from './api/routes/display.js';
+import kitchenRoutes from './api/routes/kitchen.js';
+import { printAgentsRouter, printJobsRouter } from './api/routes/printing.js';
 import gatewayRoutes from './api/routes/gateway.js';
 
 // LANE foundation — the organisation, device and permission surface.
@@ -32,6 +35,8 @@ import regionRoutes from './api/routes/regions.js';
 import terminalRoutes from './api/routes/terminals.js';
 import deviceRoutes from './api/routes/devices.js';
 import permissionRoutes from './api/routes/permissions.js';
+// LANE vc104-api
+import phoneOrderRoutes from './api/routes/phoneOrders.js';
 
 // LANE foundation, Phase 2 — VC-102.
 import promotionRoutes from './api/routes/promotions.js';
@@ -142,8 +147,13 @@ export const createApp = () => {
   api.use('/tables', tableRoutes);
   api.use('/orders', orderRoutes);
   api.use('/discount-policies', discountPolicyRoutes);
+  // VC-105. Mounted before /reports so the more specific path wins.
+  api.use('/reports/menu-profitability', menuProfitabilityRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
+  api.use('/kitchen', kitchenRoutes);
+  api.use('/print-agents', printAgentsRouter);
+  api.use('/print-jobs', printJobsRouter);
 
   // LANE foundation — mounted after /branches so the store routes keep their
   // place in the table; order is irrelevant to Express here, none of these
@@ -156,6 +166,9 @@ export const createApp = () => {
   api.use('/devices', deviceRoutes);
   api.use('/permissions', permissionRoutes);
   api.use('/promotions', promotionRoutes);
+
+  // LANE vc104-api
+  api.use('/phone-orders', phoneOrderRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);

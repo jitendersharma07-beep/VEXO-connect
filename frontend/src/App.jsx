@@ -16,9 +16,12 @@ import AcceptInvitation from './pages/AcceptInvitation.jsx';
 import ForgotPassword from './pages/ForgotPassword.jsx';
 import Sell from './pages/Sell.jsx';
 import Orders from './pages/Orders.jsx';
+import PhoneOrders from './pages/PhoneOrders.jsx';
+import PhoneOrderNew from './pages/PhoneOrderNew.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
+import MenuProfitability from './pages/MenuProfitability.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
@@ -113,6 +116,25 @@ export default function App() {
                 }
               />
               <Route path="orders" element={<Orders />} />
+              {/* VC-104: RequireRoles, not RequireAction — the phone routes
+                  are role-gated on the server (requireRole), so phone.*
+                  actions never appear in GET /permissions/me. */}
+              <Route
+                path="phone-orders"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <PhoneOrders />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="phone-orders/new"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <PhoneOrderNew />
+                  </RequireRoles>
+                }
+              />
               {/* VC-101: staff side of display pairing — same roles the Sell
                   screen admits. */}
               <Route
@@ -144,6 +166,16 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <SalesReport />
+                  </RequireRoles>
+                }
+              />
+              {/* VC-105. Same gate as the other reports: a CASHIER is refused
+                  by the server (403) and never reaches the route. */}
+              <Route
+                path="reports/menu-profitability"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <MenuProfitability />
                   </RequireRoles>
                 }
               />

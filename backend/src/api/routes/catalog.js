@@ -538,12 +538,55 @@ const groupUpdate = z
     status: z.enum(['ACTIVE', 'ARCHIVED']).optional(),
   });
 
+// D-5 (docs/VC104-BACKEND-DEFECTS.md). The till path enforces minSelect over
+// ACTIVE groups while counting only ACTIVE options
+// (orders.js `resolveCatalogLine`), so an ACTIVE group that requires more
+// choices than it has available cannot be satisfied by any caller and the
+// product stops selling EVERYWHERE — till, phone, all of it. Nothing here used
+// to check that, and four ordinary edits reached the state with a 200.
+//
+// The invariant is one sentence: **an ACTIVE group must have at least
+// `minSelect` ACTIVE options.** It is checked against the RESULT of the write,
+// not against the payload, because three of the four paths send a body that is
+// perfectly valid on its own and only goes wrong in combination with what is
+// already stored — which is exactly why a zod `.refine` cannot express it.
+//
+// 409 and not 400 on purpose: nothing about the input is malformed. The request
+// conflicts with the state of the group, which is what 409 is for. Every
+// message names the way out, because the remedy is not guessable — archiving
+// the GROUP is fine and archiving its last OPTION is not, and nothing in the
+// API said so.
+//
+// Deliberately NOT lenient about pre-existing breakage: a group that is already
+// unsatisfiable refuses unrelated edits too (a rename, say). That is the point.
+// All three repairs stay open — archive the group, lower minSelect, or restore
+// an option — because each of them ends in a state that satisfies the rule.
+const assertSatisfiable = ({ name, minSelect, status, activeOptions }, remedy) => {
+  if (status !== 'ACTIVE' || minSelect <= activeOptions) return;
+  const need = `${minSelect} choice${minSelect === 1 ? '' : 's'}`;
+  const have = activeOptions === 1 ? '1 is' : `${activeOptions} are`;
+  throw conflict(
+    `"${name}" would require ${need} but only ${have} available, so the product could not be sold. ${remedy}`,
+  );
+};
+
+const countActive = (group) => group.options.filter((m) => m.status === 'ACTIVE').length;
+
 router.post(
   '/products/:id/modifier-groups',
   ...canWrite,
   asyncHandler(async (req, res) => {
     const product = await loadProduct(req);
     const data = groupCreate.parse(req.body);
+    // A group is born with no options, so any minimum above zero is instantly
+    // unsatisfiable. Checked before the clash query because it needs no
+    // database read at all. This does make a required group a three-step job —
+    // create it open, add the options, then set the minimum — and the message
+    // says so, because otherwise this reads as "required groups are banned".
+    assertSatisfiable(
+      { ...data, status: 'ACTIVE', activeOptions: 0 },
+      'Create the group with no minimum, add its options, then raise the minimum.',
+    );
     const clash = await prisma.modifierGroup.findFirst({
       where: { productId: product.id, name: data.name },
     });
@@ -583,6 +626,19 @@ router.patch(
     const min = data.minSelect ?? group.minSelect;
     const max = data.maxSelect !== undefined ? data.maxSelect : group.maxSelect;
     if (max != null && max < min) throw badRequest('maxSelect must be at least minSelect', 'maxSelect');
+    // D-5, two ways in through this one route: raising minSelect past the
+    // options that exist, and re-activating a group whose options were all
+    // archived while it was away. `max < min` above was the only cross-field
+    // check here, and it is skipped whenever maxSelect is null — the default.
+    assertSatisfiable(
+      {
+        name: data.name ?? group.name,
+        minSelect: min,
+        status: data.status ?? group.status,
+        activeOptions: countActive(group),
+      },
+      'Add or restore options first, or lower the minimum, or archive the whole group.',
+    );
     if (data.name && data.name !== group.name) {
       const clash = await prisma.modifierGroup.findFirst({
         where: { productId: product.id, name: data.name },
@@ -649,6 +705,20 @@ router.patch(
     const option = group.options.find((m) => m.id === req.params.optionId);
     if (!option) throw notFound('Modifier option not found');
     const data = optionUpdate.parse(req.body);
+    // D-5's commonest way in: retiring the last choice a required group has.
+    // Counted both directions, because restoring an archived option is the
+    // repair and must never be refused by the rule it repairs.
+    const wasActive = option.status === 'ACTIVE';
+    const willBeActive = data.status !== undefined ? data.status === 'ACTIVE' : wasActive;
+    assertSatisfiable(
+      {
+        name: group.name,
+        minSelect: group.minSelect,
+        status: group.status,
+        activeOptions: countActive(group) - (wasActive ? 1 : 0) + (willBeActive ? 1 : 0),
+      },
+      'Archive the whole group instead, or lower its minimum first.',
+    );
     if (data.name && data.name !== option.name) {
       const clash = await prisma.modifierOption.findFirst({
         where: { groupId: group.id, name: data.name },
