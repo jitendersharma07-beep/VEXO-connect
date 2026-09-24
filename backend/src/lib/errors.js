@@ -43,6 +43,20 @@ export const gatewayNotConfigured = () =>
 // rather than to report a bug.
 export const badGateway = (message) => new AppError(502, 'POS_GATEWAY_UNAVAILABLE', message);
 
+// 503, not 500: the write was abandoned by the storage layer, not broken by it.
+// Prisma reports two transient conditions this way — P2028, the interactive
+// transaction outlived its budget and was closed under the request, and P2024,
+// no connection came free in time. Both roll back, so nothing is half-written,
+// and both are worth retrying. An opaque 500 tells the cashier to report a bug;
+// this tells them what is actually true, which is that the same keypress will
+// probably work. See src/lib/prisma.js for why the budget is now declared.
+export const storageBusy = () =>
+  new AppError(
+    503,
+    'POS_STORAGE_BUSY',
+    'The till was busy and could not finish that just now. Nothing was saved — please try again.',
+  );
+
 export const licenseBlocked = (state) =>
   new AppError(
     403,
