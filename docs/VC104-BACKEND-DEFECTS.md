@@ -1,16 +1,20 @@
 # VC-104 backend defects found by W2's browser QA — report for W1
 
-**From:** W2 (frontend lane `x/vc104-ui`) · **To:** W1 (this lane, `x/vc104-api`)
-**Date:** 2026-09-24 · **Line numbers are this lane's, at `c40683b`**
+**From:** W2 (frontend lane `x/vc104-ui`) · **To:** W1 (backend lane `x/vc104-api`)
+**Date:** 2026-09-24 · **Line numbers are `x/vc104-api`'s, at `c40683b`**
 
 Two defects in the phone-order backend. Both were found from the outside, by
-driving this API through a real browser against W2's own database — not by
-reading the code, and not by running this lane's test suite (W2 does not run
-another worker's tests). Neither is fixed: the backend is W1's to change. This
-report exists so the fix is a decision W1 makes with the evidence in hand.
+driving W1's API through a real browser against W2's own database — not by
+reading the code, and not by running W1's test suite (W2 does not run another
+worker's tests). Neither is fixed: the backend is W1's to change. This report
+exists so the fix is a decision W1 makes with the evidence in hand.
 
-The same file is committed on `x/vc104-ui` (where the QA evidence lives); this
-copy sits in the lane it describes so it is next to the code it cites.
+> **Consolidation note (`merge/a406-consolidate`, 2026-09-24).** This report was
+> written twice, once per lane, each copy describing the other lane in the third
+> person. Both lanes are now in this one tree, so those references have been
+> rewritten to point at paths rather than at branches: the backend it cites and
+> the QA evidence it rests on are both present here. A third defect, D-3, was
+> added by the merge itself and is marked as such.
 
 | # | Defect | Effect | Severity | Where |
 |---|--------|--------|----------|-------|
@@ -18,7 +22,7 @@ copy sits in the lane it describes so it is next to the code it cites.
 | D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
 | D-3 | Phone orders cannot sell a product with a REQUIRED modifier group | Such products are refused on the phone path with "Choose at least N"; the caller cannot complete the order | Medium — fails CLOSED, so no mispricing; a catalogue subset is simply unsellable by phone | `backend/src/api/routes/orders.js` `resolveCatalogLine` minSelect loop, called from `phoneOrders.js` |
 
-§3 is the part worth reading first: **this lane's own suite already builds D-1's
+§3 is the part worth reading first: **the phone-order suite already builds D-1's
 exact conditions and simply never looks at the flag.**
 
 **D-3 did not exist in either lane alone — the consolidation merge created it**
@@ -79,7 +83,7 @@ Seeded lane data, CP → CH reassign, same basket: delivery ₹40 → ₹65,
 re-price banner in QA run `20260924-135119` (66 checks passed, then the harness
 waited for a `po-move-banner` that the server's flag never justified). Evidence:
 `frontend/qa/screens/12-reassign-modal.png`, `13-after-move.png` and
-`frontend/qa/screens/results.json` on `x/vc104-ui` @ `f344ef4`.
+`frontend/qa/screens/results.json`, committed here (from `x/vc104-ui` @ `f344ef4`).
 
 ### Suggested fixes — W1's call
 
@@ -142,8 +146,8 @@ accepting into a kitchen that is already full, rather than refusing.
 QA run `20260924-140702`: the CH store's row read "0/2 booked this 15-min slot"
 while two live `SUBMITTED` CH-routed orders sat inside that wall-clock window.
 A direct DB read confirmed `scheduledFor IS NULL` on all three of that run's
-orders. Evidence: `frontend/qa/screens/15b-capacity-asap-d2.png` on
-`x/vc104-ui` @ `f344ef4`.
+orders. Evidence: `frontend/qa/screens/15b-capacity-asap-d2.png`, committed here
+(from `x/vc104-ui` @ `f344ef4`).
 
 ### Suggested fixes — W1's call
 
@@ -206,7 +210,7 @@ exact drift the export was chosen to prevent.
 
 ---
 
-## 3. Why this lane's suite stays green on both
+## 3. Why the phone-order suite stays green on both
 
 **No existing assertion pins either bug, so fixing them should not turn the
 suite red.** What is missing is coverage, and in D-1's case it is missing by a
@@ -252,10 +256,10 @@ asserted.
 
 ## 4. Reproduction
 
-Environment recipe: `docs/VC104-SETUP.md` in this lane, or
-`docs/VC104-UI-DELIVERY.md` §6 on `x/vc104-ui` for the browser path (lane DBs,
-ports, seeded stores, and the env-var names for credentials — no secrets are
-written down in either lane). Run this lane's backend against a scratch DB with
+Environment recipe: `docs/VC104-SETUP.md` for the backend alone, or
+`docs/VC104-UI-DELIVERY.md` §6 for the browser path — both are in this tree
+(lane DBs, ports, seeded stores, and the env-var names for credentials; no
+secrets are written down in either). Run the backend against a scratch DB with
 the lane seed, then:
 
 - **D-1:** submit a DELIVERY order routed to the first store, reassign it to the
@@ -270,7 +274,7 @@ Neither needs the UI; both are visible in the raw JSON.
 
 ## 5. What W2 did meanwhile (so W1 knows what to undo)
 
-Both changes live on `x/vc104-ui`, not in this lane:
+Both changes are W2's frontend work, not changes to the backend they describe:
 
 - **For D-1**, `frontend/src/pages/PhoneOrders.jsx:606–614` raises the re-price
   banner on `priceChanged || payableQuote !== previous payableQuote` — an
@@ -285,8 +289,14 @@ Both changes live on `x/vc104-ui`, not in this lane:
 
 ## 6. What this report does not claim
 
-W2 did not run this lane's test suite, did not modify this lane's code, and does
-not certify the 455/455 figure recorded in `docs/lanes/VC104-API.md` (the lane
-holds no on-disk log for that run). Everything above is either a direct quotation
-of the committed source at `c40683b` or an observation from W2's own browser-QA
-runs, whose evidence is committed on `x/vc104-ui` @ `f344ef4`.
+W2 did not run W1's test suite, did not modify W1's code, and does not certify
+the 455/455 figure recorded in `docs/lanes/VC104-API.md` (that lane holds no
+on-disk log for the run). Everything above is either a direct quotation of the
+committed source at `c40683b` or an observation from W2's own browser-QA runs,
+whose evidence is committed here (from `x/vc104-ui` @ `f344ef4`).
+
+D-1 and D-2 were reported against `c40683b` and are **still unfixed** in this
+consolidated tree — the merge carried them forward untouched, as W2 wrote them.
+D-3 is the merge's own doing and is likewise unfixed. None of the three is
+pinned by an assertion, so the phone-order suite's 41/41 here says nothing about
+them either way.

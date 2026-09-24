@@ -13,6 +13,8 @@ import AtcCompanies from './pages/AtcCompanies.jsx';
 import AtcCompanyDetail from './pages/AtcCompanyDetail.jsx';
 import Sell from './pages/Sell.jsx';
 import Orders from './pages/Orders.jsx';
+import PhoneOrders from './pages/PhoneOrders.jsx';
+import PhoneOrderNew from './pages/PhoneOrderNew.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
@@ -98,6 +100,25 @@ export default function App() {
                 }
               />
               <Route path="orders" element={<Orders />} />
+              {/* VC-104: RequireRoles, not RequireAction — the phone routes
+                  are role-gated on the server (requireRole), so phone.*
+                  actions never appear in GET /permissions/me. */}
+              <Route
+                path="phone-orders"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <PhoneOrders />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="phone-orders/new"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <PhoneOrderNew />
+                  </RequireRoles>
+                }
+              />
               {/* VC-101: staff side of display pairing — same roles the Sell
                   screen admits. */}
               <Route
