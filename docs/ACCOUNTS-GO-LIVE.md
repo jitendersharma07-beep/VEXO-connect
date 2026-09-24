@@ -168,7 +168,7 @@ person can use "Forgot password?" themselves.
 
 ## 6. What is proven, and what is not
 
-**Proven.** 617 backend tests, and `deploy/accounts-journey.mjs`: 46 checks
+**Proven.** 628 backend tests, and `deploy/accounts-journey.mjs`: 46 checks
 driving the real built bundle in headless Chromium against a real backend over
 HTTP, reading mail out of a real SMTP conversation, on a fresh database. It
 covers bootstrap → last-admin protection → company → licence → owner invitation
@@ -186,9 +186,22 @@ to a local sink that relays nothing. Step 1 is the gap, and after step 1 the
 first real evidence is the bootstrap invitation arriving at
 `support@vexoconnect.com`.
 
-**Known blocked.** `deploy/e2e-workflow.mjs` (the till money-path harness)
-seated its Cyber Hub staff from the temporary password that used to come back
-from `POST /users`. That password no longer exists. Its stack has no SMTP and
-no way to read a mailbox, so the script now refuses with the recipe for wiring
-a sink rather than failing deep in the money path. It is blocked, not quietly
-weakened, and unblocking it is independent of everything above.
+**Unblocked, but not run here.** `deploy/e2e-workflow.mjs` (the till money-path
+harness) used to seat its Cyber Hub staff from the temporary password that came
+back from `POST /users`. That password no longer exists, so the harness briefly
+refused rather than fail deep in the money path. `deploy/e2e-isolated.sh` now
+starts `backend/scripts/mail-sink.mjs` alongside the backend and hands the
+harness the capture folder, and the harness seats its staff the way a real
+branch does: read the emailed code, set a password, sign in. No back door was
+added — there is no test-only path that returns a credential, because a back
+door that exists for tests exists in production too.
+
+What that proves and what it does not: the mail half is proven, against a real
+backend over real HTTP with a real capture folder. The money path behind it is
+**still unrun on this host** — `deploy/e2e-isolated.sh` and the harness both
+refuse on `atc-noc` because production POS runs here, and neither guard was
+weakened. Run it on a host that is not `atc-noc`.
+
+The folder the sink writes to holds live single-use codes. `e2e-isolated.sh`
+drops it under `.devlogs/` and leaves it for inspection; treat old runs as spent
+credentials and delete them.
