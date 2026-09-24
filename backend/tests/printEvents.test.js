@@ -27,10 +27,13 @@ const wipe = async () => {
   await prisma.promotionStore.deleteMany();
   await prisma.promotionItemRule.deleteMany();
   await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -78,7 +81,7 @@ const printEvent = (id, body, token = tokens.cashier) =>
 const auditRows = (orderId, actions = ['ORDER_PRINT_REQUESTED', 'RECEIPT_REPRINT', 'KOT_REPRINT']) =>
   prisma.posAuditLog.findMany({
     where: { action: { in: actions }, entityId: orderId },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { at: 'asc' },
   });
 
 beforeAll(async () => {

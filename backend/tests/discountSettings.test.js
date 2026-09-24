@@ -31,10 +31,13 @@ const wipe = async () => {
   await prisma.promotionStore.deleteMany();
   await prisma.promotionItemRule.deleteMany();
   await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
