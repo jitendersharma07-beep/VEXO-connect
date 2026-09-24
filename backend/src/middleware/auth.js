@@ -45,6 +45,9 @@ export const requirePosAuth = asyncHandler(async (req, _res, next) => {
       status: true,
       companyId: true,
       branchId: true,
+      // LANE foundation — a REGIONAL_MANAGER is scoped by region, not branch,
+      // so the scope resolver needs it on every request.
+      regionId: true,
       mustChangePassword: true,
       company: { select: { id: true, name: true, slug: true, status: true, isDemo: true } },
     },
@@ -89,7 +92,20 @@ const BRANCH_PINNED_ROLES = new Set(['BRANCH_MANAGER', 'CASHIER']);
 export const requireBranchAccess = asyncHandler(async (req, _res, next) => {
   const branch = await prisma.branch.findUnique({ where: { id: req.params.branchId } });
   if (!branch || branch.companyId !== req.companyScope.id) throw notFound('Branch not found');
-  if (BRANCH_PINNED_ROLES.has(req.user.role) && req.user.branchId !== branch.id) {
+  // LANE foundation — when the route has loaded a permission context, the store
+  // scope it resolved is the authority: it already accounts for explicit
+  // multi-store assignments and for a regional manager's region, neither of
+  // which the single branchId pin below can express. Routes that have not been
+  // migrated keep the original pinning exactly as it was.
+  if (req.perm?.scope) {
+    const { kind, branchIds, regionId } = req.perm.scope;
+    const permitted =
+      kind === 'ALL' ||
+      kind === 'COMPANY' ||
+      (kind === 'REGION' && branch.regionId === regionId) ||
+      (kind === 'LIST' && branchIds.includes(branch.id));
+    if (!permitted) throw forbidden('Your role is limited to your own branch');
+  } else if (BRANCH_PINNED_ROLES.has(req.user.role) && req.user.branchId !== branch.id) {
     throw forbidden('Your role is limited to your own branch');
   }
   req.branch = branch;

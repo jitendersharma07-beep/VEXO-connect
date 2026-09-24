@@ -3,7 +3,8 @@
 // helpers. DB columns are DECIMAL(10,2) rupees; all arithmetic is integer
 // paise via money.js, written back as exact 2dp strings.
 
-import { toPaise, toRupees, pctToMilli, computeOrderTotals } from './money.js';
+import { toPaise, toRupees, pctToMilli, percentOf, computeOrderTotals } from './money.js';
+import { evaluatePromotion, clampBenefits } from './promotions.js';
 
 export const MANUAL_PAYMENT_LABEL = 'MANUAL PAYMENT RECORD — not gateway-verified';
 export const GATEWAY_PAYMENT_LABEL = 'GATEWAY PAYMENT — confirmed by the provider';
@@ -35,13 +36,80 @@ export const num = (d) => (d === null || d === undefined ? null : Number(d));
 export const paiseOf = (d) => toPaise(String(d));
 const r2 = (paise) => (paise / 100).toFixed(2);
 
+// VC-102: re-evaluate every APPLIED promotion against the basket as it now
+// stands, inside the caller's transaction. Reverses the ones that no longer
+// qualify (releasing their campaign slot), rewrites each survivor's amount,
+// and returns the combined promotion benefit in paise. The spec's rule made
+// executable: "an expired or changed basket requires re-evaluation" — every
+// money change comes through recomputeOrder, so every money change re-decides
+// the promotions.
+const reevaluatePromotions = async (tx, order, active, manualPaise, subtotalPaise) => {
+  const redemptions = await tx.promotionRedemption.findMany({
+    where: { orderId: order.id, status: 'APPLIED' },
+    include: { promotion: { include: { itemRules: true } } },
+  });
+  if (redemptions.length === 0) return 0;
+
+  const ctx = {
+    orderType: order.type,
+    at: new Date(),
+    lines: active.map((i) => ({
+      productId: i.productId,
+      categoryId: i.product?.categoryId ?? null,
+      lineSubtotalPaise: paiseOf(i.unitPrice) * i.qty - paiseOf(i.lineDiscount),
+    })),
+  };
+
+  const survivors = [];
+  for (const red of redemptions) {
+    const verdict = evaluatePromotion(red.promotion, ctx);
+    if (verdict.ok) {
+      survivors.push({
+        redemptionId: red.id,
+        promotionId: red.promotionId,
+        precedence: red.promotion.precedence,
+        benefitPaise: verdict.benefitPaise,
+        storedAmountPaise: paiseOf(red.amount),
+      });
+      continue;
+    }
+    await tx.promotionRedemption.update({
+      where: { id: red.id },
+      data: { status: 'REVERSED', reversedReason: 'BASKET_CHANGE', reversedAt: new Date(), amount: 0 },
+    });
+    await tx.promotion.update({
+      where: { id: red.promotionId },
+      data: { redemptionCount: { decrement: 1 } },
+    });
+  }
+
+  const clamped = clampBenefits(survivors, subtotalPaise, manualPaise);
+  let promoTotal = 0;
+  for (const s of survivors) {
+    const granted = clamped.get(s.redemptionId) ?? 0;
+    promoTotal += granted;
+    if (granted !== s.storedAmountPaise) {
+      await tx.promotionRedemption.update({
+        where: { id: s.redemptionId },
+        data: { amount: (granted / 100).toFixed(2) },
+      });
+    }
+  }
+  return promoTotal;
+};
+
 // Recomputes every stored money field of an order from its ACTIVE lines and
 // persists them, inside the caller's transaction. VOIDED lines keep their own
 // historical lineSubtotal but leave every order total.
 export const recomputeOrder = async (tx, orderId) => {
   const order = await tx.order.findUniqueOrThrow({
     where: { id: orderId },
-    include: { items: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+    include: {
+      items: {
+        include: { product: { select: { categoryId: true } } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      },
+    },
   });
   const active = order.items.filter((i) => i.status === 'ACTIVE');
   const lines = active.map((i) => ({
@@ -50,9 +118,9 @@ export const recomputeOrder = async (tx, orderId) => {
     lineDiscount: paiseOf(i.lineDiscount),
     taxPctMilli: i.taxRatePercent === null ? 0 : pctToMilli(String(i.taxRatePercent)),
   }));
+  const sub = lines.reduce((a, l) => a + l.unitPrice * l.qty - l.lineDiscount, 0);
   let discount = null;
   if (order.discountType) {
-    const sub = lines.reduce((a, l) => a + l.unitPrice * l.qty - l.lineDiscount, 0);
     discount =
       order.discountType === 'FLAT'
         ? // Clamp: deleting/voiding lines may shrink the subtotal below a FLAT
@@ -60,7 +128,10 @@ export const recomputeOrder = async (tx, orderId) => {
           { type: 'FLAT', value: Math.min(paiseOf(order.discountValue), sub) }
         : { type: 'PERCENT', value: pctToMilli(String(order.discountValue)) };
   }
-  const r = computeOrderTotals(lines, discount);
+  const manualPaise =
+    !discount || sub <= 0 ? 0 : discount.type === 'FLAT' ? discount.value : percentOf(sub, discount.value);
+  const promoPaise = await reevaluatePromotions(tx, order, active, manualPaise, sub);
+  const r = computeOrderTotals(lines, discount, promoPaise);
   for (let k = 0; k < active.length; k += 1) {
     const l = r.lines[k];
     await tx.orderItem.update({
@@ -96,7 +167,7 @@ export const ORDER_INCLUDE = {
   table: { select: { id: true, name: true } },
   openedBy: { select: { id: true, fullName: true } },
   items: {
-    include: { kot: { select: { seq: true } } },
+    include: { kot: { select: { seq: true } }, modifiers: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
   payments: {
@@ -107,7 +178,26 @@ export const ORDER_INCLUDE = {
     include: { by: { select: { id: true, fullName: true } } },
     orderBy: { createdAt: 'asc' },
   },
+  redemptions: {
+    include: { appliedBy: { select: { id: true, fullName: true } } },
+    orderBy: { createdAt: 'asc' },
+  },
 };
+
+export const publicRedemption = (r) => ({
+  id: r.id,
+  promotionId: r.promotionId,
+  name: r.promotionName,
+  code: r.code,
+  // The version of the rules that produced this amount — retained on the row,
+  // never re-read from the promotion (spec VC-102 acceptance).
+  version: r.promotionVersion,
+  amount: num(r.amount),
+  status: r.status,
+  reversedReason: r.reversedReason,
+  appliedBy: r.appliedBy ? { id: r.appliedBy.id, fullName: r.appliedBy.fullName } : null,
+  createdAt: r.createdAt,
+});
 
 export const SUMMARY_INCLUDE = {
   table: { select: { name: true } },
@@ -121,7 +211,14 @@ const publicItem = (i) => ({
   productId: i.productId,
   variantId: i.variantId,
   name: i.name,
+  // Per-unit, modifier-inclusive; the rows below are its printed breakdown.
   unitPrice: num(i.unitPrice),
+  modifiers: (i.modifiers ?? []).map((m) => ({
+    id: m.id,
+    groupName: m.groupName,
+    name: m.name,
+    price: num(m.price),
+  })),
   qty: i.qty,
   lineDiscount: num(i.lineDiscount),
   lineSubtotal: num(i.lineSubtotal),
@@ -295,6 +392,7 @@ export const serializeOrder = (o) => {
     discount: o.discountType
       ? { type: o.discountType, value: num(o.discountValue), amount: num(o.discountAmount) }
       : null,
+    promotions: (o.redemptions ?? []).map(publicRedemption),
     subtotal: num(o.subtotal),
     discountAmount: num(o.discountAmount),
     taxAmount: num(o.taxAmount),
@@ -331,7 +429,16 @@ export const serializeOrderSummary = (o) => ({
 });
 
 // o must be loaded with ORDER_INCLUDE; company/branch carry name+address.
+//
+// LANE foundation, spec §3 — the seller block is read from the order's own
+// billingSnapshot whenever it has one, and from the live store record only when
+// it does not. That single `??` chain is what makes renaming a store leave its
+// issued invoices alone: the new name is in `branch`, the printed name is in the
+// snapshot, and the snapshot wins. Orders billed before the column existed fall
+// through to the live record and reprint exactly as they always did.
 export const buildReceipt = (company, branch, o) => {
+  const snap = o.billingSnapshot ?? null;
+  const store = snap?.store ?? null;
   const activeItems = o.items.filter((i) => i.status === 'ACTIVE');
   const breakup = new Map();
   for (const i of activeItems) {
@@ -354,11 +461,31 @@ export const buildReceipt = (company, branch, o) => {
     isDemo: Boolean(company.isDemo || branch.isDemo),
     company: { name: company.name },
     branch: {
-      name: branch.name,
-      code: branch.code,
-      addressLine: branch.addressLine,
-      city: branch.city,
+      name: store?.name ?? branch.name,
+      code: store?.code ?? branch.code,
+      addressLine: store?.addressLine ?? branch.addressLine,
+      city: store?.city ?? branch.city,
+      // Absent on a pre-snapshot receipt rather than filled from today's store
+      // record, so a reader can tell a real omission from a fabricated fact.
+      publicId: store?.publicId ?? branch.publicId ?? null,
+      state: store?.state ?? branch.state ?? null,
+      pincode: store?.pincode ?? branch.pincode ?? null,
     },
+    // The legal identity the bill was issued under. Null for an order billed
+    // before the snapshot existed, and null for a store with no entity mapped —
+    // never guessed from the store's current configuration.
+    seller: snap
+      ? {
+          legalName: snap.legalEntity?.legalName ?? null,
+          tradeName: snap.legalEntity?.tradeName ?? null,
+          pan: snap.legalEntity?.pan ?? null,
+          gstin: snap.gst?.gstin ?? null,
+          gstStateName: snap.gst?.stateName ?? null,
+          gstAddressLine: snap.gst?.addressLine ?? null,
+          fssaiLicenseNo: snap.fssai?.licenseNo ?? null,
+          fssaiValidUpto: snap.fssai?.validUpto ?? null,
+        }
+      : null,
     order: {
       id: o.id,
       type: o.type,
@@ -370,11 +497,19 @@ export const buildReceipt = (company, branch, o) => {
       name: i.name,
       qty: i.qty,
       unitPrice: num(i.unitPrice),
+      // Chosen add-ons, printed under the line. Their per-unit prices are
+      // already inside unitPrice — display rows, not extra charges.
+      modifiers: (i.modifiers ?? []).map((m) => ({ name: m.name, price: num(m.price) })),
       lineDiscount: num(i.lineDiscount),
       amount: num(i.lineSubtotal),
     })),
     subtotal: num(o.subtotal),
     discountAmount: num(o.discountAmount),
+    // Applied promotions, printed with the amount and rule version the bill
+    // recorded. discountAmount above already contains these amounts.
+    promotions: (o.redemptions ?? [])
+      .filter((r) => r.status === 'APPLIED')
+      .map((r) => ({ name: r.promotionName, code: r.code, version: r.promotionVersion, amount: num(r.amount) })),
     taxBreakup: [...breakup.values()].map((b) => ({
       name: b.name,
       percent: b.percent,

@@ -87,10 +87,17 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -164,7 +171,7 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  b1 = await prisma.branch.create({ data: { companyId: cafe.id, name: 'Cafe One', code: 'C1' } });
+  b1 = await prisma.branch.create({ data: { companyId: cafe.id, publicId: 'VC-AV-0001', name: 'Cafe One', code: 'C1' } });
 
   users.cashier = await prisma.posUser.create({
     data: {
