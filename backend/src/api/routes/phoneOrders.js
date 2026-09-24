@@ -25,6 +25,9 @@ import {
   evaluateBranches,
   buildQuote,
   slotBoundsFor,
+  countBookedInSlot,
+  lockSlot,
+  capacityReason,
 } from '../../lib/phoneOrders.js';
 
 const router = Router();
@@ -179,26 +182,24 @@ const loadBranchDecision = async ({ req, fulfilment, address, when, items }) => 
 
   // Capacity is counted over phone orders already booked into the same slot at
   // the same store. Only live ones count - a rejected order is not occupying a
-  // kitchen. An ASAP order stores no scheduledFor, so it is counted against the
-  // slot it was taken in; leaving it out would exempt the path nearly every
-  // caller uses and let the guard pass a kitchen that is already full.
+  // kitchen. Which slot an order occupies is the anchor rule in
+  // lib/phoneOrders.js: a scheduled order by scheduledFor, an ASAP order by the
+  // moment THIS store was asked - its createdAt if it was taken here, the time
+  // of the move if it was transferred in.
+  //
+  // This is a read, so it is a forecast and not a reservation. The binding
+  // check is the one taken under lockSlot() inside the submit and reassign
+  // transactions; this one exists so the operator's screen and the refusal
+  // reason agree, and it can be stale by the time they act on it.
   const bookedByBranch = new Map();
   for (const branchId of branchIds) {
     const cap = capacityByBranch.get(branchId);
     if (!cap) continue;
     const { start, end } = slotBoundsFor(when, cap.slotMinutes);
-    const booked = await prisma.phoneOrder.count({
-      where: {
-        companyId,
-        routedBranchId: branchId,
-        status: { in: ['SUBMITTED', 'ACCEPTED'] },
-        OR: [
-          { scheduledFor: { gte: start, lt: end } },
-          { scheduledFor: null, createdAt: { gte: start, lt: end } },
-        ],
-      },
-    });
-    bookedByBranch.set(branchId, booked);
+    bookedByBranch.set(
+      branchId,
+      await countBookedInSlot(prisma, { companyId, branchId, start, end }),
+    );
   }
 
   // Menu availability. NOTE (C-7): Product is company-scoped - there is no
@@ -268,6 +269,37 @@ const loadBranchDecision = async ({ req, fulfilment, address, when, items }) => 
     operatorBranchId: operatorBranchOf(req.user),
     hqEntitled: hqRoutingEntitled(req.license),
   });
+};
+
+// The BINDING capacity check. loadBranchDecision's count is taken outside any
+// transaction and is therefore a forecast: between reading it and writing,
+// another caller can take the last place. This runs inside the caller's
+// transaction, behind the (store, slot) advisory lock, and it is the one that
+// actually decides.
+//
+// Must be the FIRST statement in the transaction, before any write:
+//   - it holds a lock every other caller for that slot queues behind, so the
+//     transaction has to stay short;
+//   - throwing rolls the whole transaction back, which is what leaves a refused
+//     transfer's source order exactly as it was.
+//
+// `when` is the instant whose slot is being claimed — scheduledFor for a
+// scheduled order, the moment of the action for an ASAP one. The caller must
+// pass the SAME instant it will anchor the order to, or the order is checked
+// against one slot and lands in another, which is the defect this closes.
+//
+// No capacity row means the store has not configured a limit, so there is
+// nothing to enforce — the same answer evaluateBranches gives, and deliberately
+// not a refusal.
+const reserveSlot = async (tx, { companyId, branchId, when }) => {
+  const cap = await tx.branchPrepCapacity.findFirst({ where: { companyId, branchId } });
+  if (!cap) return;
+  const { start, end } = slotBoundsFor(when, cap.slotMinutes);
+  await lockSlot(tx, { companyId, branchId, start });
+  const booked = await countBookedInSlot(tx, { companyId, branchId, start, end });
+  if (booked >= cap.maxOrdersPerSlot) {
+    throw branchUnavailable([capacityReason(booked, cap.maxOrdersPerSlot)]);
+  }
 };
 
 const loadCustomer = async (req, id) => {
@@ -627,7 +659,13 @@ router.post(
         throw badRequest('A scheduled time must be in the future', 'scheduledFor');
       }
     }
-    const when = scheduledFor ?? new Date();
+    // takenAt is captured ONCE and then both checked against and stored, so an
+    // ASAP order cannot be judged against one slot and anchored in the next.
+    // Letting createdAt default to now() inside the transaction reopens that as
+    // a millisecond-wide window on every slot boundary — rare, but the identical
+    // shape of bug to the late-transfer hole, and free to close here.
+    const takenAt = new Date();
+    const when = scheduledFor ?? takenAt;
 
     const own = operatorBranchOf(req.user);
     if (own && body.branchId !== own) throw forbidden();
@@ -659,6 +697,13 @@ router.post(
 
     const created = await withReferenceRetry(async (reference) =>
       prisma.$transaction(async (tx) => {
+        // Binding capacity check, before anything is written. The check above
+        // was advisory; two callers racing for the last place both passed it.
+        // `when` is the same instant this order will be anchored to —
+        // scheduledFor if it is scheduled, else the submit time, which becomes
+        // its createdAt.
+        await reserveSlot(tx, { companyId, branchId: body.branchId, when });
+
         const order = await tx.order.create({
           data: {
             companyId,
@@ -690,6 +735,10 @@ router.post(
             addressId: address?.id ?? null,
             fulfilment: body.fulfilment,
             scheduledFor,
+            // Pinned, not defaulted — see takenAt above. This is the slot
+            // anchor for an ASAP order, so it must be the instant reserveSlot
+            // just checked.
+            createdAt: takenAt,
             status: 'SUBMITTED',
             routedBranchId: body.branchId,
             orderId: order.id,
@@ -889,7 +938,17 @@ router.post(
     const address = po.addressId
       ? await prisma.customerAddress.findFirst({ where: { id: po.addressId, companyId } })
       : null;
-    const when = po.scheduledFor ?? new Date();
+    // movedAt is the moment this store is being asked, and it is used THREE
+    // times: to pick the slot to check, to stamp the REASSIGNED event, and
+    // therefore — via that event — as the order's slot anchor at its new store.
+    // One variable rather than three now() calls is what makes "checked against
+    // the slot it lands in" true by construction instead of by luck.
+    //
+    // For a SCHEDULED order the anchor stays scheduledFor: the food is still due
+    // at the same time wherever it is cooked, so `when` is that, while the event
+    // still records the real move time.
+    const movedAt = new Date();
+    const when = po.scheduledFor ?? movedAt;
     // Modifiers come along so the new store's minimum-order-value rule is
     // judged against what this basket actually costs. Nothing is re-priced from
     // them — the line's unitPrice was snapshotted at submit and recomputeOrder
@@ -931,6 +990,13 @@ router.post(
     };
 
     const updated = await prisma.$transaction(async (tx) => {
+      // Binding capacity check at the DESTINATION, before anything moves. The
+      // options read above is advisory; this is what makes the transfer a
+      // reservation rather than a hope. Throwing here rolls back everything
+      // below, so a refused transfer leaves the order at its source store with
+      // its status, its acceptance and its delivery charge untouched.
+      await reserveSlot(tx, { companyId, branchId: body.branchId, when });
+
       await tx.order.update({ where: { id: order.id }, data: { branchId: body.branchId } });
       // Price and tax are recomputed for the new store BEFORE anything can be
       // billed - the whole point of refusing a silent relocation.
@@ -956,6 +1022,12 @@ router.post(
         data: {
           companyId,
           phoneOrderId: po.id,
+          // Stamped from movedAt rather than defaulted to now(). For an ASAP
+          // order THIS ROW IS THE SLOT ANCHOR at the new store — the capacity
+          // count reads max(at) of the latest REASSIGNED into the current
+          // branch — so it has to be the instant reserveSlot checked, not a few
+          // milliseconds later on the far side of a slot boundary.
+          at: movedAt,
           action: 'REASSIGNED',
           actorId: req.user.id,
           fromBranchId: po.routedBranchId,

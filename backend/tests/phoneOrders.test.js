@@ -971,7 +971,11 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
       .send({ branchId: a2.id, reason });
   };
 
-  it('counts a reassigned ASAP order against the slot it was taken in (D-2)', async () => {
+  // Renamed from "against the slot it was taken in": since the slot anchor
+  // landed, a transfer is counted against the slot it ARRIVES in. Here the two
+  // are the same slot, because the move follows the call immediately — which is
+  // the ordinary operator action and why this case worked even under the defect.
+  it('counts a promptly reassigned ASAP order against the destination slot (D-2)', async () => {
     await withCapacity(a2.id, 2, async () => {
       // One order taken natively at a2, leaving room for exactly one more.
       expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
@@ -983,32 +987,247 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
     });
   });
 
-  // KNOWN LIMITATION, recorded not endorsed — see D-2 "What this does not
-  // settle" in docs/VC104-BACKEND-DEFECTS.md. An ASAP order is anchored to its
-  // createdAt, but a reassignment is checked against the slot containing NOW.
-  // Move an order after its own slot has elapsed and it lands in a store
-  // without occupying anything there. Closing this needs a slot-anchor column,
-  // which is a schema decision, not a patch — so this test pins today's
-  // behaviour and will go red the day someone makes it.
-  it('does NOT count an ASAP order moved after its slot elapsed (D-2 limitation)', async () => {
+  // What `booked` is at a2 in the slot containing `instant`. /branch-options
+  // takes scheduledFor verbatim and does not require it to be in the future, so
+  // this reads any slot — past, present or future — without fake timers and
+  // without depending on when the suite runs. Reads capacity, never `available`:
+  // availability also folds in opening hours, and these tests are about counting.
+  const bookedAtA2 = async (instant) => {
+    const res = await options({
+      fulfilment: 'DELIVERY',
+      addressId: addrA.id,
+      ...(instant ? { scheduledFor: instant.toISOString() } : {}),
+    });
+    return res.body.options.find((o) => o.branchId === a2.id).capacity.booked;
+  };
+
+  const liveAtA2 = () =>
+    prisma.phoneOrder.count({
+      where: { routedBranchId: a2.id, status: { in: ['SUBMITTED', 'ACCEPTED'] } },
+    });
+
+  // THE INVARIANT, replacing `does NOT count an ASAP order moved after its slot
+  // elapsed (D-2 limitation)` — which asserted the undercount and so could only
+  // ever prove the bug was still there.
+  //
+  // An order occupies the slot in which the store holding it was asked. For a
+  // transfer that is the moment of the MOVE, not the moment of the call, so a
+  // back-dated order cannot arrive for free. The old test moved three hour-old
+  // orders into a store capped at two and got three 200s, four live orders and
+  // `booked: 1, available: true`.
+  it('counts a back-dated transfer against the slot it ARRIVES in, and refuses past the cap', async () => {
     await withCapacity(a2.id, 2, async () => {
       expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
 
-      for (let i = 0; i < 3; i += 1) {
-        const res = await moveToA2('moved late', 3600_000);
-        expect(res.status, JSON.stringify(res.body)).toBe(200);
-      }
+      // Each of these was taken an hour ago at a1 — a slot long elapsed. They
+      // are being cooked at a2 NOW, so they consume a2's capacity now.
+      const first = await moveToA2('moved late', 3600_000);
+      expect(first.status, JSON.stringify(first.body)).toBe(200);
 
-      // Four live orders against a cap of two, reported as one and still open.
-      expect(
-        await prisma.phoneOrder.count({
-          where: { routedBranchId: a2.id, status: { in: ['SUBMITTED', 'ACCEPTED'] } },
-        }),
-      ).toBe(4);
+      const second = await moveToA2('moved late', 3600_000);
+      expect(second.status, JSON.stringify(second.body)).toBe(409);
+      expect(second.body.error.code).toBe('POS_BRANCH_UNAVAILABLE');
+      expect(second.body.error.details.unavailableReasons[0]).toEqual({
+        code: 'AT_CAPACITY',
+        message: 'Kitchen is full for that time (2/2)',
+      });
+
+      // Live orders and reported booked now agree. Under the defect these were
+      // 4 and 1.
+      expect(await liveAtA2()).toBe(2);
+      expect(await bookedAtA2()).toBe(2);
+
+      // And the refusal is not the count merely saturating: the store is shut
+      // to the next caller too.
       const opt = await options({ fulfilment: 'DELIVERY', addressId: addrA.id });
-      const a2opt = opt.body.options.find((o) => o.branchId === a2.id);
-      expect(a2opt.capacity.booked).toBe(1);
-      expect(a2opt.available).toBe(true);
+      expect(opt.body.options.find((o) => o.branchId === a2.id).available).toBe(false);
+    });
+  });
+
+  // The refusal must cost the source nothing. A transfer that bounces has to
+  // leave a recoverable order behind, not a half-moved one — and it must not
+  // leave a reservation at the destination either, or a store loses a place to
+  // an order it never received.
+  it('leaves the source order untouched when the destination refuses', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      const created = await submit(baseSubmission());
+      const po = created.body.phoneOrder;
+      const before = await prisma.phoneOrder.findUnique({ where: { id: po.id } });
+
+      const res = await request(app)
+        .post(`/api/phone-orders/${po.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'destination is full' });
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+
+      const after = await prisma.phoneOrder.findUnique({ where: { id: po.id } });
+      expect(after.routedBranchId).toBe(a1.id);
+      expect(after.status).toBe('SUBMITTED');
+      expect(after.deliveryCharge).toEqual(before.deliveryCharge);
+      // The whole transaction rolled back, so the Order did not move either.
+      expect((await prisma.order.findUnique({ where: { id: po.order.id } })).branchId).toBe(a1.id);
+      // No REASSIGNED event was written, so nothing anchors at a2...
+      expect(
+        await prisma.phoneOrderEvent.count({
+          where: { phoneOrderId: po.id, action: 'REASSIGNED' },
+        }),
+      ).toBe(0);
+      // ...and a2 still holds exactly the one order it really has.
+      expect(await bookedAtA2()).toBe(1);
+    });
+  });
+
+  // Retry/replay. Reassign has no idempotency key, so a double-click is two real
+  // requests. Neither a refused transfer nor a repeated successful one may move
+  // the count: the first is rolled back, the second is refused as a no-op move.
+  it('does not double-book on retry, whether the first attempt failed or succeeded', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      const created = await submit(baseSubmission());
+      const po = created.body.phoneOrder;
+      const move = () =>
+        request(app)
+          .post(`/api/phone-orders/${po.id}/reassign`)
+          .set(auth(tokens.ownerA))
+          .send({ branchId: a2.id, reason: 'operator retried' });
+
+      expect((await move()).status).toBe(200);
+      expect(await bookedAtA2()).toBe(1);
+
+      // Replay of a move that already happened. Refused as "already routed
+      // there" rather than counted again.
+      const replay = await move();
+      expect(replay.status).toBe(400);
+      expect(await bookedAtA2()).toBe(1);
+      expect(await liveAtA2()).toBe(1);
+
+      // Exactly one anchor event, so the count cannot double even in principle.
+      expect(
+        await prisma.phoneOrderEvent.count({
+          where: { phoneOrderId: po.id, action: 'REASSIGNED', toBranchId: a2.id },
+        }),
+      ).toBe(1);
+    });
+  });
+
+  // Two transfers racing for one remaining place. Before the advisory lock both
+  // read booked = n-1 outside any transaction and both committed; the guard was
+  // advisory and the cap was not a limit. Fired with Promise.all so they are
+  // genuinely in flight together rather than merely adjacent.
+  it('lets exactly one of two simultaneous transfers take the last place', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      const one = await submit(baseSubmission());
+      const two = await submit(baseSubmission());
+      const race = (po) =>
+        request(app)
+          .post(`/api/phone-orders/${po.body.phoneOrder.id}/reassign`)
+          .set(auth(tokens.ownerA))
+          .send({ branchId: a2.id, reason: 'both operators moved at once' });
+
+      const results = await Promise.all([race(one), race(two)]);
+      const codes = results.map((r) => r.status).sort();
+      expect(codes, JSON.stringify(results.map((r) => r.body))).toEqual([200, 409]);
+
+      // The decisive assertion: the cap held. Two would also be the answer if
+      // both had been refused, which is why liveAtA2 is checked as well.
+      expect(await bookedAtA2()).toBe(2);
+      expect(await liveAtA2()).toBe(2);
+    });
+  });
+
+  // Slot boundaries are half-open, [start, end). The anchor of a transfer is the
+  // instant of the move, so this pins which side of a boundary that instant
+  // falls on — asserted against the real grid rather than a re-derivation, by
+  // reading the move's own event.
+  it('anchors a transfer inclusively at slot start and exclusively at slot end', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const created = await submit(baseSubmission());
+      const po = created.body.phoneOrder;
+      expect(
+        (
+          await request(app)
+            .post(`/api/phone-orders/${po.id}/reassign`)
+            .set(auth(tokens.ownerA))
+            .send({ branchId: a2.id, reason: 'boundary probe' })
+        ).status,
+      ).toBe(200);
+
+      const ev = await prisma.phoneOrderEvent.findFirst({
+        where: { phoneOrderId: po.id, action: 'REASSIGNED', toBranchId: a2.id },
+      });
+      const SLOT = 15 * 60_000;
+      const start = Math.floor(ev.at.getTime() / SLOT) * SLOT;
+
+      // Its own slot, asked at the exact opening instant: counted.
+      expect(await bookedAtA2(new Date(start))).toBe(1);
+      // One millisecond before that instant is the PREVIOUS slot: not counted.
+      expect(await bookedAtA2(new Date(start - 1))).toBe(0);
+      // The end instant belongs to the NEXT slot, so it is not counted there
+      // either — which is what stops two adjacent slots both claiming it.
+      expect(await bookedAtA2(new Date(start + SLOT))).toBe(0);
+      expect(await bookedAtA2(new Date(start + SLOT - 1))).toBe(1);
+    });
+  });
+
+  // A SCHEDULED order is due at a named time wherever it is cooked, so moving it
+  // must NOT re-anchor it to the move. This is the arm the new rule deliberately
+  // leaves alone, and the control that stops "anchor at the move" being applied
+  // to everything.
+  it('keeps a scheduled order in its scheduled slot when it moves (control)', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const at = new Date(Date.now() + 3 * 3600_000);
+      const created = await submit(baseSubmission({ scheduledFor: at.toISOString() }));
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+
+      const res = await request(app)
+        .post(`/api/phone-orders/${created.body.phoneOrder.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'moved well before it is due' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+      // Counted in the slot it is DUE in, three hours out...
+      expect(await bookedAtA2(at)).toBe(1);
+      // ...and not in the slot it was moved in, which is where an ASAP order
+      // would have landed.
+      expect(await bookedAtA2()).toBe(0);
+    });
+  });
+
+  // Exact booked-count changes as an order leaves the live set. There is no
+  // cancel route yet — PhoneOrderStatus carries CANCELLED but nothing can
+  // produce it while C-6 is open (see the read route's comment) — so reject is
+  // the cancellation this API actually has, and it is the transition that
+  // returns a place to the kitchen.
+  it('returns the place to the slot when the destination rejects the order', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      const created = await submit(baseSubmission());
+      const po = created.body.phoneOrder;
+      expect(
+        (
+          await request(app)
+            .post(`/api/phone-orders/${po.id}/reassign`)
+            .set(auth(tokens.ownerA))
+            .send({ branchId: a2.id, reason: 'moving in' })
+        ).status,
+      ).toBe(200);
+      expect(await bookedAtA2()).toBe(1);
+
+      // Full: the next transfer in is refused.
+      expect((await moveToA2('should not fit')).status).toBe(409);
+
+      const rejected = await request(app)
+        .post(`/api/phone-orders/${po.id}/reject`)
+        .set(auth(tokens.mgrA2))
+        .send({ reason: 'out of milk' });
+      expect(rejected.status, JSON.stringify(rejected.body)).toBe(200);
+
+      // Exactly one place back, not zero and not two.
+      expect(await bookedAtA2()).toBe(0);
+      expect((await moveToA2('now it fits')).status).toBe(200);
+      expect(await bookedAtA2()).toBe(1);
     });
   });
 
