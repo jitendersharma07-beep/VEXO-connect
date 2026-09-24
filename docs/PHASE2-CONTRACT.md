@@ -37,8 +37,11 @@ Rules:
 - Backend dev server (**W2 may RUN it, must not edit it**), from `~/atc-pos/backend`:
 
   ```bash
-  DATABASE_URL='postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/atc_pos?schema=public' \
-  POS_JWT_SECRET='dev-only-secret-0123456789abcdef0123456789' \
+  # <dev-db-password> = POSTGRES_PASSWORD of the dev container atc-pos-dev-db.
+  # Read it from that container, not from this repo:
+  #   docker exec atc-pos-dev-db printenv POSTGRES_PASSWORD
+  DATABASE_URL='postgresql://atc_pos:<dev-db-password>@127.0.0.1:5439/atc_pos?schema=public' \
+  POS_JWT_SECRET="$(openssl rand -hex 32)" \
   npm run dev            # node --watch, listens on :5010
   ```
 
