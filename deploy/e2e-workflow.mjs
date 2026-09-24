@@ -13,10 +13,12 @@
 
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { waitForCode, redeemEmailedCode } from '../backend/scripts/lib/maildrop.js';
 
 const BASE = process.env.E2E_BASE;
 const DB = process.env.E2E_DB ?? '';
+const MAILDIR = process.env.E2E_MAILDIR ?? '';
 const refuse = (why) => {
   console.error(`REFUSED: ${why}`);
   process.exit(2);
@@ -27,6 +29,10 @@ if (!['127.0.0.1', 'localhost'].includes(baseUrl.hostname)) refuse(`${baseUrl.ho
 if (baseUrl.port === '8110') refuse('8110 is the production edge port');
 if (os.hostname() === 'atc-noc') refuse('this host runs production');
 if (!DB.startsWith('atc_pos_e2e_')) refuse('E2E_DB must name a throwaway atc_pos_e2e_* database');
+// Staff are seated from mail, so a missing mailbox is a missing prerequisite,
+// not something to discover forty lines into the money path.
+if (!MAILDIR) refuse('E2E_MAILDIR is not set — run deploy/e2e-isolated.sh, which starts the capture sink');
+if (!existsSync(MAILDIR)) refuse(`E2E_MAILDIR ${MAILDIR} does not exist`);
 
 const env = process.env;
 for (const k of ['POS_SEED_OWNER_PASSWORD', 'POS_SEED_MANAGER_PASSWORD', 'POS_SEED_CASHIER_PASSWORD']) {
@@ -105,7 +111,7 @@ const sku = (s) => {
   return p.id;
 };
 
-// LANE accounts — THIS HARNESS NEEDS A MAIL-ENABLED STACK, AND SAYS SO.
+// LANE accounts — THIS HARNESS NEEDS A MAIL-ENABLED STACK, AND HAS ONE.
 //
 // It used to create its two Cyber Hub staff through POST /api/users, read the
 // temporary password out of the response, sign in with it and change it. There
@@ -115,17 +121,10 @@ const sku = (s) => {
 // change, and a harness must not be given a back door around it — a back door
 // that exists for tests exists in production.
 //
-// So the accounts section below no longer tests a temporary-password dance that
-// the product does not do. What it must become is a code redemption, and that
-// needs a mailbox this stack does not yet have: deploy/e2e-isolated.sh brings up
-// a database and a backend with no SMTP at all, which is why the create call
-// itself now answers 503 POS_MAIL_NOT_CONFIGURED.
-//
-// Refusing here, by name, beats dying forty lines later inside the money path
-// with an error about a missing token. The money-path checks are unaffected by
-// the accounts work and are worth keeping runnable; wiring a sink into
-// e2e-isolated.sh (backend/scripts/lib/smtpSink.js, as deploy/accounts-journey.mjs
-// and the unit suite both do) is what unblocks them.
+// So this harness reads the mailbox, exactly as the person would. Its stack
+// (deploy/e2e-isolated.sh) runs a capture sink that drops every message into
+// $E2E_MAILDIR, and the two calls below are the two the recovery screen makes.
+// Nothing here reaches into the database or past the API to seat an account.
 const createStaff = async (role, tag, branchId) => {
   const email = `e2e.${tag}.${RUN}@atcpos.example`;
   const body = must(
@@ -134,31 +133,31 @@ const createStaff = async (role, tag, branchId) => {
   );
   // `passwordSetup` describes the delivery — sent, to whom, for how long. It
   // carries no code, which is why it is safe to hold and useless for signing in.
-  return { email, id: body.user.id, setup: body.passwordSetup };
+  return { email, id: body.user.id, setup: body.passwordSetup, response: body };
 };
 
-// The one step this process cannot take yet. Both Cyber Hub sessions are
-// load-bearing for the branch-isolation and approval checks below, so there is
-// no useful subset to run without them — hence a refusal with the recipe rather
-// than a skip that would quietly shrink what the harness proves.
-const seatByEmailedCode = async () =>
-  refuse(
-    'staff accounts are seated by emailed code, and this stack has no mailbox to read.\n' +
-      '          deploy/e2e-isolated.sh brings up a database and a backend with no SMTP, so\n' +
-      '          POST /api/users answers 503 POS_MAIL_NOT_CONFIGURED; configure mail and it\n' +
-      '          answers 201 and sends the code, which this process still cannot read.\n' +
-      '          TO UNBLOCK: run backend/scripts/lib/smtpSink.js beside the backend, point\n' +
-      '          SMTP_HOST/SMTP_PORT at it with SMTP_SECURITY=none and a MAIL_FROM, give this\n' +
-      '          script a way to read captured messages, then finish each account with\n' +
-      '          POST /auth/forgot-password/verify and /reset using the 8-digit code —\n' +
-      '          the same two calls deploy/accounts-journey.mjs drives through a browser.',
-  );
+// Redeem the emailed code and choose a password, which is the only way this
+// account has ever been openable. The steps are the shared ones, so they can be
+// tested on a host this harness refuses to run on; the password is generated
+// here and never printed.
+const seatByEmailedCode = async (acct) => {
+  const password = await redeemEmailedCode({
+    dir: MAILDIR,
+    email: acct.email,
+    password: newPassword(),
+    post: (path, body) => api(null, 'POST', path, body),
+  });
+  return login(acct.email, password);
+};
 
 const chCashAcct = await createStaff('CASHIER', 'cashier-ch', CH.id);
 const chMgrAcct = await createStaff('BRANCH_MANAGER', 'manager-ch', CH.id);
 
 // --- 1. accounts -------------------------------------------------------------
 
+// AUTH-1 and AUTH-2 keep the meaning they had when docs/RELEASE-V1.1-RC.md
+// recorded them as passing; the two new claims below are AUTH-3 and AUTH-4, so
+// that citation still says what it said.
 check('AUTH-1', 'accounts', 'creating a staff account hands its creator no credential',
   chCashAcct.setup?.sent === true && chCashAcct.setup?.sentTo === chCashAcct.email);
 
@@ -166,6 +165,26 @@ const chCash = await seatByEmailedCode(chCashAcct);
 const chMgr = await seatByEmailedCode(chMgrAcct);
 check('AUTH-2', 'accounts', 'a seated account signs in with the password its owner chose',
   chCash.user.mustChangePassword === false && chMgr.user.mustChangePassword === false);
+
+// The delivery receipt is safe to show the person who did the hiring precisely
+// because the code is not in it. Asserted rather than assumed: the only copy
+// that ever existed was the one in the recipient's mailbox.
+check('AUTH-3', 'accounts', 'the create response named the address but carried no code',
+  !/\b\d{8}\b/.test(JSON.stringify(chCashAcct.response)));
+
+// And a code is spendable once. If it were not, a forwarded or shoulder-read
+// mail would stay live after the account was opened.
+//
+// `spent` is asserted alongside the refusal on purpose: an empty mailbox would
+// send `null` here, be refused as malformed, and turn this check green while
+// proving nothing. A check that cannot tell those two apart is not a check.
+const spent = await waitForCode(MAILDIR, chCashAcct.email);
+const replay = await api(null, 'POST', '/auth/forgot-password/verify', {
+  email: chCashAcct.email,
+  code: spent,
+});
+check('AUTH-4', 'accounts', 'the code that opened the account does not open it twice',
+  spent !== null && replay.status >= 400, spent === null ? 'no code in the maildrop' : say(replay));
 
 // --- 2. sale + deny-by-default ----------------------------------------------
 
