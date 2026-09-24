@@ -1,4 +1,5 @@
-// Serializes whole vitest RUNS against the shared test database.
+// Serializes whole vitest RUNS against the shared test database, then empties
+// it — see the truncate note in setup() for why both are needed.
 //
 // Every suite in tests/ wipes the tenant tables in beforeAll, and they all
 // point at one database. fileParallelism:false makes that safe WITHIN a run; it
@@ -170,6 +171,29 @@ export async function setup() {
     `acquired${waited >= POLL_MS ? ` after ${Math.round(waited / 1000)}s` : ''}` +
       ` as ${IDENTITY}${waitedFor ? ` (previous holder pid ${waitedFor.pid} finished)` : ''}`
   );
+
+  // With the lock held, empty the database. The lock stops two runs
+  // interleaving; it does nothing about what a run that CRASHED left behind,
+  // and those rows are worse than they look — the next run's per-file wipes
+  // have no statement for them, RESTRICT foreign keys then fail on residue
+  // unrelated to the code under test, and the first such failure cascades, so
+  // the suite reports a dozen red files for one stale row.
+  //
+  // Order matters: truncating BEFORE the lock would wipe a live run's
+  // fixtures, which is the exact corruption the lock exists to prevent.
+  //
+  // TRUNCATE ... CASCADE needs no knowledge of the dependency graph, which is
+  // why it is used here and not in the per-file helpers. _prisma_migrations is
+  // excluded deliberately: emptying it would make the next `migrate deploy`
+  // re-run migrations already applied to this schema.
+  const tables = await client.$queryRaw`
+    SELECT tablename::text AS t FROM pg_tables
+     WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`;
+  if (tables.length) {
+    const list = tables.map((r) => `"public"."${r.t}"`).join(', ');
+    await client.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
+    note(`emptied ${tables.length} tables`);
+  }
 
   // Re-asserts that the lock is still ours, and keeps the session non-idle.
   // Losing it mid-run would mean another run is already wiping underneath this

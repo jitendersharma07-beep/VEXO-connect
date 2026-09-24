@@ -13,14 +13,63 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
+import { startSmtpSink } from '../scripts/lib/smtpSink.js';
 
 if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
   throw new Error('foundationPeople.test.js requires a DATABASE_URL ending in _test');
 }
 
+// LANE accounts — a real SMTP server, because neither write path in
+// /api/users hands back a credential any more. Creating a person and resetting
+// one both end in a message to that person, so a suite with nowhere to deliver
+// would be asserting against a 503 rather than against the behaviour.
+//
+// Started BEFORE config/env.js is read, so SMTP_PORT can name the port the
+// kernel just handed out.
+const sink = startSmtpSink({ port: 0 });
+await sink.started;
+
+process.env.SMTP_HOST = '127.0.0.1';
+process.env.SMTP_PORT = String(sink.port);
+process.env.SMTP_SECURITY = 'none';
+process.env.MAIL_FROM = 'VEXO Connect <no-reply@vexoconnect.test>';
+process.env.MAIL_ALLOWED_RECIPIENTS = '*@people.test.local';
+process.env.APP_URL = 'https://portal.vexoconnect.test/pos';
+
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
+
+// The code is read out of the message the sink actually received — never
+// fabricated, never taken from a response body, because the whole point of the
+// change under test is that no response body carries one.
+const bodyOfLastMail = (to) => {
+  const msg = [...sink.messages].reverse().find((m) => m.envelope.to.join(',').includes(to));
+  if (!msg) throw new Error(`no message delivered to ${to}`);
+  const parts = msg.raw.split(/--=_vexo_[0-9a-f]+/);
+  const plain = parts.find((p) => p.includes('text/plain'));
+  return Buffer.from(plain.slice(plain.indexOf('\r\n\r\n') + 4).replace(/\r\n/g, ''), 'base64').toString('utf8');
+};
+
+const codeFor = (email) => {
+  const found = bodyOfLastMail(email).match(/\b(\d{8})\b/);
+  if (!found) throw new Error(`no 8-digit code in the message to ${email}`);
+  return found[1];
+};
+
+// The full journey a person takes from an administrator's button press to a
+// password of their own: the code lands in their mailbox, they verify it, they
+// choose. Exactly the steps /forgot-password walks them through.
+const setPasswordByEmailedCode = async (email, password) => {
+  const verify = await request(app)
+    .post('/api/auth/forgot-password/verify')
+    .send({ email, code: codeFor(email) });
+  expect(verify.status, JSON.stringify(verify.body)).toBe(200);
+  const reset = await request(app)
+    .post('/api/auth/forgot-password/reset')
+    .send({ resetToken: verify.body.resetToken, password });
+  expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+};
 
 const app = createApp();
 
@@ -60,6 +109,9 @@ const wipe = async () => {
   await prisma.terminal.deleteMany();
   await prisma.branchBrand.deleteMany();
   await prisma.brand.deleteMany();
+  await prisma.userInvitation.deleteMany();
+  await prisma.emailOutbox.deleteMany();
+  await prisma.authChallenge.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   // GST points at LegalEntity (RESTRICT), both point at Company; and a nested
@@ -136,6 +188,7 @@ afterAll(async () => {
   // Leave the shared test database empty: the older files' wipes do not cover
   // this lane's tables, and their RESTRICT keys would fail on our leftovers.
   await wipe();
+  await sink.close();
   await prisma.$disconnect();
 });
 
@@ -201,27 +254,51 @@ describe('people: listing and scope', () => {
 });
 
 describe('people: minting within reach', () => {
-  it('an admin mints a cashier: 201, one-time password, must change at first sign-in', async () => {
+  it('an admin mints a cashier: 201, no credential in the response, a code to the person', async () => {
+    const email = 'new.cashier@people.test.local';
     const res = await request(app)
       .post('/api/users')
       .set(auth(tokens.adminX))
-      .send({ email: 'new.cashier@people.test.local', fullName: 'New Cashier', role: 'CASHIER', branchId: branchX1.id });
+      .send({ email, fullName: 'New Cashier', role: 'CASHIER', branchId: branchX1.id });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.user.role).toBe('CASHIER');
     expect(res.body.user.branch.code).toBe('PX1');
+    // Stands for "has not chosen one yet". There is nothing to change FROM.
     expect(res.body.user.mustChangePassword).toBe(true);
-    expect(typeof res.body.tempPassword).toBe('string');
-    // The credential works exactly once as issued…
-    const first = await request(app)
+
+    // The response tells the administrator a code is on its way and nothing
+    // more. This is the assertion the whole change exists for: the endpoint
+    // used to return a working password here.
+    const code = codeFor(email);
+    expect(res.body.passwordSetup).toMatchObject({ sent: true, sentTo: email, codeLength: 8 });
+    expect(JSON.stringify(res.body)).not.toContain(code);
+
+    // The account is real and completely unreachable: no password was chosen,
+    // so no password works. The code is not a password either — it buys one
+    // step of the recovery flow and nothing else.
+    for (const guess of [code, 'password123', 'new.cashier']) {
+      const attempt = await request(app).post('/api/auth/login').send({ email, password: guess });
+      expect(attempt.status, `login accepted "${guess}"`).toBe(401);
+    }
+
+    // The person sets their own, from the mailbox, and only then can sign in.
+    await setPasswordByEmailedCode(email, 'chosen-by-the-cashier-1');
+    const signedIn = await request(app)
       .post('/api/auth/login')
-      .send({ email: 'new.cashier@people.test.local', password: res.body.tempPassword });
-    expect(first.status).toBe(200);
-    // …and is nowhere on the server but as a hash: the audit row carries none of it.
+      .send({ email, password: 'chosen-by-the-cashier-1' });
+    expect(signedIn.status, JSON.stringify(signedIn.body)).toBe(200);
+    expect(signedIn.body.user.mustChangePassword).toBe(false);
+
+    // Nothing secret reached the trail or the outbox row.
     const logged = await prisma.posAuditLog.findFirst({
       where: { action: 'USER_CREATE', entityId: res.body.user.id },
     });
     expect(logged).toBeTruthy();
-    expect(JSON.stringify(logged.meta)).not.toContain(res.body.tempPassword);
+    expect(JSON.stringify(logged.meta)).not.toContain(code);
+    const outbox = await prisma.emailOutbox.findFirst({ where: { to: email }, orderBy: { createdAt: 'desc' } });
+    expect(outbox.status).toBe('SENT');
+    expect(JSON.stringify(outbox)).not.toContain(code);
+    expect(JSON.stringify(outbox)).not.toContain('chosen-by-the-cashier-1');
   });
 
   it('an admin cannot mint an owner — role standing, before any action math', async () => {
@@ -419,7 +496,7 @@ describe('people: editing, owner standing and the last-owner lockout', () => {
 });
 
 describe('people: password reset and disable revoke sessions', () => {
-  it('a reset returns the new credential once, revokes every session, and audits no secret', async () => {
+  it('a reset cuts the credential, revokes every session, and hands the caller nothing', async () => {
     // A dedicated victim, used by no other test: the rotation below is this
     // test's whole point, and doing it to a shared fixture would turn any
     // mid-test assertion failure into a 401 cascade through every later test
@@ -441,22 +518,60 @@ describe('people: password reset and disable revoke sessions', () => {
       .set(auth(tokens.ownerX));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.email).toBe(victim.email);
-    expect(typeof res.body.tempPassword).toBe('string');
+    expect(res.body.passwordReset).toMatchObject({ sent: true, sentTo: victim.email, codeLength: 8 });
+
     // The old session died with the credential.
     const stale = await request(app).get('/api/auth/me').set(auth(victimToken));
     expect(stale.status).toBe(401);
-    // The new one works and forces a change.
-    const fresh = await request(app)
+
+    // And so did the password. This is a CUT, not a handover: the owner who
+    // pressed the button holds nothing that signs in as the victim, and the
+    // password the victim had is gone too.
+    const oldPassword = await request(app).post('/api/auth/login').send({ email: victim.email, password: PW });
+    expect(oldPassword.status).toBe(401);
+    const code = codeFor(victim.email);
+    expect(JSON.stringify(res.body)).not.toContain(code);
+
+    // Only the mailbox gets them back in, and what they choose is theirs.
+    await setPasswordByEmailedCode(victim.email, 'victim-picked-this-1');
+    const back = await request(app)
       .post('/api/auth/login')
-      .send({ email: victim.email, password: res.body.tempPassword });
-    expect(fresh.status).toBe(200);
-    expect(fresh.body.user.mustChangePassword).toBe(true);
+      .send({ email: victim.email, password: 'victim-picked-this-1' });
+    expect(back.status, JSON.stringify(back.body)).toBe(200);
+    expect(back.body.user.mustChangePassword).toBe(false);
+
     const logged = await prisma.posAuditLog.findFirst({
       where: { action: 'USER_PASSWORD_RESET', entityId: victim.id },
       orderBy: { at: 'desc' },
     });
     expect(logged).toBeTruthy();
-    expect(JSON.stringify(logged.meta)).not.toContain(res.body.tempPassword);
+    expect(JSON.stringify(logged.meta)).not.toContain(code);
+    // Nothing anywhere in the sink's traffic carries the password they chose.
+    for (const msg of sink.messages) expect(msg.raw).not.toContain('victim-picked-this-1');
+  });
+
+  it('a disabled account is not reset back to life — it is enabled first, or not at all', async () => {
+    const shutOut = await prisma.posUser.create({
+      data: {
+        email: 'shut.out@people.test.local',
+        fullName: 'Shut Out',
+        role: 'CASHIER',
+        companyId: companyX.id,
+        branchId: branchX1.id,
+        status: 'DISABLED',
+        passwordHash: await hashPassword(PW),
+      },
+    });
+    const res = await request(app)
+      .post(`/api/users/${shutOut.id}/reset-password`)
+      .set(auth(tokens.ownerX));
+    // Refused rather than silently issuing a code the verify step would reject:
+    // recovery deliberately passes over disabled accounts, so a code sent here
+    // could never be spent and the administrator would wait for a sign-in that
+    // was never coming.
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error.message).toMatch(/disabled/i);
+    expect(await prisma.authChallenge.count({ where: { userId: shutOut.id } })).toBe(0);
   });
 
   it('you reset other people, never yourself; a cashier resets nobody', async () => {
@@ -494,15 +609,19 @@ describe('people: password reset and disable revoke sessions', () => {
       .set(auth(tokens.ownerZ))
       .send({ email: 'late@people.test.local', fullName: 'Too Late', role: 'CASHIER' });
     expect([402, 403]).toContain(hire.status);
+    // Reset BEFORE disable, because a disabled account is no longer resettable
+    // — and because this is the order that matters: the owner whose renewal
+    // lapsed must still be able to cut a credential that has gone astray.
+    const reset = await request(app)
+      .post(`/api/users/${cashierZ.id}/reset-password`)
+      .set(auth(tokens.ownerZ));
+    expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+    expect(reset.body.passwordReset.sent).toBe(true);
     const off = await request(app)
       .patch(`/api/users/${cashierZ.id}/status`)
       .set(auth(tokens.ownerZ))
       .send({ status: 'DISABLED' });
     expect(off.status, JSON.stringify(off.body)).toBe(200);
-    const reset = await request(app)
-      .post(`/api/users/${cashierZ.id}/reset-password`)
-      .set(auth(tokens.ownerZ));
-    expect(reset.status, JSON.stringify(reset.body)).toBe(200);
   });
 });
 

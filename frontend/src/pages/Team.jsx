@@ -4,6 +4,12 @@
 // lives on the server, and a picker computed in the browser would drift from
 // it. Store-pinned roles ask for a store, a regional manager asks for a
 // region, company roles ask for neither.
+//
+// LANE accounts — this screen no longer hands out passwords. Creating an
+// account and resetting one both end with a code mailed to the person, and
+// with this page showing only that it was sent. An administrator can grant an
+// account and can cut a lost credential; they never hold one, so there is
+// nothing here to read out, forward, or catch in a screenshot.
 
 import { useCallback, useEffect, useState } from 'react';
 import { KeyRound, UserPlus, Users } from 'lucide-react';
@@ -19,7 +25,7 @@ import {
   Modal,
   EmptyState,
   FullScreenSpinner,
-  TempPasswordReveal,
+  CodeSentNote,
 } from '../components/ui.jsx';
 import { fmtDateTime } from '../lib/pos.js';
 
@@ -63,7 +69,7 @@ function UserForm({ user, assignableRoles, branches, regions, onDone }) {
           role: form.role,
           ...placement,
         });
-        onDone({ email: data.user.email, tempPassword: data.tempPassword });
+        onDone(data.passwordSetup);
       }
     } catch (err) {
       setError(apiError(err));
@@ -252,7 +258,7 @@ export default function Team() {
   const [assignments, setAssignments] = useState(new Map());
   const [error, setError] = useState('');
   const [modal, setModal] = useState(null); // {kind:'invite'|'edit'|'stores'|'reset', row?}
-  const [credential, setCredential] = useState(null);
+  const [codeSent, setCodeSent] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -299,7 +305,7 @@ export default function Team() {
     setBusy(true);
     try {
       const { data: d } = await api.post(`/users/${target.id}/reset-password`);
-      setCredential({ email: d.email, tempPassword: d.tempPassword });
+      setCodeSent(d.passwordReset);
     } catch (err) {
       setError(apiError(err));
     } finally {
@@ -309,7 +315,7 @@ export default function Team() {
 
   const closeModal = () => {
     setModal(null);
-    setCredential(null);
+    setCodeSent(null);
   };
   const done = () => {
     closeModal();
@@ -343,13 +349,13 @@ export default function Team() {
     <div>
       <PageHeader
         title="Team"
-        subtitle="Staff accounts and where they apply. Temporary passwords are shown once, at creation or reset."
+        subtitle="Staff accounts and where they apply. Everyone chooses their own password from a code we email them."
         actions={
           canWrite ? (
             <button
               type="button"
               className="btn-orange"
-              onClick={() => { setCredential(null); setModal({ kind: 'invite' }); }}
+              onClick={() => { setCodeSent(null); setModal({ kind: 'invite' }); }}
             >
               <UserPlus className="h-4 w-4" /> Add team member
             </button>
@@ -383,7 +389,17 @@ export default function Team() {
                   </td>
                   <td className="px-4 py-3"><RoleBadge role={u.role} /></td>
                   <td className="px-4 py-3 text-slate-600">{worksAt(u)}</td>
-                  <td className="px-4 py-3"><StatusBadge status={u.status} /></td>
+                  {/* mustChangePassword now means "has not chosen one yet" —
+                      the flag clears the moment they set theirs. Shown because
+                      it is the difference between a colleague who cannot sign
+                      in and one who has not tried, and because the fix is the
+                      Reset password button in the same row. */}
+                  <td className="px-4 py-3">
+                    <StatusBadge status={u.status} />
+                    {u.mustChangePassword ? (
+                      <div className="mt-1 text-[11px] font-semibold text-amber-600">Awaiting password</div>
+                    ) : null}
+                  </td>
                   {/* fmtDateTime, not toLocaleString: every other date in the
                       POS is IST, and a login stamp that silently follows the
                       till's own timezone is the one you would quote back at
@@ -418,7 +434,7 @@ export default function Team() {
                           <button
                             type="button"
                             className="text-xs font-semibold text-pos-royal hover:underline"
-                            onClick={() => { setCredential(null); setModal({ kind: 'reset', row: u }); }}
+                            onClick={() => { setCodeSent(null); setModal({ kind: 'reset', row: u }); }}
                           >
                             Reset password
                           </button>
@@ -444,12 +460,12 @@ export default function Team() {
 
       <Modal
         open={modal?.kind === 'invite'}
-        title={credential ? 'Account created' : 'Add team member'}
+        title={codeSent ? 'Account created' : 'Add team member'}
         onClose={closeModal}
       >
-        {credential ? (
+        {codeSent ? (
           <div className="space-y-4">
-            <TempPasswordReveal credential={credential} />
+            <CodeSentNote outcome={codeSent} />
             <button type="button" className="btn-primary w-full" onClick={done}>Done</button>
           </div>
         ) : (
@@ -457,7 +473,7 @@ export default function Team() {
             assignableRoles={assignableRoles}
             branches={branches.filter((b) => b.status === 'ACTIVE')}
             regions={regions.filter((r) => r.status === 'ACTIVE')}
-            onDone={(cred) => setCredential(cred)}
+            onDone={(outcome) => setCodeSent(outcome)}
           />
         )}
       </Modal>
@@ -493,24 +509,26 @@ export default function Team() {
 
       <Modal
         open={modal?.kind === 'reset'}
-        title={credential ? 'Password reset' : 'Reset password'}
-        onClose={credential ? done : closeModal}
+        title={codeSent ? 'Password reset' : 'Reset password'}
+        onClose={codeSent ? done : closeModal}
       >
-        {credential ? (
+        {codeSent ? (
           <div className="space-y-4">
-            <TempPasswordReveal credential={credential} />
+            <CodeSentNote outcome={codeSent} />
             <button type="button" className="btn-primary w-full" onClick={done}>Done</button>
           </div>
         ) : modal?.kind === 'reset' ? (
           <div className="space-y-4">
             <p className="text-sm text-slate-500">
               This signs <span className="font-semibold text-pos-ink">{modal.row.fullName}</span> out
-              everywhere and replaces their password with a temporary one, shown once. They must set
-              a new password at their next sign-in.
+              everywhere and ends their current password. We email them a code so they can choose a
+              new one.
             </p>
             <div className="flex items-center gap-2">
               <KeyRound className="h-4 w-4 shrink-0 text-pos-ember" />
-              <span className="text-xs text-slate-500">Their current password stops working immediately.</span>
+              <span className="text-xs text-slate-500">
+                You will not see their new password — nobody but they ever does.
+              </span>
             </div>
             <ErrorNote message={error} />
             <button
@@ -519,7 +537,7 @@ export default function Team() {
               disabled={busy}
               onClick={() => resetPassword(modal.row)}
             >
-              {busy ? 'Resetting…' : 'Reset and show temporary password'}
+              {busy ? 'Resetting…' : 'Reset and email a code'}
             </button>
           </div>
         ) : null}

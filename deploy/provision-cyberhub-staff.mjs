@@ -7,28 +7,31 @@
 //     its password is read from an existing 0600 credentials file, never argv/env
 //   * refuses unless the owner's company has isDemo = true
 //   * idempotent — an account that already exists is reported and skipped
-//   * no password, token or cookie is ever printed; server-generated temp
-//     passwords go to OUT_FILE (mode 0600, refuses to overwrite)
+//   * no password, token or cookie is ever printed
 //
-// The created accounts keep mustChangePassword = true (the supported flow's
-// secure default). If they are to be handed out as SHARED demo credentials,
-// follow up with the documented scoped rotation using --demo, exactly as was
-// done for the other demo accounts (docs/DEPLOY-PHASE2.md §5).
+// LANE accounts — there is no longer a credential to capture. POST /api/users
+// used to answer with a server-generated temporary password, which this script
+// collected into a 0600 file for somebody to hand over; the route now creates
+// the account with a hash no string satisfies and emails the PERSON a code, so
+// the response carries `passwordSetup` describing the delivery and nothing
+// secret. The output file is gone with the secret it existed to hold, and so
+// is the hand-over step: each account's first password is chosen by the person
+// who will use it, and is never known to anybody else.
+//
+// The accounts are created with mustChangePassword = true and become usable
+// when their owner redeems the emailed code.
 //
 //   node deploy/provision-cyberhub-staff.mjs                    # against prod
 //   BASE_URL=http://127.0.0.1:5010 node deploy/provision-cyberhub-staff.mjs
 //
 // Exit codes: 0 ok · 1 failed/refused · 2 usage/environment.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
 const BASE = (process.env.BASE_URL || 'https://atcworkspace.com/pos').replace(/\/$/, '');
 const API = `${BASE}/api`;
 const CREDS_FILE = process.env.CREDS_FILE || '/home/atc-noc/pos-demo-creds-20260921.txt';
 const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'demo.owner@atcpos.example').toLowerCase();
-const OUT_FILE =
-  process.env.OUT_FILE ||
-  `/home/atc-noc/pos-demo-creds-cyberhub-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.txt`;
 
 const BRANCH_CODE = 'BSC-CH';
 const STAFF = [
@@ -105,9 +108,15 @@ const main = async () => {
       token,
       body: { email: s.email, fullName: s.fullName, role: s.role, branchId: target.id },
     });
-    if ((r.status === 200 || r.status === 201) && r.body?.tempPassword) {
-      issued.push({ email: s.email, tempPassword: r.body.tempPassword });
-      out(`CREATED  ${s.email}  role=${s.role}  branch=${BRANCH_CODE}  (temp password captured, not shown)`);
+    if (r.status === 200 || r.status === 201) {
+      const setup = r.body?.passwordSetup;
+      issued.push(s.email);
+      out(
+        `CREATED  ${s.email}  role=${s.role}  branch=${BRANCH_CODE}  ` +
+          (setup?.sent
+            ? `setup code emailed to ${setup.sentTo}, valid ${setup.expiresInMinutes} min`
+            : `WARNING: setup code NOT delivered${setup?.reason ? ` (${setup.reason})` : ''} — they can use "Forgot password?" to get one`),
+      );
     } else {
       failures += 1;
       const msg = r.body?.error?.message || r.body?.raw || '';
@@ -116,21 +125,11 @@ const main = async () => {
   }
 
   if (issued.length) {
-    const body = [
-      '# VEXO Connect (demo) — Cyber Hub staff temp credentials',
-      `# generated ${new Date().toISOString()} by deploy/provision-cyberhub-staff.mjs`,
-      '# mustChangePassword=true: each account is forced to set its own password at first sign-in.',
-      '# Treat this file as a secret. Delete it once the credentials are handed over.',
-      '',
-      ...issued.map((i) => `${i.email}\t${i.tempPassword}`),
-      '',
-    ].join('\n');
-    try {
-      writeFileSync(OUT_FILE, body, { mode: 0o600, flag: 'wx' });
-      out(`temp passwords written to ${OUT_FILE} (mode 0600), not shown here by design`);
-    } catch (e) {
-      die(1, `FAIL: could not write ${OUT_FILE}: ${e.code || e.message} — accounts exist but their temp passwords are unrecoverable; rotate them via the documented scoped rotation`);
-    }
+    out(
+      `\n${issued.length} account(s) created. Nothing to hand over: each person redeems the\n` +
+        'code in their own mailbox and chooses a password nobody else will ever know.\n' +
+        'If a code lapses, "Forgot password?" issues another.',
+    );
   }
 
   // Independent read-back through the same supported API.

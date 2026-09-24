@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Store, ShieldCheck, Building2 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import { apiError } from '../lib/api.js';
@@ -101,7 +101,12 @@ export default function Login() {
                 />
               </div>
               <div>
-                <label className="label" htmlFor="password">Password</label>
+                <div className="flex items-baseline justify-between">
+                  <label className="label" htmlFor="password">Password</label>
+                  <Link to="/forgot-password" className="text-xs font-semibold text-pos-royal hover:underline">
+                    Forgot password?
+                  </Link>
+                </div>
                 <input
                   id="password"
                   type="password"
