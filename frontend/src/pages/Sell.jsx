@@ -1055,11 +1055,29 @@ export default function Sell() {
                       wide enough that a 4:3 box would push the price off the
                       first screen of a long menu.
 
+                      The max-height variant is keyed on HEIGHT, not on one of
+                      the sm/md breakpoints, because the constraint here is
+                      vertical and the widths it appears at are not the narrow
+                      ones. Measured on a 6-item menu: at 1024x768 — the classic
+                      4:3 till — the full-size row put 4 of 6 items on screen,
+                      because that is the one size where the order panel still
+                      sits beside the grid while the screen is short, so the
+                      grid gets 2 columns AND taller tiles. At 64px all 6 fit.
+                      A width breakpoint cannot express that: 768x1024 is
+                      narrower and needs no help at all, since the panel stacks
+                      underneath and hands the grid its width back.
+
+                      780 and not 800 so a 1280x800 panel running fullscreen
+                      keeps the larger photo — it already fits 6 of 6 there, so
+                      shrinking it would cost picture for nothing. The same
+                      device in a browser has ~700px of viewport once the chrome
+                      is taken off, and is then caught, which is correct.
+
                       aria-hidden and empty alt: the name is right underneath in
                       the same button, so a screen reader announcing the photo
                       would read every item twice. */}
                   {showPhotos ? (
-                    <div className="mb-0.5 h-20 w-full shrink-0 overflow-hidden rounded-lg bg-slate-100 sm:h-24">
+                    <div className="mb-0.5 h-20 w-full shrink-0 overflow-hidden rounded-lg bg-slate-100 sm:h-24 [@media(max-height:780px)]:h-16">
                       {p.imageUrl ? (
                         <img
                           src={p.imageUrl}
