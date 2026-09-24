@@ -6,8 +6,18 @@
 Two defects in the phone-order backend. Both were found from the outside, by
 driving W1's API through a real browser against W2's own database — not by
 reading the code, and not by running W1's test suite (W2 does not run another
-worker's tests). Neither is fixed: the backend is W1's to change. This report
-exists so the fix is a decision W1 makes with the evidence in hand.
+worker's tests). The backend is W1's to change, so this report exists to make
+the fix a decision W1 takes with the evidence in hand.
+
+> **Status, 2026-09-24 — this opening no longer describes the tree.** It was
+> written as "two defects, neither fixed". The register below has since grown to
+> six, and four of them are fixed here: **D-1, D-2, D-3 and D-5**. D-4 is
+> process rather than runtime. **D-6 is pinned but deliberately unfixed**,
+> pending an owner decision that no VC-102 spec settles. One D-2 limitation
+> survives its own fix and is recorded rather than closed — see *What this does
+> not settle*. Line numbers cited for the **fixed** defects are this tree's; the
+> unfixed ones still read against `c40683b`, so check which of the two a
+> citation is following before trusting it.
 
 > **Consolidation note (`merge/a406-consolidate`, 2026-09-24).** This report was
 > written twice, once per lane, each copy describing the other lane in the third
@@ -302,13 +312,29 @@ Three things about that, in order of importance:
    proves: an order taken and moved within the same slot *does* count, and the
    store refuses the next one. A transfer minutes after the call — the ordinary
    operator action — is handled.
-3. **Closing it is a schema decision, not a patch.** The order needs a slot
-   anchor that survives a move and is distinct from both `createdAt` and
-   `scheduledFor`; re-stamping either one destroys information the rest of the
-   route depends on (that is the same objection that ruled out option 1). So it
-   is recorded and pinned rather than quietly fixed, and the test above states
-   today's behaviour without endorsing it — it goes red the day someone adds
-   the anchor, and points here.
+3. **Closing it needs a slot anchor that survives a move** and is distinct from
+   both `createdAt` and `scheduledFor`; re-stamping either one destroys
+   information the rest of the route depends on (the same objection that ruled
+   out option 1). So it is recorded and pinned rather than quietly fixed, and
+   the test above states today's behaviour without endorsing it — it goes red
+   the day someone adds the anchor, and points here.
+
+   > **Corrected 09-24, later the same evening — this said "a schema decision,
+   > not a patch", and that was wrong.** A concurrent session working the same
+   > item pointed out that **the anchor is already written**: every reassign
+   > creates a `PhoneOrderEvent` with `action: 'REASSIGNED'`, `toBranchId` and
+   > `at @default(now())`, inside the *same transaction* as the
+   > `phoneOrder.update` (`phoneOrders.js:939–965`), so it cannot be missing for
+   > any moved order. "When was this store asked to make this order" is
+   > therefore derivable today — the `at` of the latest `REASSIGNED` event whose
+   > `toBranchId` is the order's current `routedBranchId`, falling back to
+   > `createdAt` — with no migration. I verified the model and the transactional
+   > write before accepting it. The correct statement is that this is a **read
+   > change of unknown cost**, not a schema change: the per-order lookup is
+   > indexed (`@@index([phoneOrderId, at])`), but the capacity count is a query
+   > over many orders in a slot, and whether that stays cheap is the open
+   > question. Being tried on branch `x/vc104-slot-anchor`; this paragraph
+   > should be replaced by its result rather than left as a second guess.
 
 **The TOCTOU race is unchanged.** Two concurrent submits into the last free slot
 both read `booked = n-1` and both pass. It predates this fix and is equally true

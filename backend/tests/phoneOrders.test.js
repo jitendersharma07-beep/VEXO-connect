@@ -335,24 +335,22 @@ describe('branch options explain themselves', () => {
   });
 
   it('refuses a store whose prep slot is already full', async () => {
-    await prisma.branchPrepCapacity.create({
-      data: { companyId: companyA.id, branchId: a2.id, slotMinutes: 15, maxOrdersPerSlot: 1 },
-    });
-    const when = new Date(Date.now() + 3600e3);
-    const first = await submit(baseSubmission({ branchId: a2.id, scheduledFor: when.toISOString() }));
-    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    await withCapacity(a2.id, 1, async () => {
+      // An explicit scheduledFor, unlike the ASAP tests below: this is the
+      // SCHEDULED counting path, where the booking falls inside a slot range.
+      const when = new Date(Date.now() + 3600e3);
+      const first = await submit(baseSubmission({ branchId: a2.id, scheduledFor: when.toISOString() }));
+      expect(first.status, JSON.stringify(first.body)).toBe(201);
 
-    const res = await options({
-      fulfilment: 'DELIVERY',
-      addressId: addrA.id,
-      scheduledFor: when.toISOString(),
+      const res = await options({
+        fulfilment: 'DELIVERY',
+        addressId: addrA.id,
+        scheduledFor: when.toISOString(),
+      });
+      const a2opt = res.body.options.find((o) => o.branchId === a2.id);
+      expect(a2opt.unavailableReasons.map((r) => r.code)).toContain('AT_CAPACITY');
+      expect(a2opt.capacity.booked).toBe(1);
     });
-    const a2opt = res.body.options.find((o) => o.branchId === a2.id);
-    expect(a2opt.unavailableReasons.map((r) => r.code)).toContain('AT_CAPACITY');
-    expect(a2opt.capacity.booked).toBe(1);
-
-    await prisma.phoneOrder.deleteMany({ where: { routedBranchId: a2.id } });
-    await prisma.branchPrepCapacity.deleteMany({ where: { branchId: a2.id } });
   });
 
   it('counts ASAP orders against the slot as well (D-2)', async () => {
