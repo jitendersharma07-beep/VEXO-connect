@@ -25,6 +25,7 @@ import { toPaise, toRupees, pctToMilli } from '../../lib/money.js';
 import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber } from '../../lib/invoice.js';
+import { routeKotItems } from '../../lib/kitchen.js';
 import {
   ORDER_INCLUDE,
   SUMMARY_INCLUDE,
@@ -618,6 +619,15 @@ router.post(
       await tx.orderItem.updateMany({
         where: { id: { in: unsent.map((i) => i.id) } },
         data: { kotId: created.id },
+      });
+      // Kitchen routing rides the same transaction: KOT and its ticket lines
+      // exist together or not at all. Zero stations configured = no-op.
+      await routeKotItems(tx, {
+        companyId: req.companyScope.id,
+        branchId: order.branchId,
+        order,
+        kot: created,
+        items: unsent,
       });
       return { ...created, items: unsent };
     });

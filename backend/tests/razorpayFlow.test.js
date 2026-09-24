@@ -124,6 +124,15 @@ const tokens = {};
 let productId;
 
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   // Before PosUser and Branch, which it references. Shared test database:
   // another file's DayClose rows block this file's PosUser delete.
   await prisma.dayClose.deleteMany();

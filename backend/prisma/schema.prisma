@@ -106,6 +106,7 @@ model Branch {
   dayCloses       DayClose[]
 
   discountPolicies DiscountPolicy[]
+  kitchenStations  KitchenStation[]
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -519,6 +520,10 @@ model OrderItem {
   voidedBy       PosUser?        @relation("OrderItemVoidedBy", fields: [voidedById], references: [id])
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
+  // Kitchen instruction for this line ("no onion"). Printed on the KOT and
+  // shown on the station, never on the customer's receipt. See LANE kitchen.
+  note           String?
+  kitchenItem    KitchenItem?
 
   @@index([orderId])
   @@index([productId])
@@ -532,6 +537,7 @@ model Kot {
   createdAt DateTime @default(now())
 
   items OrderItem[]
+  kitchenItems KitchenItem[]
 
   @@unique([orderId, seq])
 }
@@ -789,4 +795,300 @@ model DayClose {
 
   @@index([companyId, businessDate])
   @@index([branchId, businessDate])
+}
+
+// ==== LANE kitchen ====
+// VC-103 kitchen orchestration (stations, routing, per-line preparation state)
+// and the Store Agent print queue. Everything here hangs off the EXISTING Kot
+// and OrderItem rows: a kitchen ticket IS a KOT id, and a kitchen line IS an
+// order line. Nothing in this block holds money, and nothing in it is read by
+// billing, payment or reporting code.
+//
+// Foreign keys into Core cascade (OrderItem, Kot, Branch) because these rows
+// are derived operational state, not records of their own: Core never hard-
+// deletes a line that has been sent to the kitchen (it voids it), so the
+// cascade only ever fires in a test wipe — where it keeps every other suite's
+// delete order valid without that suite having to know these tables exist.
+
+enum KitchenItemState {
+  QUEUED
+  IN_PREP
+  READY
+  SERVED
+  CANCELLED
+}
+
+// A preparation station in one store — "Hot kitchen", "Barista bar". Status
+// reuses Core's ACTIVE/ARCHIVED: a station with history is archived, never
+// deleted, so yesterday's prep times keep the station they were measured at.
+model KitchenStation {
+  id                String        @id @default(cuid())
+  companyId         String
+  branchId          String
+  branch            Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  name              String
+  // What "late" means at this station. Snapshotted onto each line when it is
+  // routed, so editing the target tonight does not rewrite last week's
+  // late-ticket figures.
+  targetPrepSeconds Int           @default(600)
+  // The station every unrouted line falls back to. Written as the branch id on
+  // the one default station and NULL on every other, so a plain unique index
+  // enforces "at most one default per store" — Postgres treats NULLs as
+  // distinct, which is exactly the rest of the stations.
+  defaultForBranch  String?       @unique
+  sortOrder         Int           @default(0)
+  status            CatalogStatus @default(ACTIVE)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  routes       KitchenRoute[]
+  items        KitchenItem[]
+  printTargets PrintTarget[]
+
+  @@unique([branchId, name])
+  @@index([companyId, branchId])
+}
+
+// Routing rule: this product, or anything in this category, goes to this
+// station. A product rule beats a category rule; neither beats nothing — a
+// line with no rule goes to the store's default station.
+//
+// productId/categoryId are deliberately NOT foreign keys: the catalog is
+// company-wide and editable, and a rule naming a category that was later
+// deleted is harmless (it never matches) where a foreign key would have made
+// the catalog screen refuse the delete for a reason it cannot explain.
+model KitchenRoute {
+  id          String         @id @default(cuid())
+  companyId   String
+  branchId    String
+  stationId   String
+  station     KitchenStation @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  // "product:<id>" | "category:<id>" — one rule per subject per store.
+  matchKey    String
+  productId   String?
+  categoryId  String?
+  createdById String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([branchId, matchKey])
+  @@index([stationId])
+}
+
+// One order line's journey through the kitchen. Created in the same
+// transaction that sends the KOT, one row per line, unique on the line — so a
+// replayed routing step can never make a second ticket line.
+model KitchenItem {
+  id            String           @id @default(cuid())
+  companyId     String
+  branchId      String
+  orderId       String
+  kotId         String
+  kot           Kot              @relation(fields: [kotId], references: [id], onDelete: Cascade)
+  orderItemId   String           @unique
+  orderItem     OrderItem        @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  stationId     String
+  station       KitchenStation   @relation(fields: [stationId], references: [id])
+  state         KitchenItemState @default(QUEUED)
+  // Optimistic lock. Every transition names the version it was decided on;
+  // a stale or replayed bump matches no row and changes nothing.
+  version       Int              @default(1)
+  // The store's kitchen cursor at this row's last change. Clients poll for
+  // "everything after N", which is how a reconnect resumes without refetching
+  // — or duplicating — the board.
+  changeSeq     Int
+  targetSeconds Int
+  queuedAt      DateTime
+  startedAt     DateTime?
+  readyAt       DateTime?
+  servedAt      DateTime?
+  cancelledAt   DateTime?
+  // A station telling the pass "this one is held up, and why".
+  delayReason   String?
+  delayedAt     DateTime?
+  lastActorId   String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([branchId, changeSeq])
+  @@index([branchId, state])
+  @@index([stationId, state])
+  @@index([orderId])
+  @@index([kotId])
+}
+
+// Per-store change counter, incremented under its own row lock inside every
+// kitchen write — the InvoiceCounter pattern. Holding the lock until commit is
+// what makes the numbers commit in order, so a reader that has seen N has seen
+// everything up to N. A plain sequence would not: 11 can commit before 10.
+model KitchenCursor {
+  branchId  String   @id
+  lastSeq   Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+enum PrintAgentStatus {
+  PENDING // created, one-time enrolment code issued, never enrolled
+  ACTIVE
+  REVOKED
+}
+
+enum PrintTransport {
+  TCP // raw socket, conventionally port 9100
+  FILE // the agent's own spool directory — dry run, no printer
+}
+
+enum PrintPurpose {
+  KOT
+  RECEIPT
+}
+
+enum PrintJobKind {
+  KOT
+  RECEIPT
+  TEST
+}
+
+// QUEUED     waiting for its agent
+// DISPATCHED handed to the agent, lease running, outcome not yet reported
+// CONFIRMED  the agent wrote every byte and the printer connection closed clean
+// FAILED     definitely not printed (nothing was written), retries exhausted
+// UNCERTAIN  bytes may have reached the printer and nobody can say whether
+//            paper came out. NEVER retried automatically: a retry is a second
+//            copy of a KOT, and a second KOT is a second dish.
+enum PrintJobStatus {
+  QUEUED
+  DISPATCHED
+  CONFIRMED
+  FAILED
+  UNCERTAIN
+}
+
+enum PrintJobResolution {
+  REPRINTED // a person asked for a new copy (see PrintJob.reprintOfId)
+  CONFIRMED_BY_STAFF // a person looked at the printer and saw the paper
+  DISMISSED // a person decided no copy is needed any more
+}
+
+// The Store Agent: a small program on a Windows/Linux PC in the store that
+// drives the printers the browser cannot. This is the lane's MINIMAL agent
+// credential — INTEGRATION(foundation): the foundation lane owns
+// Terminal/Device enrolment, and this model is meant to be replaced by (or
+// linked to) that Device row; see src/lib/print/agentAuth.js.
+model PrintAgent {
+  id                 String           @id @default(cuid())
+  companyId          String
+  branchId           String
+  name               String
+  status             PrintAgentStatus @default(PENDING)
+  // sha256 of the one-time code. Cleared the moment it is used, so a code
+  // works exactly once.
+  enrolCodeHash      String?          @unique
+  enrolCodeExpiresAt DateTime?
+  // sha256 of the agent's secret. The secret itself is shown to the agent
+  // once and never stored.
+  credentialHash     String?          @unique
+  enrolledAt         DateTime?
+  revokedAt          DateTime?
+  lastSeenAt         DateTime?
+  lastIp             String?
+  platform           String?
+  agentVersion       String?
+  hostname           String?
+  // Last heartbeat as the agent reported it: queue depth, per-printer reach.
+  health             Json?
+  createdById        String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  targets PrintTarget[]
+  jobs    PrintJob[]
+
+  @@unique([branchId, name])
+  @@index([companyId, branchId])
+}
+
+// One printer, as its agent reaches it. `cut` and `drawerKick` say what the
+// job may ASK for; whether a given printer obeys has not been tested on any
+// physical hardware (see docs/lanes/KITCHEN.md).
+model PrintTarget {
+  id         String          @id @default(cuid())
+  companyId  String
+  branchId   String
+  agentId    String
+  agent      PrintAgent      @relation(fields: [agentId], references: [id])
+  name       String
+  purpose    PrintPurpose
+  // KOT printers only: the station whose lines this printer gets. NULL is a
+  // pass printer that gets every line. Restrict, not SET NULL: a station
+  // printer silently widening into a pass printer is not a state to reach.
+  stationId  String?
+  station    KitchenStation? @relation(fields: [stationId], references: [id], onDelete: Restrict)
+  transport  PrintTransport
+  host       String?
+  port       Int?
+  // Characters per line in the printer's normal font: 48 for 80 mm, 32 for 58 mm.
+  widthChars Int             @default(48)
+  cut        Boolean         @default(true)
+  drawerKick Boolean         @default(false)
+  status     CatalogStatus   @default(ACTIVE)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  jobs PrintJob[]
+
+  @@unique([branchId, name])
+  @@index([agentId])
+}
+
+model PrintJob {
+  id             String              @id @default(cuid())
+  companyId      String
+  branchId       String
+  agentId        String
+  agent          PrintAgent          @relation(fields: [agentId], references: [id])
+  targetId       String
+  target         PrintTarget         @relation(fields: [targetId], references: [id])
+  kind           PrintJobKind
+  status         PrintJobStatus      @default(QUEUED)
+  // "This document to this printer", stable across retries of the request
+  // that created it. Unique per store, so a double-clicked print or a replayed
+  // KOT is one job.
+  idempotencyKey String
+  // Device-neutral lines rendered here; the agent turns them into ESC/POS.
+  document       Json
+  attempts       Int                 @default(0)
+  maxAttempts    Int                 @default(3)
+  nextAttemptAt  DateTime            @default(now())
+  // Client-chosen token of the claim that dispatched this attempt. A claim
+  // repeated with the same token (response lost, agent restarted) gets the
+  // same job back instead of a lease that expires into UNCERTAIN.
+  claimToken     String?
+  dispatchedAt   DateTime?
+  leaseExpiresAt DateTime?
+  completedAt    DateTime?
+  lastError      String?
+  // The agent's last report as sent — including one that arrived too late to
+  // change anything, which is exactly what a person resolving an UNCERTAIN
+  // job wants to see.
+  lastReport     Json?
+  sourceKotId    String?
+  sourceOrderId  String?
+  // A reprint is a new job pointing at the one it replaces. Unique: one job
+  // is reprinted at most once, so a double-clicked reprint is not two copies.
+  reprintOfId    String?             @unique
+  reprintOf      PrintJob?           @relation("PrintJobReprint", fields: [reprintOfId], references: [id])
+  reprintedAs    PrintJob?           @relation("PrintJobReprint")
+  reason         String?
+  resolution     PrintJobResolution?
+  resolvedById   String?
+  resolvedAt     DateTime?
+  requestedById  String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@unique([branchId, idempotencyKey])
+  @@index([agentId, status, nextAttemptAt])
+  @@index([branchId, createdAt])
+  @@index([sourceKotId])
 }
