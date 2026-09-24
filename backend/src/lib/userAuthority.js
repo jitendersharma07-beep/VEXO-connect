@@ -55,6 +55,30 @@ export const requireAnotherActiveOwner = async (req, targetId) => {
   }
 };
 
+// The same reasoning one level up, and the stakes are the whole platform
+// rather than one tenant. Platform administrators are the only accounts that
+// can create customer companies, issue licences and — via this very guard —
+// appoint more of themselves. Disabling the last active one is not a recoverable
+// mistake: there is no screen left that can undo it, and the bootstrap script
+// deliberately refuses to promote an existing account, so the way back is
+// database surgery.
+//
+// Counted with companyId: null in the WHERE. A POS_SUPER_ADMIN row that somehow
+// carried a company would not be a platform administrator, and letting one stand
+// in for the real thing is how "there is another admin" becomes false while
+// reading as true.
+export const requireAnotherActivePlatformAdmin = async (targetId) => {
+  const others = await prisma.posUser.count({
+    where: { role: 'POS_SUPER_ADMIN', companyId: null, status: 'ACTIVE', id: { not: targetId } },
+  });
+  if (!others) {
+    throw conflict(
+      'This is the only active platform administrator. Invite and activate another one first — ' +
+        'disabling this account would leave nobody able to create companies, issue licences or restore access.',
+    );
+  }
+};
+
 // Which roles this caller may actually offer. Gated on user.write first: an
 // auditor holds every *.read action and would otherwise "cover" every
 // read-only role despite being unable to mint anything.
