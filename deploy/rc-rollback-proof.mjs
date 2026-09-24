@@ -39,9 +39,20 @@ const DB = `atc_pos_rb_${RUN}`;
 const PORT = Number(process.env.RB_PORT || 5012);
 const BASE = `http://127.0.0.1:${PORT}/api`;
 const hex = (n) => randomBytes(n).toString('hex');
+
+// The dev database password is read from the running container, never stored
+// in this repo. Same source as backend/scripts/dev-sandbox-fixture.mjs.
+const PW = execFileSync('docker', ['exec', 'atc-pos-dev-db', 'printenv', 'POSTGRES_PASSWORD'])
+  .toString()
+  .trim();
+if (!PW) {
+  console.error('FAIL: could not read POSTGRES_PASSWORD from atc-pos-dev-db — is the dev stack up?');
+  process.exit(2);
+}
+
 const ENV = {
   ...process.env,
-  DATABASE_URL: `postgresql://atc_pos:atc_pos_dev@127.0.0.1:5439/${DB}?schema=public`,
+  DATABASE_URL: `postgresql://atc_pos:${PW}@127.0.0.1:5439/${DB}?schema=public`,
   POS_JWT_SECRET: hex(32),
   HOST: '127.0.0.1',
   PORT: String(PORT),
