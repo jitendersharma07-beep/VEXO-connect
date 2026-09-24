@@ -5,25 +5,35 @@ import {
   BadgeCheck,
   BadgePercent,
   BarChart3,
+  Boxes,
   Building2,
   CalendarCheck,
+  CalendarClock,
+  ChefHat,
+  ClipboardCheck,
   KeyRound,
+  Layers,
   LayoutDashboard,
   ListChecks,
   LogOut,
   Menu,
   Package,
+  PackagePlus,
   ReceiptText,
   ScrollText,
+  Settings2,
   ShieldCheck,
   ShoppingCart,
   Store,
+  Truck,
   Users,
+  Warehouse,
   X,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
 import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope } from '../lib/pos.js';
+import { canUseInventory } from '../lib/inventory.js';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
@@ -120,6 +130,34 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
           {isOwner ? <NavItem to="/team" icon={Users} label="Team" /> : null}
           {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
+          {/* ==== LANE inventory ==== (spec Part B §8)
+              One condition for the whole section, matching the route gate in
+              App.jsx and the server's INVENTORY_ACTIONS map. Setup is listed
+              for a manager too: it is where they see which stock location
+              their own sales come out of, and every control on it is the
+              owner's and refused server-side for anyone else.
+
+              Note these are links, not permissions. Removing one hides a
+              screen; it does not close an endpoint. */}
+          {canUseInventory(user) ? (
+            <>
+              <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                Inventory
+              </div>
+              <NavItem to="/inventory" icon={Boxes} label="Overview" end />
+              <NavItem to="/inventory/stock" icon={Warehouse} label="Stock on hand" />
+              <NavItem to="/inventory/batches" icon={Layers} label="Batches & expiry" />
+              <NavItem to="/inventory/requests" icon={ClipboardCheck} label="Store requests" />
+              <NavItem to="/inventory/transfers" icon={Truck} label="Transfers" />
+              <NavItem to="/inventory/planning" icon={CalendarClock} label="Planning & reminders" />
+              <NavItem to="/inventory/receiving" icon={PackagePlus} label="Receiving" />
+              <NavItem to="/inventory/adjustments" icon={ListChecks} label="Counts & wastage" />
+              <NavItem to="/inventory/recipes" icon={ChefHat} label="Recipes & food cost" />
+              <NavItem to="/inventory/ledger" icon={ScrollText} label="Stock ledger" />
+              <NavItem to="/inventory/setup" icon={Settings2} label="Inventory setup" />
+            </>
+          ) : null}
+          {/* ==== /LANE inventory ==== */}
         </>
       )}
     </nav>
