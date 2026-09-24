@@ -94,6 +94,9 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
             VEXO Console
           </div>
           <NavItem to="/atc/companies" icon={Building2} label="Companies" />
+          {/* LANE accounts — the accounts that own this console. Sits beside
+              Companies rather than under one, because it belongs to no tenant. */}
+          <NavItem to="/atc/platform-admins" icon={ShieldCheck} label="Administrators" />
           {atcScope ? (
             <>
               <div className="mt-4 flex items-center justify-between gap-1 px-3 pb-1">
