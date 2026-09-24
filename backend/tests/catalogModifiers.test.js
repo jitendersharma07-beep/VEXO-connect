@@ -1075,6 +1075,21 @@ describe('two edits arriving at the same instant', () => {
   // at no flake risk in the other direction.
   const ROUNDS = 6;
 
+  // ROUNDS rounds of real HTTP against a shared box needs its own clock. The
+  // suite default is 20s (vitest.config.js), which these two outgrew: measured
+  // over 40 isolated runs of the archive/archive test, median 1260ms, p90
+  // 2378ms, max 11334ms — a 9x spread driven by load, not by the code under
+  // test. Inside the full 57-test file, with another worker's suite on the same
+  // host at load ~10/12 cores, it twice crossed 20s and failed as "Test timed
+  // out", never once as a broken invariant.
+  //
+  // Raising the budget cannot hide a regression here, which is the only reason
+  // it is legitimate: if the lock stops working, `active` is 0 or both requests
+  // return 200, and the expect() below fails in about a second. A timeout is
+  // the one failure this test CANNOT produce from a real defect, so the clock
+  // was only ever measuring the host.
+  const RACE_TIMEOUT_MS = 60_000;
+
   it('cannot archive the last two options of a required group at once', async () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const p = await freshProduct();
@@ -1109,7 +1124,7 @@ describe('two edits arriving at the same instant', () => {
       });
       expect((await sell(p.id, [remaining.id])).status, outcome).toBe(201);
     }
-  });
+  }, RACE_TIMEOUT_MS);
 
   it('cannot raise the minimum while the last option is being archived', async () => {
     // The same race across two DIFFERENT routes: one caller raises minSelect to
@@ -1149,7 +1164,7 @@ describe('two edits arriving at the same instant', () => {
       const picked = activeIds.slice(0, Math.max(group.minSelect, 1));
       expect((await sell(p.id, picked)).status, `${outcome}, sold ${picked.length}`).toBe(201);
     }
-  });
+  }, RACE_TIMEOUT_MS);
 });
 
 // Sells one of the product through the ordinary till route. The order path is
