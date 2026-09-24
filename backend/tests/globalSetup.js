@@ -6,24 +6,32 @@
 // vitest processes can be mid-run against the same database — and then each
 // one's wipe() deletes the other's fixtures.
 //
-// This worktree makes that sharper than the lanes it consolidates: its tests do
-// not run against a private database. The lane's own runner refuses anything
-// but vcx_foundation_test at 127.0.0.1:5440, which is ALSO the x/foundation
-// lane's database. So the collision here is CROSS-LANE — a foundation run and a
-// merge run are two different worktrees wiping one database.
+// CORRECTED 2026-09-24. This file arrived here as a copy of the version in the
+// merge worktrees (merge-a406, main-merge — still byte-identical there), and it
+// described THEIR database, not this lane's. It claimed this worktree has no
+// private database and shares vcx_foundation_test with the x/foundation lane.
+// That is not true here: `vcxp` pins TEST_DATABASE_URL to vcx_providers_test,
+// and every lane runner on this box names its own (vcx_payments_test,
+// vcx_kitchen_test, ...). A run that waits here is therefore waiting for ANOTHER
+// RUN OF THIS LANE, never for foundation — which is what the timeout message
+// below now says. The old text would have sent whoever hit it looking through
+// other people's worktrees for a holder that cannot be there.
 //
-// That is why the key below must stay byte-identical to the one in
-// x/foundation's tests/globalSetup.js. In a lane with a private database the
-// shared key is merely harmless; here it is load-bearing, and a "unique per
-// lane" key would silently restore the bug.
+// The consequence for the key is the opposite of what the copied text claimed:
+// because advisory locks are database-scoped (verified below), a lane with its
+// own database could use any key at all. It stays identical to x/foundation's
+// anyway, so that a file copied into the next lane — as this one was — is
+// correct there too, and so that the merge worktrees, where the key IS
+// load-bearing, never have to diverge from their sources.
 //
-// Observed 2026-09-24 in this worktree: a run here (pid 2493488) held three
-// connections to vcx_foundation_test with no advisory lock on that database at
-// all, while foundation's globalSetup was already in place. A lock is a
-// participation protocol, so one non-participant defeats it for everyone:
-// foundation takes the lock, finds it uncontended, and proceeds straight into
-// this lane's fixtures. The damage foundation logged that morning is what that
-// looks like from the other side —
+// The incident that justifies the lock is still real, and belongs to the merge
+// worktree: a run there (pid 2493488) held three connections to
+// vcx_foundation_test with no advisory lock on that database at all, while
+// foundation's globalSetup was already in place. A lock is a participation
+// protocol, so one non-participant defeats it for everyone: foundation takes the
+// lock, finds it uncontended, and proceeds straight into the other run's
+// fixtures. The damage foundation logged that morning is what that looks like
+// from the other side —
 //   /tmp/vcx-a406-full-113135-r1.log — full suite, 11:31:35..11:33:40.
 //     foundationPeople.test.js 17/30 red, first causal failure "expected 401 to
 //     be 403": its PosUser rows were gone, so the tokens stopped resolving,
@@ -41,9 +49,9 @@
 //   - a lock cannot leak. Postgres drops it when the connection dies, so a
 //     killed or crashed run leaves nothing behind. Per-run databases survive
 //     their run and accumulate on a server this box shares between lanes.
-// Contention here is higher than in a private lane — every foundation run
-// competes too — but runs are ~2 min and waiting is cheaper than re-running on
-// corrupt fixtures.
+// Contention is low — only this lane's own runs compete — but the 100,000-row
+// import test alone takes ~8 min, so waiting is real and is still cheaper than
+// re-running on corrupt fixtures.
 //
 // A run that cannot get the lock FAILS with the holder named. It must never
 // proceed anyway: proceeding is exactly the corruption above, reported as a
@@ -51,11 +59,12 @@
 
 import { PrismaClient } from '@prisma/client';
 
-// 0x564358, "VCX". Identical to x/foundation's by requirement — see above.
-// Advisory locks are scoped to a database (verified 2026-09-24: the same key
-// held on vcx_kitchen_test refused a second session on that database and did
-// not block a session on vcx_foundation_test, and the pg_locks row carried the
-// database oid), so lanes WITH a private database still never contend.
+// 0x564358, "VCX". Identical to x/foundation's — see above for why that is a
+// convention here rather than a requirement. Advisory locks are scoped to a
+// database (verified 2026-09-24: the same key held on vcx_kitchen_test refused a
+// second session on that database and did not block a session on
+// vcx_foundation_test, and the pg_locks row carried the database oid), so lanes
+// sharing this key never contend across their private databases.
 const LOCK_KEY = 5653848;
 
 const TIMEOUT_MS = Number(process.env.VCX_TEST_DB_LOCK_TIMEOUT_MS ?? 300_000);
@@ -68,7 +77,20 @@ const PROGRESS_MS = 15_000;
 // is no reap to outrun today. The heartbeat stays as insurance against that
 // being a pool-version detail, and earns its keep as the liveness assertion
 // below.
-const HEARTBEAT_MS = 30_000;
+// MEASURED 2026-09-24, and the earlier measurement above was wrong about why.
+// Prisma's pool retires the connection at ~300s of WALL CLOCK, not of idleness:
+// a probe holding this lock with a query every 15s still had its backend pid
+// change from 36438 to 36652 at t=301s, application_name back to empty and the
+// advisory lock gone with the old backend
+// (/home/atc-noc/vcx-providers-local/.runlogs/lockprobe.log). So no heartbeat
+// frequency can outrun it, and every run longer than five minutes was losing the
+// serialization guard — which the 482s 100,000-row import test found by printing
+// "LOST the lock mid-run" seven times.
+//
+// 10s rather than 30s because the heartbeat is now the thing that RECOVERS the
+// lock, and the window between losing it and noticing is the window in which
+// another run can start wiping this database undetected.
+const HEARTBEAT_MS = 10_000;
 
 const IDENTITY = `vcx-test-lock:${process.pid}`;
 
@@ -148,8 +170,9 @@ export async function setup() {
             ? `  holder: ${who.app || '(unnamed)'} backend pid ${who.pid}, connected ${who.age} ago.\n`
             : '  holder: released while we were giving up — just re-run.\n') +
           '  Runs are serialized because they share one database and each wipes it.\n' +
-          '  This worktree shares vcx_foundation_test with the x/foundation lane,\n' +
-          '  so the holder may be a run in a DIFFERENT worktree. Wait and re-run.'
+          '  This lane has its own database, so the holder is another run of THIS\n' +
+          '  lane — look for a vitest under providers/, not in other worktrees.\n' +
+          '  The 100,000-row import test holds it for ~8 min. Wait and re-run.'
       );
     }
 
@@ -171,14 +194,43 @@ export async function setup() {
       ` as ${IDENTITY}${waitedFor ? ` (previous holder pid ${waitedFor.pid} finished)` : ''}`
   );
 
-  // Re-asserts that the lock is still ours, and keeps the session non-idle.
-  // Losing it mid-run would mean another run is already wiping underneath this
-  // one, which makes every later result meaningless — worth saying out loud
-  // rather than leaving to surface as an unrelated red assertion.
+  // Re-asserts that the lock is still ours, and RE-TAKES it when the pool has
+  // retired the session it was held on (see HEARTBEAT_MS above — that happens on
+  // every run past ~5 minutes, not as an edge case).
+  //
+  // Re-taking is safe to distinguish from a real collision, because the two have
+  // different answers: if pg_try_advisory_lock succeeds immediately then nobody
+  // else holds it and nobody has wiped anything, so the run continues. If it
+  // fails, another run does hold it and is wiping this database right now — and
+  // then every later assertion in this process is measuring somebody else's
+  // fixtures. That is not a warning, it is the end of the run: printing a note
+  // and carrying on is how the corruption this file exists to prevent gets
+  // reported as an unrelated red assertion somewhere else.
   heartbeat = setInterval(() => {
     held()
-      .then((still) => {
-        if (!still) note('LOST the lock mid-run — results are not trustworthy, re-run alone');
+      .then(async (still) => {
+        if (still) return;
+        const [{ ok: retaken }] = await client.$queryRaw`SELECT pg_try_advisory_lock(CAST(${LOCK_KEY} AS bigint)) AS ok`;
+        if (retaken) {
+          // Re-asserted on whatever connection the pool has now. Worth a line:
+          // it is the only visible evidence that the pool churns underneath a
+          // long run, and the next person to read a slow run's output should
+          // not have to rediscover it.
+          note('lock session was retired by the pool and the lock has been re-taken — no other run intervened');
+          await client.$executeRawUnsafe(`SET application_name = '${IDENTITY}'`);
+          return;
+        }
+        const who = await holder();
+        note(
+          'LOST the test database to another run' +
+            (who ? ` (${who.app || '(unnamed)'}, pid ${who.pid})` : '') +
+            ' — it is wiping fixtures underneath this one, so every result from here is meaningless.',
+        );
+        note('aborting. Wait for that run to finish and re-run alone.');
+        // Nothing else can stop the run from here: globalSetup has no handle on
+        // the suites, and they are mid-flight against a database that is being
+        // emptied. A non-zero exit is the honest outcome.
+        process.exit(1);
       })
       .catch(() => {});
   }, HEARTBEAT_MS);
