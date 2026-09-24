@@ -283,6 +283,128 @@ describe('enqueue: scoping, dedupe, receipt gate', () => {
   });
 });
 
+describe('printed documents carry the truth (pre-hardware checklist)', () => {
+  // The server renders documents; the agent renders paper. These tests pin
+  // the DOCUMENT half of the checklist: totals, tax breakup, discounts,
+  // notes, and the wrap parameters the agent needs. Character wrapping, cut
+  // and drawer-kick EFFECTS are hardware acceptance — not provable here.
+
+  it('a billed receipt document carries items, discount, tax breakup and totals', async () => {
+    await prisma.discountPolicy.create({ data: {
+      companyId: company.id, level: 'COMPANY', scopeKey: 'company',
+      allowLineDiscount: true, allowOrderDiscount: true,
+      maxPercent: '15.000', note: 'checklist fixture' } });
+    const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
+      .send({ type: 'TAKEAWAY', items: [{ productId: burgerId, qty: 2 }, { productId: saladId, qty: 1 }] });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const orderId = created.body.order.id;
+    const disc = await request(app).post(`/api/orders/${orderId}/discount`)
+      .set(auth(tokens.cashier)).send({ type: 'PERCENT', value: 10 });
+    expect(disc.status, JSON.stringify(disc.body)).toBe(200);
+    const bill = await request(app).post(`/api/orders/${orderId}/bill`)
+      .set(auth(tokens.cashier)).send({});
+    expect(bill.status, JSON.stringify(bill.body)).toBe(200);
+    const order = bill.body.order;
+    // §6 money engine, tax-exclusive: 300 − 10% = 270 taxable, 5% GST.
+    expect(order.subtotal).toBe(300);
+    expect(order.discountAmount).toBe(30);
+    expect(order.taxAmount).toBe(13.5);
+    expect(order.total).toBe(283.5);
+
+    const res = await enqueue({ orderId, kind: 'RECEIPT' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.queued).toBe(1);
+    const row = await prisma.printJob.findUnique({ where: { id: res.body.jobs[0].id } });
+    const doc = row.document;
+    expect(doc.invoiceNumber).toBe(order.invoiceNumber);
+    expect(doc.company.name).toBe('Print Cafe');
+    expect(doc.branch).toMatchObject({ name: 'Main', code: 'P1' });
+    expect(doc.order.cashier).toBe('Print Till');
+    expect(doc.order.type).toBe('TAKEAWAY');
+    expect(doc.items).toHaveLength(2);
+    expect(doc.items.find((i) => i.name === 'Burger'))
+      .toMatchObject({ qty: 2, unitPrice: 100, lineDiscount: 0, amount: 200 });
+    expect(doc.items.find((i) => i.name === 'Salad'))
+      .toMatchObject({ qty: 1, unitPrice: 100, amount: 100 });
+    expect(doc.subtotal).toBe(order.subtotal);
+    expect(doc.discountAmount).toBe(order.discountAmount);
+    expect(doc.taxBreakup).toEqual([{ name: 'GST 5%', percent: 5, taxable: 270, tax: 13.5 }]);
+    expect(doc.taxBreakup.reduce((a, b) => a + b.tax, 0)).toBe(order.taxAmount);
+    expect(doc.total).toBe(order.total);
+    expect(doc.payments).toEqual([]);
+    expect(doc.amountPaid).toBe(0);
+    expect(doc.amountDue).toBe(order.total);
+    expect(doc.refunds).toEqual([]);
+  });
+
+  it('a KOT document carries the order note and per-line notes', async () => {
+    const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
+      .send({ type: 'TAKEAWAY', note: 'serve together',
+        items: [{ productId: burgerId, qty: 1 }, { productId: saladId, qty: 1 }] });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const orderId = created.body.order.id;
+    // No API writes item notes yet (schema field, writer pending) — set it
+    // the way a future till will, so the ticket contract is pinned now.
+    await prisma.orderItem.updateMany({
+      where: { orderId, productId: burgerId }, data: { note: 'no onions' },
+    });
+    const kot = await request(app).post(`/api/orders/${orderId}/kot`)
+      .set(auth(tokens.cashier)).send({});
+    expect(kot.status, JSON.stringify(kot.body)).toBe(201);
+    const res = await enqueue({ orderId, kind: 'KOT', kotId: kot.body.kot.id });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.queued).toBe(2); // pass + Grill (Cold has no printer)
+    const row = await prisma.printJob.findUnique({ where: { id: res.body.jobs[0].id } });
+    const doc = row.document;
+    expect(doc.seq).toBe(1);
+    expect(doc.type).toBe('TAKEAWAY');
+    expect(doc.note).toBe('serve together');
+    expect(doc.items.map((i) => i.name).sort()).toEqual(['Burger', 'Salad']);
+    expect(doc.items.find((i) => i.name === 'Burger').note).toBe('no onions');
+    expect(doc.items.find((i) => i.name === 'Salad').note).toBeNull();
+  });
+
+  it('the claim hands the agent its wrap parameters with the document', async () => {
+    await prisma.printTarget.update({ where: { id: receiptTargetId }, data: { widthChars: 42 } });
+    const mine = await prisma.printJob.findFirst({
+      where: { targetId: receiptTargetId, status: 'QUEUED' },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(mine).not.toBeNull();
+    // Park everything, then make ONLY this job due (never blanket-unpark).
+    await prisma.printJob.updateMany({
+      where: { status: 'QUEUED' },
+      data: { nextAttemptAt: new Date(Date.now() + 3600e3) },
+    });
+    await prisma.printJob.update({ where: { id: mine.id }, data: { nextAttemptAt: new Date() } });
+    const c = await claim('tok-checklist-width');
+    expect(c.status, JSON.stringify(c.body)).toBe(200);
+    expect(c.body.jobs).toHaveLength(1);
+    const j = c.body.jobs[0];
+    expect(j.id).toBe(mine.id);
+    // The agent wraps/cuts/kicks from these — the software half of the
+    // paper-size checklist row.
+    expect(j.target).toMatchObject({ widthChars: 42, cut: true, drawerKick: false });
+    expect(j.document.invoiceNumber).toBeTruthy();
+    const done = await report(j.id, { ok: true, detail: { bytes: 2048 } });
+    expect(done.body.status).toBe('CONFIRMED');
+  });
+
+  it('asking again for the same reprint returns the same job, never a 500', async () => {
+    const source = await prisma.printJob.findFirst({
+      where: { status: 'CONFIRMED', targetId: receiptTargetId },
+    });
+    expect(source).not.toBeNull();
+    const first = await request(app).post(`/api/print-jobs/${source.id}/reprint`)
+      .set(auth(tokens.cashier)).send({ reason: 'customer wants a copy' });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const again = await request(app).post(`/api/print-jobs/${source.id}/reprint`)
+      .set(auth(tokens.cashier)).send({ reason: 'customer wants a copy' });
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    expect(again.body.job.id).toBe(first.body.job.id);
+  });
+});
+
 describe('claim, report, retry and the truth rules', () => {
   const drain = async () => {
     // Park everything currently due so a test starts from an empty queue.

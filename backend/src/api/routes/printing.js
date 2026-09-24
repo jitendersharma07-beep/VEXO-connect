@@ -243,8 +243,11 @@ printAgentsRouter.post('/jobs/claim', requirePrintAgent, asyncHandler(async (req
         attempts: { increment: 1 },
       },
     });
+    // Only rows THIS token actually moved: a concurrent claim that won the
+    // updateMany race keeps its batch, and this caller gets [] rather than a
+    // copy of somebody else's lease — a duplicated batch is a duplicated dish.
     return tx.printJob.findMany({
-      where: { id: { in: due.map((j) => j.id) } },
+      where: { id: { in: due.map((j) => j.id) }, claimToken: body.claimToken, status: 'DISPATCHED' },
       include: { target: true },
       orderBy: { createdAt: 'asc' },
     });
@@ -310,10 +313,18 @@ const renderDocument = async (req, order, kind, kotId) => {
   }
   const kot = await prisma.kot.findFirst({
     where: { id: kotId, orderId: order.id },
-    include: { items: { select: { name: true, qty: true } } },
+    // note rides along: the cashier's "no onions" belongs on the station
+    // ticket, not only on a screen. Null when nothing was typed.
+    include: { items: { select: { name: true, qty: true, note: true } } },
   });
   if (!kot) throw notFound('KOT not found');
-  return { seq: kot.seq, type: order.type, items: kot.items, createdAt: kot.createdAt };
+  return {
+    seq: kot.seq,
+    type: order.type,
+    note: order.note ?? null,
+    items: kot.items,
+    createdAt: kot.createdAt,
+  };
 };
 
 const targetsFor = async (order, kind, kotId) => {
@@ -372,16 +383,27 @@ printJobsRouter.post('/', ...operate, asyncHandler(async (req, res) => {
       jobs.push({ ...publicJob(existing), deduped: true });
       continue;
     }
-    const job = await prisma.printJob.create({
-      data: {
-        companyId: req.companyScope.id, branchId: order.branchId,
-        agentId: target.agentId, targetId: target.id,
-        kind: body.kind, idempotencyKey, document,
-        sourceOrderId: order.id, sourceKotId: body.kotId ?? null,
-        requestedById: req.user.id,
-      },
-    });
-    jobs.push({ ...publicJob(job), deduped: false });
+    try {
+      const job = await prisma.printJob.create({
+        data: {
+          companyId: req.companyScope.id, branchId: order.branchId,
+          agentId: target.agentId, targetId: target.id,
+          kind: body.kind, idempotencyKey, document,
+          sourceOrderId: order.id, sourceKotId: body.kotId ?? null,
+          requestedById: req.user.id,
+        },
+      });
+      jobs.push({ ...publicJob(job), deduped: false });
+    } catch (e) {
+      // Two tills firing the identical request at the same instant: the
+      // loser of the unique race dedupes exactly like a sequential retry
+      // instead of surfacing a 500.
+      if (e?.code !== 'P2002') throw e;
+      const raced = await prisma.printJob.findUnique({
+        where: { branchId_idempotencyKey: { branchId: order.branchId, idempotencyKey } },
+      });
+      jobs.push({ ...publicJob(raced), deduped: true });
+    }
   }
   await audit(req, {
     action: 'PRINT_JOB_QUEUED', entity: 'Order', entityId: order.id,
@@ -410,26 +432,40 @@ printJobsRouter.post('/:id/reprint', ...operate, asyncHandler(async (req, res) =
     where: { id: req.params.id, companyId: req.companyScope.id },
   });
   if (!job) throw notFound('Job not found');
-  const created = await prisma.$transaction(async (tx) => {
-    const reprint = await tx.printJob.create({
-      data: {
-        companyId: job.companyId, branchId: job.branchId,
-        agentId: job.agentId, targetId: job.targetId,
-        kind: job.kind, document: job.document,
-        idempotencyKey: `reprint:${job.id}`,
-        sourceOrderId: job.sourceOrderId, sourceKotId: job.sourceKotId,
-        reprintOfId: job.id, reason: body.reason,
-        requestedById: req.user.id,
-      },
-    });
-    if (['UNCERTAIN', 'FAILED'].includes(job.status) && !job.resolution) {
-      await tx.printJob.update({
-        where: { id: job.id },
-        data: { resolution: 'REPRINTED', resolvedById: req.user.id, resolvedAt: new Date() },
+  let created;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      const reprint = await tx.printJob.create({
+        data: {
+          companyId: job.companyId, branchId: job.branchId,
+          agentId: job.agentId, targetId: job.targetId,
+          kind: job.kind, document: job.document,
+          idempotencyKey: `reprint:${job.id}`,
+          sourceOrderId: job.sourceOrderId, sourceKotId: job.sourceKotId,
+          reprintOfId: job.id, reason: body.reason,
+          requestedById: req.user.id,
+        },
       });
-    }
-    return reprint;
-  });
+      if (['UNCERTAIN', 'FAILED'].includes(job.status) && !job.resolution) {
+        await tx.printJob.update({
+          where: { id: job.id },
+          data: { resolution: 'REPRINTED', resolvedById: req.user.id, resolvedAt: new Date() },
+        });
+      }
+      return reprint;
+    });
+  } catch (e) {
+    // The same reprint asked for twice (double-tap, replayed request): hand
+    // back the job the first ask created instead of a unique-key 500. A
+    // deliberate FURTHER copy is a reprint of the newest job in the chain,
+    // so every extra paper stays its own audited decision.
+    if (e?.code !== 'P2002') throw e;
+    const existing = await prisma.printJob.findUnique({
+      where: { branchId_idempotencyKey: { branchId: job.branchId, idempotencyKey: `reprint:${job.id}` } },
+    });
+    if (!existing) throw e;
+    return res.json({ job: publicJob(existing) });
+  }
   await audit(req, {
     action: 'PRINT_JOB_REPRINT', entity: 'PrintJob', entityId: created.id,
     companyId: req.companyScope.id,
