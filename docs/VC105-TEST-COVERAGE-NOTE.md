@@ -6,9 +6,9 @@
 **This is not a defect report.** W2's VC-105 QA found no defect in this backend.
 All three defects recorded in `VC105-UI-DELIVERY.md` §3 were W2's own frontend
 bugs (filters held in component state, a money sign, milli-unit rendering) plus
-one harness bug; 47/47 checks passed against this endpoint. Nothing here needs
-fixing, and nothing here blocks the feature. What follows is the single
-observation left over from running the same test-gap sweep that produced
+two harness bugs; the run is 48/48 green. Nothing here needs fixing, and
+nothing here blocks the feature. What follows is the single observation left
+over from running the same test-gap sweep that produced
 `VC104-BACKEND-DEFECTS.md` §3 on the phone-order lane.
 
 ## Six response keys the client dereferences, and the suite never names
