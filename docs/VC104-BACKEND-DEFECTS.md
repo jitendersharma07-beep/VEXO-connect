@@ -21,13 +21,14 @@ exists so the fix is a decision W1 makes with the evidence in hand.
 | D-1 | `priceChanged` on reassign ignores the delivery charge | The caller is re-quoted nothing on exactly the moves that change what they pay | Medium — quote-facing, not billing (the charge is not billable while C-6 is open) | `backend/src/api/routes/phoneOrders.js:858,879,914` |
 | D-2 | Prep capacity never counts ASAP orders | The kitchen-full refusal is dead on the dominant path; the guard fails OPEN | High for the feature's purpose — no money impact | `backend/src/api/routes/phoneOrders.js:178–185` + `:569` |
 | D-3 | Phone orders cannot sell a product with a REQUIRED modifier group | Such products are refused on the phone path with "Choose at least N"; the caller cannot complete the order | Medium — fails CLOSED, so no mispricing; a catalogue subset is simply unsellable by phone | `backend/src/api/routes/orders.js` `resolveCatalogLine` minSelect loop, called from `phoneOrders.js` |
+| D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
 
 §3 is the part worth reading first: **the phone-order suite already builds D-1's
 exact conditions and simply never looks at the flag.**
 
-**D-3 did not exist in either lane alone — the consolidation merge created it**
-(09-24, `merge/a406-consolidate`). It is recorded here because this is where a
-VC-104 backend reader will look, not because W2's browser QA found it.
+**D-3 and D-4 did not exist in either lane alone — the consolidation merge
+created both** (09-24, `merge/a406-consolidate`). They are recorded here because
+this is where a VC-104 reader will look, not because W2's browser QA found them.
 
 ---
 
@@ -83,7 +84,8 @@ Seeded lane data, CP → CH reassign, same basket: delivery ₹40 → ₹65,
 re-price banner in QA run `20260924-135119` (66 checks passed, then the harness
 waited for a `po-move-banner` that the server's flag never justified). Evidence:
 `frontend/qa/screens/12-reassign-modal.png`, `13-after-move.png` and
-`frontend/qa/screens/results.json`, committed here (from `x/vc104-ui` @ `f344ef4`).
+`frontend/qa/screens/results-vc104.json`, committed here (from `x/vc104-ui` @
+`f344ef4`; the file was named `results.json` on the lane — see D-4).
 
 ### Suggested fixes — W1's call
 
@@ -210,6 +212,51 @@ exact drift the export was chosen to prevent.
 
 ---
 
+## D-4 — no VC-105 browser evidence for this tree, and the harnesses clobbered each other
+
+Not a runtime defect. It is here because it is the kind of gap that reads as
+green.
+
+### What the merge did
+
+`x/vc104-ui` and `x/vc105-ui` each shipped a Puppeteer harness into
+`frontend/qa/`, and **both wrote their machine-readable output to the same
+`qa/screens/results.json`**. Neither lane could see the collision: alone in its
+own tree, each filename was unique. Consolidated, whichever harness ran second
+overwrote the first — and the survivor still looks like a complete, passing run,
+so the loss leaves no trace. The add/add conflict git raised on that file during
+this merge is the only reason it was noticed at all.
+
+### What was done here
+
+Both recorded runs are preserved verbatim under lane-specific names, and each
+harness now writes its own:
+
+- `frontend/qa/screens/results-vc104.json` — 72/72, `at` 2026-09-24T14:19:48Z,
+  ports 5382/5383. This is a real run, and §D-1's evidence rests on it.
+- `frontend/qa/screens/results-vc105.json` — 47/47, **no `at` recorded**, ports
+  5386/5387. `vc105-browser-qa.mjs` now stamps `at` so the next one cannot be
+  mistaken for fresh.
+
+The ambiguous shared `results.json` is deleted rather than resolved: in a
+two-harness tree there is no honest answer to "which run is this".
+
+### What remains open
+
+**`frontend/qa/run-all.sh` still drives only the VC-104 harness.** VC-105's
+needs `backend/scripts/vc105-seed-demo.mjs`, not the `run-seed.mjs` that script
+calls — different fixtures, so it cannot simply be appended. Until someone wires
+a second seed-and-run stage, **the VC-105 UI has no browser evidence against
+consolidated code**, and the 47/47 in `VC105-UI-DELIVERY.md` is a statement
+about the lane, not about this tree. It is quoted in the delivery doc with that
+caveat attached rather than removed, because the run did happen.
+
+The screenshots do not collide — the two lanes happen to use different
+`NN-name.png` stems — but that is luck, not a scheme, and a third lane would
+have to check.
+
+---
+
 ## 3. Why the phone-order suite stays green on both
 
 **No existing assertion pins either bug, so fixing them should not turn the
@@ -300,3 +347,7 @@ consolidated tree — the merge carried them forward untouched, as W2 wrote them
 D-3 is the merge's own doing and is likewise unfixed. None of the three is
 pinned by an assertion, so the phone-order suite's 41/41 here says nothing about
 them either way.
+
+D-4 is half fixed: the evidence files no longer overwrite each other, but no
+VC-105 browser run has been executed against this tree, so that row of the UI
+acceptance table is **OWED, not passed**.

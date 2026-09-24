@@ -127,6 +127,15 @@ node "$HERE/vc104-browser-qa.mjs" >"$LOGDIR/qa.log" 2>&1
 QA_EXIT=$?
 
 tail -n 3 "$LOGDIR/qa.log"
-echo "results: $HERE/screens/results.json  screenshots: $HERE/screens/  logs: $LOGDIR"
+echo "results: $HERE/screens/results-vc104.json  screenshots: $HERE/screens/  logs: $LOGDIR"
 if [ "$QA_EXIT" = 0 ]; then echo "PASS: vc104-ui browser QA"; else echo "FAIL: browser QA exit $QA_EXIT — read $LOGDIR/qa.log"; fi
+
+# NOT RUN HERE: vc105-browser-qa.mjs. It arrived with x/vc105-ui, which shipped
+# no runner, and it needs backend/scripts/vc105-seed-demo.mjs rather than the
+# run-seed.mjs above — different fixtures, so it cannot just be appended to
+# this script. Until that seeding step exists, the only VC-105 browser evidence
+# in the tree is screens/results-vc105.json from the lane's own 47/47 run
+# (recorded with no timestamp, against ports 5386/5387, BEFORE consolidation).
+# Treat it as a lane result, not as evidence about this tree. See D-4 in
+# docs/VC104-BACKEND-DEFECTS.md.
 exit "$QA_EXIT"

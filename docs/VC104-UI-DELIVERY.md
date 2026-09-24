@@ -67,8 +67,8 @@ house frontend before a line of UI depended on it.
 
 ## 2. Browser QA — RUN AND GREEN
 
-> RUN 2026-09-24 (`results.json` `"at": "2026-09-24T14:19:48.479Z"`):
-> **72/72 checks passed, 0 skipped.** Evidence: `qa/screens/results.json`
+> RUN 2026-09-24 (`results-vc104.json` `"at": "2026-09-24T14:19:48.479Z"`):
+> **72/72 checks passed, 0 skipped.** Evidence: `qa/screens/results-vc104.json`
 > plus 19 numbered screenshots (`01`…`18`, with `15b` for the D-2 pin); run
 > logs `/tmp/vc104-ui-qa-20260924-141846/`. Executed via
 > `bash frontend/qa/run-all.sh` (§6) against a per-run reset demo DB. Two

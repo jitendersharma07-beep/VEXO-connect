@@ -66,16 +66,21 @@ const skip = (name, why) => {
   console.log(`SKIP  ${name} — ${why}`);
 };
 
-// Evidence survives a crash: results.json is written on EVERY exit path, so a
-// thrown selector timeout can no longer discard the checks that already ran
-// (the first full run lost 66 recorded passes exactly that way).
+// Evidence survives a crash: results-vc104.json is written on EVERY exit path,
+// so a thrown selector timeout can no longer discard the checks that already
+// ran (the first full run lost 66 recorded passes exactly that way).
+//
+// The filename is lane-specific because a406 consolidation put two harnesses
+// in this directory, both of which defaulted to the same plain results.json.
+// Whichever ran second silently destroyed the other lane's evidence, and the
+// loss was invisible — the surviving file looks like a complete, passing run.
 let resultsWritten = false;
 const writeResults = () => {
   if (resultsWritten) return;
   resultsWritten = true;
   const passed = results.filter((r) => r.pass).length;
   const skipped = results.filter((r) => r.skipped).length;
-  writeFileSync(join(OUT, 'results.json'), JSON.stringify({
+  writeFileSync(join(OUT, 'results-vc104.json'), JSON.stringify({
     ui: UI, api: API, at: new Date().toISOString(), passed, skipped, total: results.length, results,
   }, null, 2));
   console.log(`\n${passed}/${results.length} browser checks passed (${skipped} skipped)`);

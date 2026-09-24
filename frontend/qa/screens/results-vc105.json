@@ -1,0 +1,419 @@
+{
+  "ui": "http://127.0.0.1:5387",
+  "api": "http://127.0.0.1:5386",
+  "passed": 47,
+  "total": 47,
+  "results": [
+    {
+      "name": "table renders one row per menu item sold",
+      "pass": true,
+      "actual": 6,
+      "expected": 6,
+      "note": ""
+    },
+    {
+      "name": "Filter Coffee net sales, as rendered",
+      "pass": true,
+      "actual": "₹769.56",
+      "expected": "₹769.56",
+      "note": ""
+    },
+    {
+      "name": "Filter Coffee COGS, as rendered",
+      "pass": true,
+      "actual": "₹145.80",
+      "expected": "₹145.80",
+      "note": ""
+    },
+    {
+      "name": "Filter Coffee contribution margin, as rendered",
+      "pass": true,
+      "actual": "₹523.76",
+      "expected": "₹523.76",
+      "note": ""
+    },
+    {
+      "name": "Filter Coffee margin %, as rendered",
+      "pass": true,
+      "actual": "78.22%",
+      "expected": "78.22%",
+      "note": ""
+    },
+    {
+      "name": "Mystery Box COGS shows the unknown marker, not ₹0.00",
+      "pass": true,
+      "actual": "—",
+      "expected": "—",
+      "note": ""
+    },
+    {
+      "name": "Mystery Box margin shows the unknown marker, not ₹0.00",
+      "pass": true,
+      "actual": "—",
+      "expected": "—",
+      "note": ""
+    },
+    {
+      "name": "Mystery Box margin % shows the unknown marker, not 0%",
+      "pass": true,
+      "actual": "—",
+      "expected": "—",
+      "note": ""
+    },
+    {
+      "name": "Mystery Box is labelled No cost",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "Mystery Box is NOT classified a Dog",
+      "pass": true,
+      "actual": "No verdict",
+      "expected": "No verdict",
+      "note": ""
+    },
+    {
+      "name": "Old Favourite is flagged Stale",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "Seasonal Special is flagged Estimated",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "Loss Leader contribution margin is negative, sign first",
+      "pass": true,
+      "actual": "-₹45.00",
+      "expected": "-₹45.00",
+      "note": ""
+    },
+    {
+      "name": "Loss Leader margin % is negative",
+      "pass": true,
+      "actual": "-150.00%",
+      "expected": "-150.00%",
+      "note": ""
+    },
+    {
+      "name": "costing banner names the dependency as BLOCKED",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "costing banner warns the costs are synthetic",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "screen warns that synthetic history is not reproducible",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "screen says \"contribution margin\"",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "screen denies it is net business profit",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "partial totals state their exclusions",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "the phrase \"net business profit\" never appears as a claim",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "coverage strip states costed-of-total lines",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "chart states uncosted items cannot be placed",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "chart names the uncosted item",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "drilldown shows the recipe version",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "drilldown shows the yield",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "drilldown lists the ingredients",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "drilldown shows the yield adjustment as its own line",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "drilldown states the calculation basis",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "drilldown repeats that COGS is not reduced by a refund",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "uncosted drilldown refuses to invent a recipe",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "uncosted drilldown says the margin is unknown, not zero",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "an empty day says there were no sales",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "an empty day does not claim a zero margin",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "a historical period reproduces exactly on re-run",
+      "pass": true,
+      "actual": [
+        [
+          "Filter Coffee",
+          "16",
+          "₹669.56",
+          "₹0.00",
+          "₹129.60",
+          "₹539.96",
+          "80.64%",
+          "Actual",
+          "Ploughhorse"
+        ],
+        [
+          "Latte",
+          "4",
+          "₹480.00",
+          "₹0.00",
+          "₹72.00",
+          "₹408.00",
+          "85.00%",
+          "Actual",
+          "Puzzle"
+        ],
+        [
+          "Seasonal Special",
+          "2",
+          "₹90.44",
+          "₹0.00",
+          "₹100.00",
+          "-₹9.56",
+          "-10.57%",
+          "Estimated",
+          "Dog"
+        ]
+      ],
+      "expected": [
+        [
+          "Filter Coffee",
+          "16",
+          "₹669.56",
+          "₹0.00",
+          "₹129.60",
+          "₹539.96",
+          "80.64%",
+          "Actual",
+          "Ploughhorse"
+        ],
+        [
+          "Latte",
+          "4",
+          "₹480.00",
+          "₹0.00",
+          "₹72.00",
+          "₹408.00",
+          "85.00%",
+          "Actual",
+          "Puzzle"
+        ],
+        [
+          "Seasonal Special",
+          "2",
+          "₹90.44",
+          "₹0.00",
+          "₹100.00",
+          "-₹9.56",
+          "-10.57%",
+          "Estimated",
+          "Dog"
+        ]
+      ],
+      "note": ""
+    },
+    {
+      "name": "the historical window shows fewer items than the full period",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "channel filter narrows to takeaway items only",
+      "pass": true,
+      "actual": [
+        "Filter Coffee",
+        "Mystery Box",
+        "Old Favourite"
+      ],
+      "expected": [
+        "Filter Coffee",
+        "Mystery Box",
+        "Old Favourite"
+      ],
+      "note": ""
+    },
+    {
+      "name": "grouping by store returns the two seeded stores",
+      "pass": true,
+      "actual": [
+        "Airport",
+        "Central"
+      ],
+      "expected": [
+        "Airport",
+        "Central"
+      ],
+      "note": ""
+    },
+    {
+      "name": "the segment chart is withheld for non-item groupings",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "grouping by day returns one row per trading day",
+      "pass": true,
+      "actual": 6,
+      "expected": 6,
+      "note": ""
+    },
+    {
+      "name": "the empty day is absent rather than shown as zero",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "no horizontal page overflow at 390px",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "a branch manager sees their store is pinned",
+      "pass": true,
+      "actual": true,
+      "expected": true,
+      "note": ""
+    },
+    {
+      "name": "a branch manager never sees another store's items",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "a cashier is bounced off the menu-profitability route",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "a cashier is not offered the menu-profitability link",
+      "pass": true,
+      "actual": false,
+      "expected": false,
+      "note": ""
+    },
+    {
+      "name": "the API refuses a cashier regardless of the UI guard",
+      "pass": true,
+      "actual": 403,
+      "expected": 403,
+      "note": ""
+    }
+  ]
+}
