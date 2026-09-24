@@ -929,6 +929,229 @@ describe('a required group cannot be left unsatisfiable (D-5)', () => {
   });
 });
 
+describe('what a catalogue edit must not reach: orders already sold', () => {
+  // The guard above is about the FUTURE sellability of a product. Nothing here
+  // had asked the other question — whether editing a modifier reaches backwards
+  // into bills that already used it. OrderItemModifier carries groupName, name
+  // and price as its own columns rather than as a join to ModifierOption, so
+  // the answer should be no; "should" is not evidence.
+
+  it('leaves a sold line alone when the option is renamed, repriced and archived', async () => {
+    const p = await freshProduct();
+    const [g, syrup, shot] = await makeRequiredGroup(
+      p.id,
+      { name: 'Extras', minSelect: 1, maxSelect: 2 },
+      [{ name: 'Syrup', price: 50 }, { name: 'Shot', price: 30 }],
+    );
+
+    const sold = await sell(p.id, [syrup]);
+    expect(sold.status, JSON.stringify(sold.body)).toBe(201);
+    const orderId = sold.body.order.id;
+    const totalWhenSold = sold.body.order.total;
+
+    const snapshotOf = async () =>
+      prisma.orderItemModifier.findFirst({
+        where: { orderItem: { orderId } },
+        select: { optionId: true, groupName: true, name: true, price: true },
+      });
+    const atSale = await snapshotOf();
+    expect(atSale).toMatchObject({ optionId: syrup, groupName: 'Extras', name: 'Syrup' });
+    expect(Number(atSale.price)).toBe(50);
+
+    // Now move everything the line quoted. Each of these is an ordinary edit an
+    // owner makes; none of them is about this order.
+    expect((await patchOption(tokens.ownerA, p.id, g, syrup, { name: 'Vanilla syrup', price: 90 })).status).toBe(200);
+    expect((await patchGroup(tokens.ownerA, p.id, g, { name: 'Add-ons' })).status).toBe(200);
+    expect((await patchOption(tokens.ownerA, p.id, g, syrup, { status: 'ARCHIVED' })).status).toBe(200);
+    expect((await patchGroup(tokens.ownerA, p.id, g, { status: 'ARCHIVED' })).status).toBe(200);
+
+    // The bill reads exactly as it did when the customer paid it.
+    const after = await snapshotOf();
+    expect(after).toEqual(atSale);
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(Number(order.total)).toBe(Number(totalWhenSold));
+  });
+
+  it('charges the NEW price on the next sale — the control for the test above', async () => {
+    // Without this, "the old order did not move" could equally mean the edits
+    // never took effect, and both tests would be green on a no-op API.
+    const p = await freshProduct();
+    const [g, syrup] = await makeRequiredGroup(
+      p.id,
+      { name: 'Extras', minSelect: 1 },
+      [{ name: 'Syrup', price: 50 }],
+    );
+    const first = await sell(p.id, [syrup]);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+
+    expect((await patchOption(tokens.ownerA, p.id, g, syrup, { price: 90 })).status).toBe(200);
+
+    const second = await sell(p.id, [syrup]);
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+    expect(Number(second.body.order.total)).toBeGreaterThan(Number(first.body.order.total));
+
+    const prices = await prisma.orderItemModifier.findMany({
+      where: { optionId: syrup },
+      select: { price: true },
+      orderBy: { price: 'asc' },
+    });
+    expect(prices.map((r) => Number(r.price))).toEqual([50, 90]);
+  });
+});
+
+describe('the guard does not become a window into another tenant', () => {
+  // assertSatisfiable's message is unusually informative — it names the group
+  // and counts its options. That is right for the owner and wrong for anyone
+  // else, so the scope check has to happen BEFORE the guard, not after it.
+
+  it('answers 404 for another tenant, and says nothing about the group', async () => {
+    const p = await freshProduct();
+    const [g, whole] = await makeRequiredGroup(
+      p.id,
+      { name: 'Secret Recipe Milk', minSelect: 1 },
+      [{ name: 'Whole', price: 0 }],
+    );
+
+    // As owner A this is the archetypal D-5 refusal, and the 409 body names the
+    // group. As owner B the same call must not get that far.
+    const asOwner = await patchOption(tokens.ownerA, p.id, g, whole, { status: 'ARCHIVED' });
+    expect(asOwner.status).toBe(409);
+    expect(asOwner.body.error.message).toMatch(/Secret Recipe Milk/);
+
+    const asStranger = await patchOption(tokens.ownerB, p.id, g, whole, { status: 'ARCHIVED' });
+    expect(asStranger.status).toBe(404);
+    // Not merely "not 409": the group's name must not appear anywhere in the
+    // answer. A 404 carrying the conflict message would still be the leak.
+    expect(JSON.stringify(asStranger.body)).not.toMatch(/Secret Recipe Milk/);
+  });
+
+  it('refuses every writing route across the tenant line, not just the one with the guard', async () => {
+    const p = await freshProduct();
+    const [g, whole] = await makeRequiredGroup(
+      p.id,
+      { name: 'Milk', minSelect: 1 },
+      [{ name: 'Whole', price: 0 }],
+    );
+    const attempts = await Promise.all([
+      postGroup(tokens.ownerB, p.id, { name: 'Rogue' }),
+      patchGroup(tokens.ownerB, p.id, g, { minSelect: 0 }),
+      postOption(tokens.ownerB, p.id, g, { name: 'Skim', price: 5 }),
+      patchOption(tokens.ownerB, p.id, g, whole, { price: 1 }),
+    ]);
+    expect(attempts.map((r) => r.status)).toEqual([404, 404, 404, 404]);
+
+    // And nothing was written. A route that 404s after writing would pass every
+    // status assertion above.
+    const stored = await prisma.modifierGroup.findMany({
+      where: { productId: p.id },
+      include: { options: true },
+    });
+    expect(stored).toHaveLength(1);
+    expect(stored[0].minSelect).toBe(1);
+    expect(stored[0].options.map((o) => [o.name, Number(o.price)])).toEqual([['Whole', 0]]);
+  });
+});
+
+describe('two edits arriving at the same instant', () => {
+  // D-7. As shipped, the guard read the group, decided, and then wrote, with no
+  // transaction and no lock around the three. That is safe for one caller at a
+  // time and not for two, and a D-5 state reached THROUGH the guard is the same
+  // unsellable product the guard exists to prevent.
+  //
+  // Both tests failed on the tree before the fix, and the failures are recorded
+  // here because "it passes now" is worth nothing without them:
+  //   archive/archive  -> 200/200, ZERO active options on an ACTIVE minSelect-1
+  //                       group.
+  //   raise/archive    -> 200/200, minSelect 2 with 1 active option.
+  //
+  // The assertion in both is the INVARIANT, never which caller won: the losing
+  // ordering is a legitimate outcome and the test must not encode a winner.
+  //
+  // Each race runs ROUNDS times because a race is a probabilistic detector and
+  // one round is a coin flip. Measured, with the lock deliberately weakened to
+  // a plain SELECT inside the transaction: a single archive/archive round
+  // caught it in 2 of 5 runs. Repetition can only ever ADD failures — with the
+  // lock in place the invariant holds on every round — so this buys detection
+  // at no flake risk in the other direction.
+  const ROUNDS = 6;
+
+  it('cannot archive the last two options of a required group at once', async () => {
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      const p = await freshProduct();
+      const [g, whole, skim] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1, maxSelect: 1 },
+        [{ name: 'Whole', price: 0 }, { name: 'Skim', price: 5 }],
+      );
+
+      // Each request on its own is legal: two active options, archive one, one
+      // left, which satisfies minSelect 1. Together they are the defect.
+      const [a, b] = await Promise.all([
+        patchOption(tokens.ownerA, p.id, g, whole, { status: 'ARCHIVED' }),
+        patchOption(tokens.ownerA, p.id, g, skim, { status: 'ARCHIVED' }),
+      ]);
+
+      const active = await prisma.modifierOption.count({
+        where: { groupId: g, status: 'ACTIVE' },
+      });
+      const outcome = `round ${round}/${ROUNDS}: statuses ${a.status}/${b.status}, ${active} option(s) left active`;
+
+      // Exactly one may win. The invariant is the assertion, not the status
+      // pair: whichever way the two requests are ordered, an ACTIVE group with
+      // minSelect 1 must still have an option to select.
+      expect(active, outcome).toBeGreaterThanOrEqual(1);
+      expect([a.status, b.status].filter((s) => s === 200), outcome).toHaveLength(1);
+      expect([a.status, b.status].filter((s) => s === 409), outcome).toHaveLength(1);
+
+      // The consequence, not just the count: the product still sells.
+      const remaining = await prisma.modifierOption.findFirst({
+        where: { groupId: g, status: 'ACTIVE' },
+      });
+      expect((await sell(p.id, [remaining.id])).status, outcome).toBe(201);
+    }
+  });
+
+  it('cannot raise the minimum while the last option is being archived', async () => {
+    // The same race across two DIFFERENT routes: one caller raises minSelect to
+    // 2, the other archives an option down to 1. Each reads a state the other
+    // is about to invalidate.
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      const p = await freshProduct();
+      const [g, , skim] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1 },
+        [{ name: 'Whole', price: 0 }, { name: 'Skim', price: 5 }],
+      );
+
+      const [raise, archive] = await Promise.all([
+        patchGroup(tokens.ownerA, p.id, g, { minSelect: 2 }),
+        patchOption(tokens.ownerA, p.id, g, skim, { status: 'ARCHIVED' }),
+      ]);
+
+      const group = await prisma.modifierGroup.findUnique({
+        where: { id: g },
+        include: { options: true },
+      });
+      const activeIds = group.options.filter((o) => o.status === 'ACTIVE').map((o) => o.id);
+      const outcome = `round ${round}/${ROUNDS}: raise ${raise.status}, archive ${archive.status}, minSelect ${group.minSelect}, ${activeIds.length} active`;
+
+      // Both orderings end with exactly one 200 and one 409, and they end in
+      // DIFFERENT states — archive-first leaves minSelect 1 with 1 option, and
+      // raise-first leaves minSelect 2 with 2. Both are consistent, which is
+      // the whole of what is being claimed.
+      expect(group.minSelect, outcome).toBeLessThanOrEqual(activeIds.length);
+      expect([raise.status, archive.status].filter((s) => s === 200), outcome).toHaveLength(1);
+      expect([raise.status, archive.status].filter((s) => s === 409), outcome).toHaveLength(1);
+
+      // The consequence, read off the state that actually resulted rather than
+      // the one this test would have preferred: a cashier who picks the number
+      // of options the group now demands can still sell the product.
+      const picked = activeIds.slice(0, Math.max(group.minSelect, 1));
+      expect((await sell(p.id, picked)).status, `${outcome}, sold ${picked.length}`).toBe(201);
+    }
+  });
+});
+
 // Sells one of the product through the ordinary till route. The order path is
 // the only place that can prove a catalog edit had the effect the edit claimed,
 // and a D-5 refusal is worth nothing unless the product still sells afterwards.
