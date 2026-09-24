@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   ShoppingCart,
   Store,
+  TrendingUp,
   Users,
   X,
 } from 'lucide-react';
@@ -85,6 +86,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               <NavItem to="/catalog" icon={Package} label="Catalog" />
               <NavItem to="/tables" icon={Armchair} label="Tables" />
               <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+              <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
               <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
               <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
               <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
@@ -105,7 +107,8 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               {canSeeReports(user) ? (
                 <>
                   <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
-                  <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
+                  <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
+              <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
                   <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
                   <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
                 </>

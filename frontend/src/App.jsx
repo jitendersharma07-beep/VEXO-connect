@@ -15,6 +15,7 @@ import Orders from './pages/Orders.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
+import MenuProfitability from './pages/MenuProfitability.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
@@ -100,6 +101,16 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <SalesReport />
+                  </RequireRoles>
+                }
+              />
+              {/* VC-105. Same gate as the other reports: a CASHIER is refused
+                  by the server (403) and never reaches the route. */}
+              <Route
+                path="reports/menu-profitability"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <MenuProfitability />
                   </RequireRoles>
                 }
               />
