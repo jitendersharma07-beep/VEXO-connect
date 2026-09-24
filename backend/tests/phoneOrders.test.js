@@ -40,10 +40,26 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  // Tables that did not exist when this lane was branched. VC-102 promotions
+  // and modifiers, and the kitchen lane's print queue, all hang off the rows
+  // below them here, and every FK is RESTRICT — so they go first or the
+  // orderItem/kot/branch deletes fail. printJob points at Kot via sourceKotId,
+  // which is why the print block precedes the kot delete rather than following
+  // it.
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();

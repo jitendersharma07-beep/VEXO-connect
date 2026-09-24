@@ -617,7 +617,25 @@ router.post(
             openedById: req.user.id,
           },
         });
-        await tx.orderItem.createMany({ data: lines.map((l) => ({ orderId: order.id, ...l })) });
+        // resolveCatalogLine gained a `modifiers` breakdown when VC-102 landed
+        // (this is a consolidation-merge consequence, not a VC-104 change).
+        // createMany cannot write nested relation rows, and the till's
+        // createLineData — which folds that array into a nested create — is a
+        // per-row `create`, so it is not usable here. Phone orders cannot carry
+        // modifiers today: the API has no field for them, and a product with a
+        // REQUIRED group is refused upstream (D-3). The array is therefore
+        // always empty on this path and dropping it is exact rather than lossy.
+        // If that ever stops being true this must become per-row creates; it
+        // refuses instead of silently discarding the caller's choices.
+        const rows = lines.map(({ modifiers, ...line }) => {
+          if (modifiers?.length) {
+            throw new Error(
+              'phone-order line carries modifiers; createMany cannot persist them — use per-row creates',
+            );
+          }
+          return { orderId: order.id, ...line };
+        });
+        await tx.orderItem.createMany({ data: rows });
         await recomputeOrder(tx, order.id);
 
         const phoneOrder = await tx.phoneOrder.create({
