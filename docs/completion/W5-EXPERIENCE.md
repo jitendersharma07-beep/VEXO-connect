@@ -268,6 +268,21 @@ Harnesses (outside the worktree, by design):
 guest-phone-acceptance.mjs, reporting-acceptance.mjs, browser-fixture.mjs,
 captain-reach.sh}`.
 
+### Commits
+
+| SHA | |
+|---|---|
+| `77242fe` | base this branch was cut from and all results above were measured on |
+| `6764af3` | the delivery — 9 files, +2977 |
+
+Branch `x/experience`, **not yet on the remote**. It does not exist on
+`github` (`git ls-remote --heads github x/experience` is empty), so publishing
+it creates a new branch and advances nothing. `main` is untouched and was never
+a push target.
+
+The push itself is deliberately left for the owner to run — see the end of this
+document.
+
 ---
 
 ## 9. Remaining dependencies
@@ -286,3 +301,27 @@ captain-reach.sh}`.
 **Nothing in W5's own scope is waiting on W5.** Every item above is either
 another window's file or an external input, and each was recorded with the
 route-level evidence rather than edited across an ownership line.
+
+---
+
+## 10. Publishing the branch
+
+The work is committed; the push is not run from here. Pushing to the shared
+remote is an owner action, and `x/experience` does not yet exist on `github`, so
+this creates a new branch:
+
+```
+git -C ~/vexo-connect-x-lanes/experience push -u github x/experience
+```
+
+Then verify the remote actually holds what this document describes — the local
+SHA and the remote SHA must both read `6764af3` (or later, if more W5 commits
+land on the branch first):
+
+```
+git -C ~/vexo-connect-x-lanes/experience rev-parse HEAD
+git -C ~/vexo-connect-x-lanes/experience ls-remote --heads github x/experience
+```
+
+`main` is not a target and was not advanced. Coordination with W1 on merge
+order is still open — §5.
