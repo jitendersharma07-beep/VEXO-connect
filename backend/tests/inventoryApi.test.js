@@ -494,6 +494,111 @@ describe('the request lifecycle', () => {
     expect(closed.request.status).toBe('CLOSED_SHORT');
   });
 
+  // §8 asks who raised a request and who decided it. The columns were always
+  // written; what was missing was any way to read them back as people. These
+  // tests assert the name, not merely the presence of a field, because an id
+  // echoed back is exactly the failure the screen had before.
+  it('names the person who asked and the person who decided, not their ids', async () => {
+    const created = ok(await raise(), 201);
+    const id = created.request.id;
+
+    expect(created.request.raisedBy.fullName, 'the manager who asked').toBe('Manager A');
+    expect(created.request.raisedBy.role).toBe('BRANCH_MANAGER');
+    expect(created.request.decidedBy, 'nobody has decided yet').toBe(null);
+
+    ok(await decide(id, { [sugar.id]: '3000' }, { note: 'Approved in full' }));
+
+    const { request: r } = ok(await request(app).get(`${API}/requests/${id}`).set(auth(tok.owner)));
+    expect(r.raisedBy.fullName).toBe('Manager A');
+    expect(r.decidedBy.fullName, 'the owner decided it').toBe('Owner');
+    expect(r.decidedBy.role).toBe('CUSTOMER_OWNER');
+    expect(r.decidedBy.id, 'the id stays alongside the name').toBe(fx.owner.id);
+
+    // The list is the screen a manager scans; it must carry the name too,
+    // otherwise "who raised this" costs one request per row.
+    const list = ok(await request(app).get(`${API}/requests`).set(auth(tok.owner)));
+    expect(list.requests.every((x) => x.raisedBy?.fullName === 'Manager A')).toBe(true);
+  });
+
+  it('names an actor on every lifecycle event, not only on the request', async () => {
+    const created = ok(await raise(), 201);
+    const id = created.request.id;
+    ok(await decide(id, { [sugar.id]: '3000' }));
+
+    const { events } = ok(await request(app).get(`${API}/requests/${id}`).set(auth(tok.owner)));
+    expect(events.length, 'creation and decision both logged').toBeGreaterThanOrEqual(2);
+    expect(events.every((e) => e.actor !== undefined), 'every event answers "who"').toBe(true);
+
+    const decision = events.find((e) => e.toStatus === 'APPROVED');
+    expect(decision.actor.fullName).toBe('Owner');
+    // The role recorded at the time is kept as well as the resolved person:
+    // the two can legitimately disagree once somebody is promoted.
+    expect(decision.actorRole).toBe('CUSTOMER_OWNER');
+  });
+
+  it('keeps the id and says the account is gone when the decider is deleted', async () => {
+    const created = ok(await raise(), 201);
+    const id = created.request.id;
+    ok(await decide(id, { [sugar.id]: '3000' }));
+
+    // The negative control for the whole feature. StoreRequest carries no
+    // foreign key to PosUser precisely so this delete can succeed; if the
+    // resolver treated a missing row as "no actor", the audit trail would
+    // silently lose its decision-maker at exactly the moment it matters.
+    //
+    // A user who never signed in is used rather than one of the fixture's,
+    // because PosSession and DiscountPolicy both hold a restricting FK to
+    // PosUser and clearing those would make this test about cascade order
+    // instead of about the resolver.
+    const leaver = await prisma.posUser.create({
+      data: {
+        companyId: fx.company.id,
+        email: `leaver-${fx.company.id}@test.local`,
+        fullName: 'Someone Who Left',
+        role: 'BRANCH_MANAGER',
+        passwordHash: 'not-a-usable-hash',
+      },
+    });
+    await prisma.storeRequest.update({ where: { id }, data: { decidedById: leaver.id } });
+
+    // Proves the name resolves BEFORE the delete, so a null name afterwards is
+    // the account being gone and not the lookup having never worked.
+    const before = ok(await request(app).get(`${API}/requests/${id}`).set(auth(tok.owner)));
+    expect(before.request.decidedBy.fullName).toBe('Someone Who Left');
+
+    await prisma.posUser.delete({ where: { id: leaver.id } });
+
+    const { request: r, events } = ok(await request(app).get(`${API}/requests/${id}`).set(auth(tok.owner)));
+    expect(r.decidedBy, 'a removed account is not an absent actor').not.toBe(null);
+    expect(r.decidedBy.id, 'the id is still the truth about who decided').toBe(leaver.id);
+    expect(r.decidedBy.fullName, 'but there is no name left to give').toBe(null);
+    expect(r.decidedBy.role).toBe(null);
+    expect(r.decidedAt, 'the decision itself survives the account').not.toBe(null);
+
+    // Positive control on the same response: the surviving actor still resolves,
+    // so a null name means "this one is gone", not "the lookup broke".
+    expect(r.raisedBy.fullName).toBe('Manager A');
+    expect(events.some((e) => e.actor?.fullName === 'Manager A')).toBe(true);
+  });
+
+  it('names who raised a damage issue and who resolved it', async () => {
+    const created = ok(await raise({ lines: [{ itemId: sugar.id, qty: '5000', unit: 'g' }] }), 201);
+    const id = created.request.id;
+    ok(await decide(id, { [sugar.id]: '5000' }));
+    ok(await request(app).post(`${API}/requests/${id}/allocate`).set(auth(tok.owner)).send({}));
+    const d = ok(await request(app).post(`${API}/requests/${id}/dispatch`).set(auth(tok.owner)).send({}), 201);
+    ok(
+      await receiveTransfer(d.transfer.id, {
+        [sugar.id]: { acceptedQty: '4000', damagedQty: '1000', note: 'One bag split in the van' },
+      }),
+    );
+
+    const { request: r } = ok(await request(app).get(`${API}/requests/${id}`).set(auth(tok.owner)));
+    const damage = r.issues.find((i) => i.kind === 'DAMAGE');
+    expect(damage.raisedBy.fullName, 'the receiver who found it').toBe('Manager A');
+    expect(damage.resolvedBy, 'nobody has resolved it yet').toBe(null);
+  });
+
   it('will not approve more than was asked, and refuses self-approval by a manager', async () => {
     const created = ok(await raise(), 201);
     const id = created.request.id;

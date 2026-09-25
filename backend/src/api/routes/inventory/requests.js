@@ -28,7 +28,7 @@ import { postMovementsOnce, lockPosition, LedgerError } from '../../../lib/inven
 import { batchPositionsAt, selectFefo, reservedByBatchAt } from '../../../lib/inventory/stock.js';
 import { milliToQty, qtyToMilli } from '../../../lib/inventory/units.js';
 import { nextDocNumber } from '../../../lib/inventory/docnum.js';
-import { idemKey, qtyOut, qtyString, reasonString, loadItem, toBase } from './shared.js';
+import { actorOut, idemKey, qtyOut, qtyString, reasonString, loadItem, resolveActors, toBase } from './shared.js';
 import { dropObsoleteReminders, raiseReminder } from '../../../lib/inventory/reminders.js';
 
 const router = Router();
@@ -41,7 +41,25 @@ const REQUEST_INCLUDE = {
   attachments: true,
 };
 
-const serializeRequest = (r) => ({
+// Every actor id a request carries, including the ones hanging off its
+// issues. Kept as one list so a new actor column cannot be added to the model
+// and quietly miss the resolver — it either appears here or it is not
+// resolved at all, which is a visible gap rather than a silent one.
+const requestActorIds = (r) => [
+  r.raisedById,
+  r.decidedById,
+  r.closedById,
+  r.cancelledById,
+  r.assignedApproverId,
+  ...(r.issues ?? []).flatMap((i) => [i.raisedById, i.resolvedById]),
+];
+
+// byId has no default on purpose. Array.prototype.map passes an index as the
+// second argument, so `rows.map(serializeRequest)` would hand this function a
+// number; with a default it would quietly emit bare ids and the screen would
+// show cuids where names belong. Without one it throws, which is the failure
+// a test can catch.
+const serializeRequest = (r, byId) => ({
   id: r.id,
   number: r.number,
   status: r.status,
@@ -52,13 +70,20 @@ const serializeRequest = (r) => ({
   destination: r.destinationLocation,
   source: r.sourceLocation,
   assignedApproverId: r.assignedApproverId,
+  assignedApprover: actorOut(r.assignedApproverId, byId),
   originPlanId: r.originPlanId,
   raisedAt: r.raisedAt,
+  raisedBy: actorOut(r.raisedById, byId),
   submittedAt: r.submittedAt,
   decidedAt: r.decidedAt,
+  decidedBy: actorOut(r.decidedById, byId),
   decisionNote: r.decisionNote,
   closedAt: r.closedAt,
+  closedBy: actorOut(r.closedById, byId),
   closeReason: r.closeReason,
+  cancelledAt: r.cancelledAt,
+  cancelledBy: actorOut(r.cancelledById, byId),
+  cancelReason: r.cancelReason,
   lines: (r.lines ?? []).map((l) => ({
     id: l.id,
     item: l.item,
@@ -83,9 +108,11 @@ const serializeRequest = (r) => ({
     valuePaise: String(i.valuePaise),
     note: i.note,
     raisedAt: i.raisedAt,
+    raisedBy: actorOut(i.raisedById, byId),
     resolution: i.resolution,
     resolutionNote: i.resolutionNote,
     resolvedAt: i.resolvedAt,
+    resolvedBy: actorOut(i.resolvedById, byId),
   })),
   attachments: (r.attachments ?? []).map((a) => ({
     id: a.id,
@@ -96,6 +123,17 @@ const serializeRequest = (r) => ({
     uploadedAt: a.uploadedAt,
   })),
 });
+
+// One lookup for however many requests are being serialised. The list routes
+// return up to 200 and most of them were raised and decided by the same
+// handful of people, so resolving per row would be 200 round trips for a
+// dozen distinct names.
+const requestsOut = async (rows) => {
+  const byId = await resolveActors(prisma, rows.flatMap(requestActorIds));
+  return rows.map((r) => serializeRequest(r, byId));
+};
+
+const requestOut = async (r) => (await requestsOut([r]))[0];
 
 const logEvent = (tx, requestId, action, from, to, actor, detail) =>
   tx.storeRequestEvent.create({
@@ -246,7 +284,7 @@ router.post(
           ? { companyId: req.companyScope.id, requirementKey: data.requirementKey }
           : { companyId: req.companyScope.id, idempotencyKey: data.idempotencyKey };
         const existing = await prisma.storeRequest.findFirst({ where, include: REQUEST_INCLUDE });
-        if (existing) return res.status(200).json({ request: serializeRequest(existing), duplicate: true });
+        if (existing) return res.status(200).json({ request: await requestOut(existing), duplicate: true });
       }
       throw e;
     }
@@ -270,7 +308,7 @@ router.post(
       companyId: req.companyScope.id,
       meta: { number: request.number, status: request.status, lines: prepared.length },
     });
-    res.status(201).json({ request: serializeRequest(request) });
+    res.status(201).json({ request: await requestOut(request) });
   }),
 );
 
@@ -296,7 +334,7 @@ router.get(
       orderBy: [{ requiredBy: 'asc' }, { raisedAt: 'desc' }],
       take: 200,
     });
-    res.json({ requests: requests.map(serializeRequest) });
+    res.json({ requests: await requestsOut(requests) });
   }),
 );
 
@@ -318,7 +356,7 @@ router.get(
       orderBy: [{ priority: 'desc' }, { requiredBy: 'asc' }],
       take: 100,
     });
-    res.json({ requests: requests.map(serializeRequest) });
+    res.json({ requests: await requestsOut(requests) });
   }),
 );
 
@@ -335,15 +373,25 @@ router.get(
       where: { storeRequestId: request.id },
       include: { lines: { include: { batches: true } } },
     });
+    // Request, its issues and its whole event trail resolve in one lookup.
+    // The trail is the only place that answers "who moved it to REJECTED",
+    // so it gets the same treatment as the request's own columns rather
+    // than being left as opaque ids.
+    const byId = await resolveActors(prisma, [...requestActorIds(request), ...events.map((e) => e.actorId)]);
     res.json({
-      request: serializeRequest(request),
+      request: serializeRequest(request, byId),
       events: events.map((e) => ({
         id: e.id,
         action: e.action,
         fromStatus: e.fromStatus,
         toStatus: e.toStatus,
         actorId: e.actorId,
+        // actorRole is the role the person held WHEN they acted. It is kept
+        // alongside the resolved actor because the two can legitimately
+        // disagree: a manager promoted since the decision still decided it
+        // as a manager, and the trail must not rewrite that.
         actorRole: e.actorRole,
+        actor: actorOut(e.actorId, byId),
         detail: e.detail,
         createdAt: e.createdAt,
       })),
@@ -396,7 +444,7 @@ router.post(
       assigneeId: request.assignedApproverId,
       subject: `Request ${request.number} is waiting for a decision`,
     });
-    res.json({ request: serializeRequest(updated) });
+    res.json({ request: await requestOut(updated) });
   }),
 );
 
@@ -495,7 +543,7 @@ router.post(
       companyId: req.companyScope.id,
       meta: { number: request.number, status, lines: updates.length },
     });
-    res.json({ request: serializeRequest(updated) });
+    res.json({ request: await requestOut(updated) });
   }),
 );
 
@@ -588,7 +636,7 @@ router.post(
       meta: { number: request.number, lines: results.length },
     });
     const fresh = await prisma.storeRequest.findUnique({ where: { id: request.id }, include: REQUEST_INCLUDE });
-    res.json({ request: serializeRequest(fresh), allocation: results });
+    res.json({ request: await requestOut(fresh), allocation: results });
   }),
 );
 
@@ -1236,7 +1284,7 @@ router.post(
       companyId: req.companyScope.id,
       meta: { number: request.number, status, cancelledQty: milliToQty(outstanding), reason: data.reason },
     });
-    res.json({ request: serializeRequest(updated) });
+    res.json({ request: await requestOut(updated) });
   }),
 );
 
@@ -1277,7 +1325,7 @@ router.post(
       companyId: req.companyScope.id,
       meta: { number: request.number, reason },
     });
-    res.json({ request: serializeRequest(updated) });
+    res.json({ request: await requestOut(updated) });
   }),
 );
 

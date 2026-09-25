@@ -18,6 +18,8 @@ import { ArrowRight, CheckCircle2, ClipboardList, PackageCheck, Send, Truck, XCi
 import { PageHeader, FullScreenSpinner, Modal, ReasonModal } from '../../components/ui.jsx';
 import {
   ActionButton,
+  Actor,
+  ActorInline,
   Badge,
   Callout,
   ErrorNote,
@@ -227,6 +229,52 @@ function ReceiveForm({ transfer, itemsById, onDone, onError }) {
 
 /* ------------------------------------------------------------------ detail */
 
+// Who asked, who decided, and who ended it. A stage that has not happened is
+// left out entirely rather than shown with an em-dash: an empty "Decided by"
+// on a request still awaiting a decision reads as a lost record, and this
+// screen is the one place a manager checks when they want to know who
+// approved something.
+function Attribution({ request: r }) {
+  const stages = [
+    { label: 'Raised by', actor: r.raisedBy, at: r.raisedAt, absent: 'no person recorded' },
+    // Only meaningful while the decision is still outstanding; once decided,
+    // who actually decided is the fact that matters.
+    ...(!r.decidedAt && r.assignedApprover ? [{ label: 'Waiting on', actor: r.assignedApprover, at: null }] : []),
+    ...(r.decidedAt ? [{ label: 'Decided by', actor: r.decidedBy, at: r.decidedAt, absent: 'no person recorded' }] : []),
+    ...(r.closedAt ? [{ label: 'Closed by', actor: r.closedBy, at: r.closedAt, absent: 'no person recorded' }] : []),
+    ...(r.cancelledAt ? [{ label: 'Cancelled by', actor: r.cancelledBy, at: r.cancelledAt, absent: 'no person recorded' }] : []),
+  ];
+  return (
+    <div className="flex flex-wrap gap-x-6 gap-y-2 rounded-lg bg-slate-50 px-3 py-2 text-xs">
+      {stages.map((s) => (
+        <div key={s.label}>
+          <div className="font-semibold uppercase tracking-wide text-slate-400">{s.label}</div>
+          <Actor actor={s.actor} absent={s.absent ?? 'nobody in particular'} />
+          {s.at ? <div className="text-slate-400">{fmtDateTime(s.at)}</div> : null}
+        </div>
+      ))}
+      {r.decisionNote ? (
+        <div className="min-w-[12rem]">
+          <div className="font-semibold uppercase tracking-wide text-slate-400">Decision note</div>
+          <div className="text-slate-600">{r.decisionNote}</div>
+        </div>
+      ) : null}
+      {r.cancelReason ? (
+        <div className="min-w-[12rem]">
+          <div className="font-semibold uppercase tracking-wide text-slate-400">Cancelled because</div>
+          <div className="text-slate-600">{r.cancelReason}</div>
+        </div>
+      ) : null}
+      {r.closeReason ? (
+        <div className="min-w-[12rem]">
+          <div className="font-semibold uppercase tracking-wide text-slate-400">Closed because</div>
+          <div className="text-slate-600">{r.closeReason}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RequestDetail({ requestId, onClose, onChanged }) {
   const { data, error, loading, reload } = useInventory(`/inventory/requests/${requestId}`, { skip: !requestId });
   const [actionError, setActionError] = useState('');
@@ -269,6 +317,8 @@ function RequestDetail({ requestId, onClose, onChanged }) {
           </div>
 
           {r.reason ? <p className="text-sm text-slate-600">{r.reason}</p> : null}
+
+          <Attribution request={r} />
 
           <div className="overflow-x-auto rounded-lg border border-slate-100">
             <table className="w-full min-w-[34rem] text-xs">
@@ -391,8 +441,18 @@ function RequestDetail({ requestId, onClose, onChanged }) {
                 <li key={e.id}>
                   <span className="font-semibold text-slate-700">{e.action}</span>
                   {e.fromStatus ? ` · ${e.fromStatus} → ${e.toStatus}` : ''} ·{' '}
-                  {e.actorRole === 'SYSTEM' ? 'raised by the planner' : e.actorRole || 'system'} ·{' '}
-                  {fmtDateTime(e.createdAt)}
+                  {/* A plan-raised event carries BOTH a machine role and a
+                      real person: the planner acted, but the plan's author
+                      chose these quantities and is the one accountable for
+                      them. Showing only "the planner" hides who that is. */}
+                  {e.actorRole === 'SYSTEM' ? (
+                    <>
+                      the planner, for <ActorInline actor={e.actor} absent="a plan with no author left" />
+                    </>
+                  ) : (
+                    <ActorInline actor={e.actor} absent="no person recorded" />
+                  )}{' '}
+                  · {fmtDateTime(e.createdAt)}
                 </li>
               ))}
             </ul>
@@ -493,7 +553,8 @@ export default function InventoryRequests() {
                 <div className="font-semibold text-pos-royal">{r.number}</div>
                 <div className="text-xs text-slate-400">
                   raised {fmtDateTime(r.raisedAt)}
-                  {r.originPlanId ? ' · by a plan' : ''}
+                  {r.originPlanId ? ' · by a plan for ' : ' · by '}
+                  <ActorInline actor={r.raisedBy} absent="nobody on record" />
                 </div>
               </Td>
               <Td className="text-xs text-slate-600">

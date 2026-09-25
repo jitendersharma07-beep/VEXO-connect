@@ -246,4 +246,53 @@ export function OwnerOnlyNote({ what }) {
   return <p className="mt-2 text-xs text-slate-400">Only the company owner can {what}. You can see it here.</p>;
 }
 
+/* ------------------------------------------------------------------ who did it */
+
+export const ROLE_LABEL = {
+  CUSTOMER_OWNER: 'Owner',
+  BRANCH_MANAGER: 'Branch manager',
+  CASHIER: 'Cashier',
+  POS_SUPER_ADMIN: 'ATC operator',
+};
+
+// The rendering half of the rule the API's actorOut() encodes. It lives here
+// rather than in a page because the ledger and the request trail both draw it,
+// and two copies is how "account removed" ends up meaning one thing on one
+// screen and a blank on the other.
+//
+// Three facts, three different things on screen:
+//
+//   actor is null     nobody was signed in. What that MEANS is local — the
+//                     till posting a sale, the planner raising an order — so
+//                     the caller supplies the wording via `absent`.
+//   role is null      resolveActors() found no row for the id. The account is
+//                     gone; the id is still the truth about who acted.
+//   role is set       a person.
+//
+// A blank for any of the three would read as a missing audit trail.
+export function Actor({ actor, absent = 'no person recorded', className = '' }) {
+  if (!actor) return <div className={`text-slate-400 ${className}`}>{absent}</div>;
+  return (
+    <div className={className}>
+      <div className="text-slate-700">{actor.fullName || actor.email || actor.id}</div>
+      {actor.role ? (
+        <div className="text-slate-400">{ROLE_LABEL[actor.role] || actor.role}</div>
+      ) : (
+        <div className="text-slate-400">account removed</div>
+      )}
+    </div>
+  );
+}
+
+// One line rather than two, for prose like "approved by Priya (Owner)".
+export function ActorInline({ actor, absent = 'no person recorded' }) {
+  if (!actor) return <span className="text-slate-400">{absent}</span>;
+  return (
+    <span>
+      <span className="text-slate-700">{actor.fullName || actor.email || actor.id}</span>
+      <span className="text-slate-400">{actor.role ? ` (${ROLE_LABEL[actor.role] || actor.role})` : ' (account removed)'}</span>
+    </span>
+  );
+}
+
 export { ErrorNote };

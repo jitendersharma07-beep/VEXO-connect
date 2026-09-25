@@ -15,7 +15,7 @@ import { requireInventoryAction, loadLocationInScope, locationScopeFilter } from
 import { rebuildBalances, verifyBalances } from '../../../lib/inventory/ledger.js';
 import { batchBlockReason, stockStateFor } from '../../../lib/inventory/stock.js';
 import { milliToQty, qtyToMilli } from '../../../lib/inventory/units.js';
-import { loadItem } from './shared.js';
+import { actorOut, loadItem, resolveActors } from './shared.js';
 
 const router = Router();
 
@@ -195,16 +195,10 @@ router.get(
     // Who posted it. StockMovement holds the id but carries no relation to
     // PosUser on purpose — the ledger must survive a user row being removed,
     // and a foreign key would either block that or cascade the movement away.
-    // So the name is resolved here and a deleted account degrades to the bare
-    // id rather than to a blank, which would read as "nobody did this".
-    const actorIds = [...new Set(movements.map((m) => m.createdById).filter(Boolean))];
-    const actors = actorIds.length
-      ? await prisma.posUser.findMany({
-          where: { id: { in: actorIds } },
-          select: { id: true, fullName: true, email: true, role: true },
-        })
-      : [];
-    const actorById = new Map(actors.map((a) => [a.id, a]));
+    // So the name is resolved here, through the same helper the request
+    // lifecycle uses, and a deleted account degrades to the bare id rather
+    // than to a blank, which would read as "nobody did this".
+    const actorById = await resolveActors(prisma, movements.map((m) => m.createdById));
 
     res.json({
       movements: movements.map((m) => ({
@@ -229,9 +223,7 @@ router.get(
         // null means the posting had no signed-in actor (a scheduler pass, or
         // a consumption posted by the till on a sale). That is a different
         // fact from "we did not record it", and the screen says so.
-        createdBy: m.createdById
-          ? (actorById.get(m.createdById) ?? { id: m.createdById, fullName: null, email: null, role: null })
-          : null,
+        createdBy: actorOut(m.createdById, actorById),
       })),
       nextCursor: movements.length === q.limit ? String(movements[movements.length - 1].seq) : null,
     });

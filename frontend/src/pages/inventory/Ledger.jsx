@@ -12,6 +12,7 @@ import { BookOpen, ScrollText, ShieldCheck, Wrench } from 'lucide-react';
 import { PageHeader, StatCard, FullScreenSpinner } from '../../components/ui.jsx';
 import {
   ActionButton,
+  Actor,
   Badge,
   Callout,
   ErrorNote,
@@ -57,13 +58,6 @@ const SOURCE_LABEL = {
   SALE_RETURN: 'a returned sale',
 };
 
-const ROLE_LABEL = {
-  CUSTOMER_OWNER: 'Owner',
-  BRANCH_MANAGER: 'Branch manager',
-  CASHIER: 'Cashier',
-  POS_SUPER_ADMIN: 'ATC operator',
-};
-
 // Postings the till and the scheduler make on their own. These legitimately
 // have no signed-in person, so the row says the machine did it rather than
 // leaving a blank that reads like a missing audit trail.
@@ -84,18 +78,10 @@ function MovementRow({ m }) {
         </div>
       </Td>
       <Td className="text-xs">
-        {m.createdBy ? (
-          <>
-            <div className="text-slate-700">{m.createdBy.fullName || m.createdBy.email || m.createdBy.id}</div>
-            {m.createdBy.role ? (
-              <div className="text-slate-400">{ROLE_LABEL[m.createdBy.role] || m.createdBy.role}</div>
-            ) : (
-              <div className="text-slate-400">account removed</div>
-            )}
-          </>
-        ) : (
-          <div className="text-slate-400">{AUTOMATIC_SOURCES.has(m.sourceType) ? 'posted automatically' : 'no person recorded'}</div>
-        )}
+        <Actor
+          actor={m.createdBy}
+          absent={AUTOMATIC_SOURCES.has(m.sourceType) ? 'posted automatically' : 'no person recorded'}
+        />
       </Td>
       <Td className="text-xs text-slate-600">{m.location?.name}</Td>
       <Td>

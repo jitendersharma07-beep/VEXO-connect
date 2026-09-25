@@ -110,7 +110,7 @@ and is named. Nothing below is marked ACCEPTED on the strength of a file existin
 | 2 | Locations, sublocations, item kinds incl. packaging, unit conversions | ACCEPTED | pilot steps 1–12; screens 02, 11; `Takeaway Box` is a `PACKAGING` item carried through to a plan line |
 | 3 | Batches, FEFO, expiry blocking, shelf life, opened-container clock | ACCEPTED | pilot steps 13–22, 47, 48; screen 03; min-shelf-life refusal returns 409 |
 | 4 | Receiving, ledger attribution, reversals not edits | ACCEPTED | pilot steps 23–31; screens 07, 09; every one of 29 movements resolves to a named person |
-| 5 | Five-stage requests, damage/shortage, idempotency | ACCEPTED | pilot steps 32–36; screens 04, 05; reconciliation table shows dispatched ≠ accepted with the difference itemised |
+| 5 | Five-stage requests, damage/shortage, idempotency | ACCEPTED | pilot steps 32–36; screens 04, 05; reconciliation table shows dispatched ≠ accepted with the difference itemised; who raised and who decided is named on the request, its issues and every lifecycle event — `inventoryApi.test.js`, four tests incl. the deleted-account control |
 | 6 | Plans, suggestions, reminders, scheduler persistence | ACCEPTED | pilot steps 37, 44–46; screens 06, 24; the suggestion panel shows an unapproved request excluded from projected stock |
 | 7 | Single deduction per sale, uncosted visible, no restock on refund | ACCEPTED | pilot steps 38–42; screen 10; `tests/inventorySales.test.js` |
 | 8 | Nine screens, scoped by role, server-enforced | ACCEPTED | 11 screens shipped, covering the nine the brief names; 24 screenshots, 15 walks, direct-API probes in §6 |
@@ -128,25 +128,38 @@ DATABASE_URL=<…vcx_inventory_test> NODE_ENV=test npm test
 
 ```
 Test Files  16 passed (16)
-     Tests  488 passed (488)
+     Tests  492 passed (492)
 ```
 
 Zero failures, zero skipped. That is the same file count and the same test count as the
 pre-lane baseline plus this lane's four files — no test was removed, disabled or
-loosened to reach it. This lane contributes 104 of the 488:
+loosened to reach it. This lane contributes 108 of the 492:
 
 | File | Tests |
 | --- | --- |
 | `inventoryLedger.test.js` | 28 |
 | `inventoryScheduler.test.js` | 27 |
+| `inventoryApi.test.js` | 28 |
 | `inventorySales.test.js` | 25 |
-| `inventoryApi.test.js` | 24 |
 
 **`NODE_ENV=test` is required.** The login rate limiter is skipped only in that
 environment; running the suite with a development environment loaded produces 22 failures
 that are all HTTP 429 from the limiter and have nothing to do with the code under test.
 This was hit and diagnosed during verification and is recorded here so the next person
 does not spend the same hour on it.
+
+**A single failure that moves between files on each run is not this lane's.** Three
+consecutive full-suite runs each reported 491/492, and each one failed in a *different*
+file — `gateway.test.js`, then an `inventoryApi` hook timeout, then
+`discountConcurrency.test.js`. Every implicated file passed on its own immediately
+afterwards. It is not test parallelism: `vitest.config.js` sets `fileParallelism: false`.
+The cause is outside the suite — the dev Postgres container is shared by every lane on
+this box (~50 databases against `max_connections = 100`), and its log carries
+`FATAL: database "vcx_slotfresh_test" does not exist` and
+`FATAL: terminating connection due to administrator command` from the window in which
+those runs happened, i.e. another lane's suite was setting up and tearing down its own
+database at the same time. Re-run the named file alone before treating such a failure as
+real.
 
 ### Direct-API permission probes
 
@@ -278,11 +291,29 @@ only the resulting cookie, so the password never reaches the page.
 | INV-B1 | `requireModule('INVENTORY')` is not wired — routers are marked, the middleware belongs to firstlogin | PRO | firstlogin lane | BLOCKED | remove the markers; they are comments |
 | INV-B2 | `terminalId` is never populated — `Order` carries no terminal yet | PRO | foundation + orders lanes | BLOCKED | column is nullable; drop it |
 | INV-B3 | Scheduler has never run as a daemon. Its pass is proven by direct invocation and by tests, **not** by an unattended run | PRO | deployment decision | IMPLEMENTED-UNVERIFIED | `INVENTORY_SCHEDULER` unset |
-| INV-B4 | Notifications are in-app only. Email/WhatsApp adapters exist but were not exercised — no real message was sent | PRO | owner approval of a transport | IMPLEMENTED-UNVERIFIED | `INVENTORY_NOTIFY_TRANSPORT=inapp` |
-| INV-B5 | Landed-cost apportionment (`GoodsReceiptLandedCost`) is modelled and stored but has no UI | PRO | — | IMPLEMENTED-UNVERIFIED | unused table |
-| INV-B6 | `ProductionBatch` / central-kitchen production is modelled with ledger support; no screen drives it | ENTERPRISE | — | IMPLEMENTED-UNVERIFIED | unused table |
+| INV-B4 | Notifications are in-app only. **No email or WhatsApp adapter exists** — the non-in-app branch writes a FAILED row reading "No adapter configured for transport …". See the correction below | PRO | owner approval of a transport | NOT STARTED | `INVENTORY_NOTIFY_TRANSPORT=inapp` |
+| INV-B5 | Landed-cost apportionment (`GoodsReceiptLandedCost`) is modelled and stored but has no UI, and **no test exercises it** | PRO | — | IMPLEMENTED-UNVERIFIED | unused table |
+| INV-B6 | `ProductionBatch` / central-kitchen production is **schema-only** — zero references in `src/`. See the correction below | ENTERPRISE | — | NOT STARTED | unused table |
 | INV-B7 | A rejected CORS origin surfaces as 500 `POS_INTERNAL_ERROR` rather than a 403. Pre-existing in `app.js`, not this lane's, not changed | CORE | — | NOT STARTED | n/a |
-| INV-B8 | Store requests do not expose who raised or decided them. The ids are stored and the self-approval rule reads them; the serializer omits them. The ledger does now show its actor, this does not | PRO | — | NOT STARTED | serializer-only change |
+| INV-B8 | Store requests now name who raised, approved, closed and cancelled them, on the request, on every issue and on every lifecycle event | PRO | — | ACCEPTED | serializer-only change |
+
+### Corrections to earlier rows in this table
+
+Two rows above claimed more than the code did. Both were checked against the tree, not
+against this document, and both were wrong in the same direction — a schema object was
+read as a working feature.
+
+- **INV-B4 said "Email/WhatsApp adapters exist but were not exercised".** No such adapter
+  exists anywhere in the backend. The only adapter file, `src/lib/gateway/testAdapter.js`,
+  belongs to payments. "Not exercised" implied a wiring gap; the real gap is the adapter
+  itself, so the status moves from IMPLEMENTED-UNVERIFIED to NOT STARTED.
+- **INV-B6 said `ProductionBatch` "is modelled with ledger support".** It is a table and
+  nothing else: no route, no service, no ledger call, no reference of any kind under
+  `src/`. It needs an API, ledger integration and a screen, from scratch.
+
+INV-B5's row is accurate as it stood, with one addition: no test covers landed-cost
+apportionment, so "stored" is a statement about the schema and the write path, not about
+verified arithmetic.
 
 ### Assumptions to confirm
 
