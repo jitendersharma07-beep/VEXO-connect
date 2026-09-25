@@ -155,6 +155,48 @@ printing in particular stays NOT TESTED until observed paper output exists, and
 payment work remains on sandbox/manual methods. Production activation stays
 subject to the established deployment approval.
 
+### Encrypted off-host recovery — BLOCKED → **PASS**, 2026-09-25T03:57:11Z
+
+The owner ran `owner-verify-backup-decrypt.sh`. It fetched
+`pos-prod-20260924T211406Z.tar.gpg` from the off-host destination, matched its
+sha256 against the shipping receipt, decrypted it with the backup key, and
+confirmed the dump inside hashes to the `dumpSha256` its manifest recorded —
+`45cc0768…2638e33d`, the same value computed from the plaintext dump on this
+host beforehand. Logged in `.owner-verify.log`; full output and analysis in
+`evidence/07b-recovery-owner-procedure.md`.
+
+**This closes the third of row 10's three blockers.** Remaining: no approved
+public staging hostname, and no mail provider configured.
+
+Worth recording about *how* it passed, because both nearly made it fail for the
+wrong reason:
+
+- The script originally named the 2026-09-23 archive and the hash from a
+  receipt the nightly run had since overwritten. It compares against that
+  receipt **before** decrypting, so it would have aborted with a hash mismatch
+  having never invoked `gpg` — reported as a recovery failure when nothing was
+  wrong with the backups. Re-pointing it to a fully corroborated archive was
+  the difference between a real answer and a bookkeeping one.
+- The run's first line was `no local copy; fetching from atc@20.20.20.57`. The
+  "prefer a local copy" branch is dead — shipping removes the archive, leaving
+  only the plaintext dump — so every run pulls over SSH. That leg had no
+  rehearsal behind it, since this session was scoped out of vexo-lab. It worked,
+  which also independently confirms the off-host copy and the shipping path are
+  real rather than just logged.
+
+Preservation, checked after the run: 24 files still in `~/atc-backups/pos-prod/`,
+secret key still in the keyring, and the `mktemp -d` removed by its `EXIT` trap,
+so no decrypted production dump was left on disk. No secret appeared in the
+output.
+
+**CR-3 is NOT resolved by this and must not be read as resolved.** The run used
+the backup key *on the backup host*. It proves the archives and the passphrase
+are sound; it says nothing about recovering after losing `atc-noc`, which is the
+scenario off-host copies exist for. While `0F05CA51AEC13029` lives only in the
+`atc-noc` keyring — where `docs/BACKUP-RESTORE.md` says it must not be — the
+answer to "can the owner recover if this box dies?" is still **no**. Two
+different claims; one is now closed and one is open.
+
 ## VC-101 evidence — with provenance
 
 - **HTTP behaviour, RC-verified on the lab**: Window 1's harness, written
