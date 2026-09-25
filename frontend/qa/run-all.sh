@@ -80,6 +80,41 @@ if [ ! -d "$BACKEND/node_modules" ]; then
   echo "   copying backend node_modules (~134M)"
   cp -a "$SRC" "$BACKEND/node_modules" || fail "backend node_modules copy"
 fi
+# A SYMLINKED node_modules satisfies the `[ -d ]` above, because test(1) follows
+# symlinks -- and this script then writes THROUGH the link into whichever
+# worktree owns the real install. Both installs are written to, for different
+# reasons, and neither write is obvious from the code that performs it:
+#
+#   backend/  `prisma generate` replaces .prisma/client. On 2026-09-24 this
+#             tree's backend/node_modules pointed at ../../main-merge and the
+#             19:43 run regenerated THAT lane's client. Harmless only by luck --
+#             both trees were on the same 54-model schema, so the rewrite was
+#             content-identical and moved mtimes only. On a divergent schema
+#             (main-merge later went to 59 models) it would have left the peer's
+#             stack serving code against the wrong client, which surfaces as
+#             "prisma.<model> is undefined" deep inside a request and reads as
+#             application breakage rather than a build artifact.
+#   frontend/ vite writes its optimised-dependency cache to node_modules/.vite.
+#             Found the same way, one day later: the 2026-09-25 01:44 run's
+#             puppeteer stack frames all named .../main-merge/frontend/
+#             node_modules, and the donor's .vite carried the 19:43 mtime. Two
+#             checkouts sharing one dep cache can serve each other's optimised
+#             bundles, which is the same class of failure and just as invisible.
+#
+# So: dereference either one into a private copy. `rm` without -r is the
+# load-bearing safety property -- it removes a symlink but physically cannot
+# delete a real directory ("rm: cannot remove 'x': Is a directory", exit 1), so a
+# mis-detection fails closed instead of destroying the donor's install.
+for NM in "$FRONTEND/node_modules" "$BACKEND/node_modules"; do
+  [ -L "$NM" ] || continue
+  WHICH="$(basename "$(dirname "$NM")")"
+  TARGET="$(readlink -f "$NM")" || fail "cannot resolve the $WHICH node_modules symlink"
+  echo "   $WHICH node_modules is a symlink -> $TARGET; copying it private (~140M)"
+  cp -a "$TARGET" "$NM.private" || fail "$WHICH node_modules dereference"
+  rm "$NM" || fail "could not remove the $WHICH node_modules symlink"
+  mv "$NM.private" "$NM" || fail "$WHICH node_modules swap"
+  if [ -L "$NM" ]; then fail "$WHICH node_modules is still a symlink after the swap"; fi
+done
 
 # ALWAYS regenerate, and then prove it. A borrowed node_modules carries the
 # lane's generated client, built from the lane's 792-line schema; main's is
