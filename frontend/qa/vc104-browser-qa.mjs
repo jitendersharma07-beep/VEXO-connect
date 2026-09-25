@@ -300,6 +300,45 @@ const selectStore = async (page, code) => {
   await sleep(200);
 };
 
+// Drive the reassign modal end to end and report what the SERVER did. §9 does
+// this inline once, for the screenshots and the re-price banner; §11c needs it
+// twice more and needs the outcome as a value, not a screenshot.
+//
+// The receipt is the order's own routedBranchId, polled back, NOT the re-price
+// banner: the banner only renders when the quote actually moved, so a correct
+// move that happens to keep the same price would read as a failure. A refusal
+// leaves the order where it was — that is the point of reserveSlot throwing
+// inside the transaction — so this returns ok:false with the toast rather than
+// hanging or throwing.
+const moveTo = async (page, poId, code, branchId, reason) => {
+  await page.goto(`${UI}/phone-orders?open=${poId}`, { waitUntil: 'networkidle0' });
+  const btn = await page
+    .waitForSelector('[data-testid="po-move"]', { visible: true, timeout: 10000 })
+    .catch(() => null);
+  if (!btn) return { ok: false, why: 'the move button was not offered on this order', row: null };
+  await page.click('[data-testid="po-move"]');
+  const opt = await page
+    .waitForSelector(`[data-testid="mv-option-${code}"]`, { visible: true, timeout: 10000 })
+    .catch(() => null);
+  if (!opt) return { ok: false, why: `the modal offered no ${code} row`, row: null };
+  const row = await page.$eval(`[data-testid="mv-option-${code}"]`, (el) => el.innerText.replace(/\s+/g, ' ').trim());
+  if (!/Available/.test(row) || /Unavailable/.test(row)) {
+    return { ok: false, why: `${code} was not selectable in the modal`, row };
+  }
+  await page.evaluate((c) => {
+    document.querySelector(`[data-testid="mv-option-${c}"] input[type="radio"]`)?.click();
+  }, code);
+  await page.type('#move-reason', reason);
+  await page.click('[data-testid="mv-submit"]');
+  for (let i = 0; i < 24; i += 1) {
+    await sleep(500);
+    const now = await apiGet(page, `/phone-orders/${poId}`);
+    if (now.json?.phoneOrder?.routedBranchId === branchId) return { ok: true, why: null, row };
+  }
+  const toast = (await readToasts(page)).join(' | ');
+  return { ok: false, why: `the order never re-routed to ${code}${toast ? ` — ${toast}` : ''}`, row };
+};
+
 // ---------------------------------------------------------------------------
 
 const owner = await newPage();
@@ -645,13 +684,16 @@ if (MANAGER && chOpen) {
 // section therefore proves capacity on BOTH paths — scheduled first, with
 // fillers booked into a shared future slot, then ASAP in the current slot.
 //
-// Still open, deliberately, and NOT asserted here: a LATE TRANSFER is invisible
-// to the count. Reassign judges the target against the slot containing now,
-// while an ASAP order is anchored to its `createdAt`, so an order moved in an
-// hour after it was taken lands in an elapsed slot and occupies nothing. That
-// is why §11b's fillers are submitted natively at CH — building them by
-// reassignment would exercise the hole instead of the fix and fail this block
-// for the wrong reason.
+// The LATE TRANSFER hole this comment used to record as "still open" is closed,
+// and §11c below now ASSERTS it instead of describing it. An ASAP order is no
+// longer anchored to `createdAt` unconditionally: one that was MOVED into a
+// store is anchored to the `at` of the latest REASSIGNED event that brought it
+// there (lib/phoneOrders.js, arm B), so a transfer occupies the slot it arrives
+// in and releases the slot it left.
+//
+// §11b's fillers are still submitted natively at CH, deliberately — they must
+// occupy the slot by `createdAt` (arm C) so that §11c can prove the transfer
+// arms on top of a baseline that was built without them.
 //
 // It used to prove only the scheduled path and pin the ASAP hole as tripwire
 // `15b`, which asserted the defect ("ASAP always shows 0/2") and was written to
@@ -776,6 +818,17 @@ if (chOpen) {
         return rows.find((o) => o.testid === 'po-option-BSC-CH');
       };
 
+      // The order the click above created. The list is ordered createdAt desc
+      // and this harness is single-threaded, so the newest SUBMITTED row IS
+      // that order. Captured because §11c has to move a SPECIFIC order and
+      // needs its id — and the row carries routedBranchId, which saves §11c
+      // guessing which branch id belongs to CH.
+      const newestSubmitted = async () => {
+        const r = await apiGet(owner, '/phone-orders?status=SUBMITTED&limit=1');
+        return r.json?.phoneOrders?.[0] ?? null;
+      };
+      let mover = null;
+
       let chRow = await asapProbeCh();
       const opening = bookedOf(chRow);
       check('the ASAP probe reports a booked count for CH at all', Boolean(opening), true,
@@ -803,6 +856,7 @@ if (chOpen) {
             .then(() => true)
             .catch(() => false);
           if (!ok) { fillProblem = `an ASAP submission to CH was not accepted at ${seen}/${cap}`; break; }
+          mover = await newestSubmitted();
           chRow = await asapProbeCh();
           const next = bookedOf(chRow);
           if (!next) { fillProblem = `the count vanished from the CH row: ${chRow?.text}`; break; }
@@ -833,6 +887,125 @@ if (chOpen) {
           }
         }
         await shot(owner, '15b-capacity-asap-d2');
+
+        // --- 11c. Transfer: source release, destination take, and A→B→A ----
+        // The three things §11b cannot show, because it only ever CREATES
+        // orders in place:
+        //
+        //   release      moving an order out of CH must give CH its place back
+        //   destination  the store it lands in must take that place, in the
+        //                slot it ARRIVED in
+        //   A→B→A        moving it back must count it ONCE at CH, not once per
+        //                arrival
+        //
+        // The last is the load-bearing case for the shape of the fix. Once the
+        // order has a REASSIGNED event into CH, arm C stops counting it (its
+        // NOT EXISTS excludes it) and only arm B can, through the LATEST such
+        // event. So "CH is back to exactly `cap`" is a live test of arm B: one
+        // SHORT means arm B missed the latest arrival, one OVER means the arms
+        // are no longer disjoint. A plain "is CH full again" assertion would
+        // pass in the first case, so it is deliberately not what is checked.
+        //
+        // SCOPE, stated so nobody over-reads this block: every event here falls
+        // inside ONE slot, so it proves the journey through the real UI and
+        // guards the regression — it does not by itself discriminate the
+        // pre-fix behaviour, which only diverges when the transfer happens in a
+        // LATER slot than the order was taken in. That discrimination is in the
+        // backend suite, with controlled timestamps: "counts a back-dated
+        // transfer against the slot it ARRIVES in", "occupies only the slot it
+        // arrived in, not also the slot it was called in", and "re-anchors to
+        // the latest move when an order returns to a store it left".
+        //
+        // Counts come from POST /phone-orders/branch-options — the same server
+        // call the screen makes, through the page's own session — because these
+        // assertions are about EXACT deltas at two stores at once and the DOM
+        // only carries the count for the store being offered. §11b already
+        // proved the DOM renders that count and the refusal text. The probe is
+        // PICKUP: `booked` has no fulfilment predicate so it counts the same
+        // orders either way, while PICKUP keeps min-order and service-area
+        // rules out of `available`.
+        const slotSnapshot = async () => {
+          const r = await apiPost(owner, '/phone-orders/branch-options', JSON.stringify({ fulfilment: 'PICKUP' }));
+          const by = new Map();
+          for (const o of r.json?.options ?? []) by.set(o.branchCode, o);
+          return by;
+        };
+
+        if (crossed || fillProblem || !mover) {
+          skip('transfer accounting (source release, destination take, A→B→A)',
+            crossed ? `the fill straddled a ${slotMinutes}-min slot boundary`
+              : fillProblem ? `the fill did not complete: ${fillProblem}`
+                : 'no ASAP order was submitted into this slot, so there is nothing to move');
+        } else {
+          const b0 = bucketAt(slotMinutes);
+          const before = await slotSnapshot();
+          const chB = before.get('BSC-CH');
+          const cpB = before.get('BSC-CP');
+          check('the slot snapshot carries a live count for both stores',
+            Boolean(chB?.capacity && cpB?.capacity), true,
+            `CH ${JSON.stringify(chB?.capacity)} / CP ${JSON.stringify(cpB?.capacity)}`);
+          check('the order about to be moved is an ASAP one', mover.scheduledFor, null,
+            'a scheduled order is anchored by scheduledFor and would not exercise the transfer arms at all');
+
+          if (chB?.capacity && cpB?.capacity) {
+            // Collect everything FIRST, judge afterwards. Asserting as we go
+            // would turn a slot boundary crossed mid-block into a red that
+            // blames the fix for a clock.
+            const out = await moveTo(owner, mover.id, 'BSC-CP', cpB.branchId, 'QA: source-slot release probe');
+            const mid = out.ok ? await slotSnapshot() : null;
+            const back = out.ok
+              ? await moveTo(owner, mover.id, 'BSC-CH', chB.branchId, 'QA: repeated transfer, back to the first store')
+              : { ok: false, why: 'the move out never happened', row: null };
+            const end = back.ok ? await slotSnapshot() : null;
+            const straddled = bucketAt(slotMinutes) !== b0;
+
+            if (straddled) {
+              skip('transfer accounting (source release, destination take, A→B→A)',
+                `the block straddled a ${slotMinutes}-min slot boundary, so the counts either side are different buckets`);
+            } else if (!out.ok && /[Cc]losed/.test(out.row ?? '')) {
+              skip('transfer accounting (source release, destination take, A→B→A)',
+                `CP was not open at run time, so there was nowhere to move to: ${out.row}`);
+            } else {
+              check('CH starts the transfer block full', chB.capacity.booked, cap);
+              check('an order can be moved OUT of a full CH into CP', out.ok, true, out.why ?? '');
+              if (out.ok) {
+                check('the SOURCE store gets its place back',
+                  mid.get('BSC-CH')?.capacity?.booked, chB.capacity.booked - 1,
+                  'before the anchor fix a moved order stayed counted at the store it had already left');
+                check('the DESTINATION store takes the place, in the slot the order arrived in',
+                  mid.get('BSC-CP')?.capacity?.booked, cpB.capacity.booked + 1,
+                  'before the fix a transferred ASAP order stayed anchored at createdAt, so a late transfer landed in an elapsed slot and occupied nothing');
+                check('CH can be offered again once a place is released',
+                  mid.get('BSC-CH')?.available, true,
+                  `CH reasons: ${JSON.stringify(mid.get('BSC-CH')?.unavailableReasons)}`);
+
+                check('the same order can be moved BACK into CH', back.ok, true, back.why ?? '');
+                if (back.ok) {
+                  check('a twice-moved order is counted ONCE at the store it returns to',
+                    end.get('BSC-CH')?.capacity?.booked, chB.capacity.booked,
+                    'one short means arm B missed the latest arrival; one over means the arms have stopped being disjoint');
+                  check('the store it passed through is back exactly where it started',
+                    end.get('BSC-CP')?.capacity?.booked, cpB.capacity.booked);
+                  check('CH is full again after the return and refuses',
+                    end.get('BSC-CH')?.available, false);
+                  const why = (end.get('BSC-CH')?.unavailableReasons ?? []).map((r) => r.message ?? '').join(' ');
+                  check('the refusal still names the kitchen and carries the count',
+                    /Kitchen is full/.test(why) && new RegExp(`${cap}\\/${cap}`).test(why), true,
+                    `CH reasons: ${why}`);
+
+                  // DOM-level receipt for the same journey: the operator must
+                  // be able to see BOTH moves, not just the latest one.
+                  await owner.goto(`${UI}/phone-orders?open=${mover.id}`, { waitUntil: 'networkidle0' });
+                  await owner.waitForSelector('[data-testid="po-detail"]', { visible: true, timeout: 8000 });
+                  const hist = await owner.$eval('[data-testid="po-detail"]', (el) => el.innerText.replace(/\s+/g, ' '));
+                  check('the screen shows both moves in the order history',
+                    (hist.match(/Moved/g) ?? []).length >= 2, true, `history: ${hist.slice(0, 300)}`);
+                  await shot(owner, '15c-transfer-release-and-return');
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

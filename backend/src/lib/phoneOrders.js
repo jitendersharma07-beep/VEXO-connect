@@ -84,10 +84,210 @@ export const clockOf = (minute) => `${pad2(Math.floor((minute % 1440) / 60))}:${
 
 // --- preparation capacity ----------------------------------------------------
 
+// Slots are a fixed grid floored on the UNIX EPOCH, not on local midnight, and
+// they are half-open: [start, end). An instant exactly on a boundary belongs to
+// the later slot, which is what stops two adjacent slots both claiming it.
+//
+// TIMEZONE. The arithmetic is on epoch milliseconds, so the answer does not
+// depend on the server's timezone — but whether a slot boundary lands on a
+// round IST wall-clock time does. IST is UTC+05:30, i.e. 330 minutes, so a slot
+// size S lines up with the IST clock exactly when 330 % S === 0. That holds for
+// 5, 10, 15 and 30; it fails for 60, where "the 10 o'clock hour" is really
+// 09:30–10:30 IST. slotMinutes defaults to 15, so every store configured today
+// is IST-aligned and nothing has ever shown this. Pinned as current behaviour,
+// deliberately not changed: whether a kitchen's "hour" should follow the IST
+// clock is an owner's question, not one to settle from inside a capacity fix.
 export const slotBoundsFor = (when, slotMinutes) => {
   const size = slotMinutes * 60000;
   const start = new Date(Math.floor(when.getTime() / size) * size);
   return { start, end: new Date(start.getTime() + size) };
+};
+
+// THE CAPACITY RULE. An order occupies the slot in which the store that
+// currently holds it was asked to produce it. Capacity models kitchen
+// throughput, so the question is always "when did work arrive at THIS store",
+// never "when did the customer telephone".
+//
+//   SCHEDULED (scheduledFor set) -> the slot containing scheduledFor. A move
+//     does not change it: the food is still due at the same time.
+//   ASAP submitted here          -> the slot containing createdAt.
+//   ASAP moved in                -> the slot containing THE MOVE, because that
+//     is the moment this kitchen was asked. Its createdAt belongs to the call,
+//     which may be hours old and was answered at another store.
+//
+// The third arm is the one that was missing, and it is what let a back-dated
+// transfer land in a store while occupying a slot in the past (D-2's late
+// transfer hole: measured at cap 2, three late transfers left four live orders
+// reporting booked = 1, available = true).
+//
+// NO NEW COLUMN IS NEEDED, and that is the whole reason this is a read change.
+// The move time is already persisted: every reassign writes a PhoneOrderEvent
+// with action REASSIGNED, toBranchId and at, in the SAME transaction as the
+// phoneOrder.update, so it cannot be absent for a moved order. Re-stamping
+// createdAt or scheduledFor was the alternative and both are destructive —
+// createdAt is "when the customer called", and Boolean(scheduledFor) is the
+// only source of truth for whether an order is scheduled at all.
+//
+// A -> B -> A is handled by taking the LATEST reassign into the current branch.
+// "A REASSIGNED event that brought this order to the store it is at NOW."
+// Written ONCE and interpolated everywhere, because it is needed in three
+// places that must agree exactly: the readable anchor below, arm B (which finds
+// the latest such event) and arm C (which excludes orders that have one). If
+// arm B and arm C ever disagreed about what counts as a move, they would stop
+// partitioning the orders and start either double-counting or dropping them.
+const reassignedIntoCurrentBranch = (e) => `${e}."phoneOrderId" = po.id
+        AND ${e}.action = 'REASSIGNED'
+        AND ${e}."toBranchId" = po."routedBranchId"`;
+
+// Which orders occupy a store at all. Also written once: it appears in all
+// three arms, and a status list that drifted between them would let an order be
+// live for one arm and finished for another.
+const LIVE_AT_BRANCH = `po."companyId" = $1
+       AND po."routedBranchId" = $2
+       AND po.status IN ('SUBMITTED','ACCEPTED')`;
+
+// The rule as one expression. This is the readable statement of the invariant,
+// and it is what `anchorOf` below returns — but it is NOT what counts a slot.
+// Why not is the next comment.
+const SLOT_ANCHOR = `
+  COALESCE(
+    po."scheduledFor",
+    (SELECT max(e."at")
+       FROM "PhoneOrderEvent" e
+      WHERE ${reassignedIntoCurrentBranch('e')}),
+    po."createdAt")`;
+
+// Counting by filtering on SLOT_ANCHOR directly is correct and far too slow.
+// Measured by backend/scripts/vc104-slot-cost-probe.mjs — which imports the
+// real countBookedInSlot below rather than a copy of its SQL — at 120k orders
+// of one store's history, median of 7, counting one 15-minute slot:
+//
+//     old count by createdAt alone (the WRONG answer, for scale)     10.0 ms
+//     by the anchor expression (correct, unindexable)                82.3 ms
+//     by the arms below, no index                                 14.1-17.0 ms
+//     by the arms below, with the two indexes in schema.prisma        4.0 ms
+//
+// Read the ratios, not the milliseconds: the naive correct form is 8.2x the
+// wrong one, the shipped form 1.4x. The 4.0 ms is NOT on that scale — those
+// indexes would have sped the old query up too, so it is not evidence that this
+// change made counting faster than it was.
+//
+// The expression form cannot be indexed: the anchor is a correlated subquery,
+// so Postgres evaluates it once per row of branch history, and adding an index
+// changes nothing. Worse, that history NEVER SHRINKS, because
+// PhoneOrderStatus has no terminal state — an ACCEPTED order stays ACCEPTED
+// forever, so the scanned set is every order the store has ever accepted, not
+// its live backlog. loadBranchDecision runs this once per candidate branch on a
+// hot path, so a five-store company pays it five times over.
+//
+// The same rule is therefore evaluated as three DISJOINT arms, each able to use
+// an index. They partition exactly the way COALESCE does:
+//
+//   A  scheduledFor set                  -> scheduledFor range   (COALESCE arm 1)
+//   B  no scheduledFor, moved here       -> latest REASSIGNED at (COALESCE arm 2)
+//   C  no scheduledFor, never moved here -> createdAt range      (COALESCE arm 3)
+//
+// A excludes a NULL scheduledFor implicitly, since a NULL comparison is not
+// true; B and C both require it NULL and are split by EXISTS / NOT EXISTS. That
+// makes the arms provably disjoint, and UNION rather than UNION ALL means the
+// count still cannot double if that reasoning is ever broken.
+//
+// Arm B is driven FROM the event side, so the scan is a 15-minute window of
+// events rather than the whole history. Constraining e."companyId" is what
+// makes the existing (companyId, at) index usable, and it is sound because all
+// four phoneOrderEvent.create sites write the parent order's companyId.
+//
+// EQUIVALENCE IS NOT ASSUMED. The cost probe refuses to report a timing unless
+// this form and the expression form return the identical count, and the whole
+// mutation battery is re-run against this shape.
+const SLOT_ARMS = `
+    SELECT po.id
+      FROM "PhoneOrder" po
+     WHERE ${LIVE_AT_BRANCH}
+       AND po."scheduledFor" >= $3
+       AND po."scheduledFor" < $4
+  UNION
+    SELECT po.id
+      FROM "PhoneOrderEvent" e
+      JOIN "PhoneOrder" po ON po.id = e."phoneOrderId"
+     WHERE e."companyId" = $1
+       AND e."at" >= $3
+       AND e."at" < $4
+       AND e.action = 'REASSIGNED'
+       AND e."toBranchId" = $2
+       AND ${LIVE_AT_BRANCH}
+       AND po."scheduledFor" IS NULL
+       AND e."at" = (SELECT max(e2."at")
+                       FROM "PhoneOrderEvent" e2
+                      WHERE ${reassignedIntoCurrentBranch('e2')})
+  UNION
+    SELECT po.id
+      FROM "PhoneOrder" po
+     WHERE ${LIVE_AT_BRANCH}
+       AND po."scheduledFor" IS NULL
+       AND po."createdAt" >= $3
+       AND po."createdAt" < $4
+       AND NOT EXISTS (SELECT 1
+                         FROM "PhoneOrderEvent" e3
+                        WHERE ${reassignedIntoCurrentBranch('e3')})`;
+
+// Raw SQL rather than prisma.phoneOrder.count because the anchor is a
+// correlated subquery, which the query builder cannot express. Takes a client
+// so that one counting rule serves both the read path (prisma) and the re-check
+// inside a transaction (tx) — two counting rules would be exactly the drift
+// that caused this defect.
+export const countBookedInSlot = async (client, { companyId, branchId, start, end }) => {
+  const rows = await client.$queryRawUnsafe(
+    `SELECT count(*)::int AS n FROM (${SLOT_ARMS}) booked`,
+    companyId,
+    branchId,
+    start,
+    end,
+  );
+  return rows[0].n;
+};
+
+// The anchor of ONE order, by the readable rule rather than the fast one. Used
+// by the tests to assert the rule directly, which keeps SLOT_ANCHOR live: if
+// the arms above ever stop agreeing with it, a test says so rather than the
+// expression quietly rotting into a comment.
+export const anchorOf = async (client, { phoneOrderId }) => {
+  const rows = await client.$queryRawUnsafe(
+    `SELECT ${SLOT_ANCHOR} AS anchor FROM "PhoneOrder" po WHERE po.id = $1`,
+    phoneOrderId,
+  );
+  return rows[0]?.anchor ?? null;
+};
+
+// Advisory-lock namespace for "one (store, slot) at a time". MUST stay non-zero:
+// tests/globalSetup.js holds the single-argument form, which Postgres records as
+// classid = 0, so any non-zero namespace here is disjoint from it by
+// construction rather than by having picked a different number.
+const SLOT_LOCK_NS = 5653849;
+
+// Serializes check-and-reserve for one store's slot.
+//
+// Without this the guard is advisory only: a plain SELECT count(*) at READ
+// COMMITTED does not block a concurrent insert or move, so two callers taking
+// the last free place both read booked = n-1 and both commit. Taking the lock
+// before counting makes the count and the write that follows it atomic with
+// respect to any other caller aiming at the same (store, slot).
+//
+// pg_advisory_XACT_lock, not the session form: it releases on COMMIT or
+// ROLLBACK, so a refused transfer or a crashed request cannot wedge a store.
+// It is also why the capacity check must come FIRST in the transaction and the
+// transaction must stay short — every other caller for that slot waits behind
+// it.
+//
+// hashtext() collisions are possible in int4. The consequence is that two
+// unrelated slots serialize against each other: a small loss of concurrency,
+// never a wrong answer.
+export const lockSlot = async (tx, { companyId, branchId, start }) => {
+  await tx.$executeRawUnsafe(
+    `SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)`,
+    SLOT_LOCK_NS,
+    `${companyId}:${branchId}:${start.toISOString()}`,
+  );
 };
 
 // --- unavailability ----------------------------------------------------------
@@ -105,6 +305,13 @@ export const REASON = Object.freeze({
 });
 
 const reason = (code, message) => ({ code, message });
+
+// One phrasing of "full", used by the advisory read in evaluateBranches AND by
+// the binding re-check inside the submit/reassign transactions. A caller
+// refused by the transaction must get the same code and the same sentence as
+// one refused by the screen, or the race looks like a different defect.
+export const capacityReason = (booked, maxOrdersPerSlot) =>
+  reason(REASON.AT_CAPACITY, `Kitchen is full for that time (${booked}/${maxOrdersPerSlot})`);
 
 // --- the quote ---------------------------------------------------------------
 
@@ -202,9 +409,7 @@ export const evaluateBranches = ({
     const cap = capacityByBranch.get(branch.id) ?? null;
     const booked = bookedByBranch.get(branch.id) ?? 0;
     if (cap && booked >= cap.maxOrdersPerSlot) {
-      reasons.push(
-        reason(REASON.AT_CAPACITY, `Kitchen is full for that time (${booked}/${cap.maxOrdersPerSlot})`),
-      );
+      reasons.push(capacityReason(booked, cap.maxOrdersPerSlot));
     }
 
     if (unavailableProductNames.length > 0) {

@@ -344,7 +344,12 @@ Allowed from `SUBMITTED` or `REJECTED`. Requires `phone.order.reassign`.
 - Refused **409 `POS_INVOICE_ISSUED`** when `Order.invoiceNumber` is non-null.
   An issued invoice never moves store. (`A§3 VC-104`.)
 - Refused **409 `POS_CONFLICT`** when a payment already exists.
-- The target store is re-validated against §5.6.
+- The target store is re-validated against §5.6, and refused **409
+  `POS_BRANCH_UNAVAILABLE`** if it fails — including **because the destination
+  slot is full**. Since 09-25 a transfer occupies a place in the slot it
+  ARRIVES in (C-5), so a move into a full store is refused where it previously
+  succeeded. The order does not move: it stays live at its source store, in its
+  original slot, and `unavailableReasons` carries the capacity text.
 - **Pricing and tax are recomputed** for the new store before the response
   returns, via `recomputeOrder()`. The response carries the new totals, and the
   UI must show them as a changed price, not reuse the old summary.
@@ -385,11 +390,19 @@ List is scoped: branch-pinned roles see only their own store's orders.
 | 409 | `POS_PHONE_ORDER_ALREADY_DECIDED` | accept/reject race loser |
 | 409 | `POS_IDEMPOTENCY_KEY_REUSED` | same key, different body |
 | 409 | `POS_INVOICE_ISSUED` | reassignment after an invoice was issued |
-| 409 | `POS_BRANCH_UNAVAILABLE` | chosen store failed re-validation at submit |
+| 409 | `POS_BRANCH_UNAVAILABLE` | chosen store failed re-validation — **at submit or at reassign** |
 
 `POS_BRANCH_UNAVAILABLE` carries the same `unavailableReasons` array as §5.6 in
 `error.details.unavailableReasons`, so the screen can explain the refusal
 without a second round trip.
+
+It is raised from three places, and a screen that only handles the submit case
+will show the wrong copy for the other two: `POST /phone-orders` (§5.7) and
+`POST /phone-orders/:id/reassign` (§5.10) both re-run serviceability, and
+`reserveSlot` raises it from inside either transaction when the slot is full —
+which, since 09-25, includes the destination slot of a transfer (see C-5). A
+refusal at reassign means the order did **not** move; it is still live at its
+source store, in its original slot.
 
 **Refusal precedence on `reassign`, because it changes the message you show.**
 The state guard is evaluated before the invoice guard. An **ACCEPTED** order
@@ -397,6 +410,17 @@ returns `POS_PHONE_ORDER_ALREADY_DECIDED` even if its invoice has also been
 issued; `POS_INVOICE_ISSUED` is what a **SUBMITTED or REJECTED** order with an
 issued invoice returns. Both refuse, and in both cases the order does not move —
 but do not key "an invoice was issued" copy off the accepted case.
+
+The full order on `reassign` is **state → invoice → payment → destination**:
+`POS_PHONE_ORDER_ALREADY_DECIDED` (not SUBMITTED/REJECTED), then
+`POS_INVOICE_ISSUED`, then `POS_CONFLICT` (a payment exists), and only then
+`POS_BRANCH_UNAVAILABLE`. So capacity is the **last** thing checked and the
+first thing an operator can do something about — the other three are permanent
+for that order, a full slot is not. It is also checked twice: once outside the
+transaction against §5.6 (the forecast) and once inside it under the advisory
+lock (the binding one, C-5), so a transfer can pass the first and still be
+refused by the second when another till takes the last place in between. Both
+raise the same code, and in neither case does the order move.
 
 ---
 
@@ -476,7 +500,7 @@ edit. This lane does not touch them. `backend/src/lib/orders.js` and
 | C-2 | Pickup/delivery have no `OrderType` value | Both stored as `TAKEAWAY`; real mode on `PhoneOrder.fulfilment`. Not adding a value to a shared enum another lane owns |
 | C-3 | "Enterprise HQ-routing entitlement" has no mechanism to enforce | Conservative proxy: cross-store routing requires `MULTI_STORE`. Marked `// INTEGRATION(firstlogin)` |
 | C-4 | Serviceability: spec says "unsupported addresses … blocked or require an authorized alternative" but does not define serviceability | Pincode-based `BranchServiceArea`. Deterministic, no geo/maps dependency, testable. Radius/polygon is a later change behind the same API |
-| C-5 | "Preparation capacity" is undefined | Orders-per-slot per store (`slotMinutes`, `maxOrdersPerSlot`). Counted over live (`SUBMITTED`/`ACCEPTED`) phone orders falling in the same slot: a scheduled order by its `scheduledFor`, an **ASAP order by the slot it was taken in** (`createdAt`). The ASAP arm was missing until 09-24 (D-2), which made the guard fail OPEN on the dominant path. Note a reassigned ASAP order keeps its original `createdAt`, so it occupies the slot of its creation, not of its arrival at the new store. A transfer arriving after that slot has elapsed therefore occupies nothing, so **the cap is not a hard limit and `capacity.booked` is a floor rather than an exact count** — do not rely on `available` alone to mean a kitchen has room. Evidence and the measured case are in `docs/VC104-BACKEND-DEFECTS.md` §D-2 *What this does not settle*; being closed on `x/vc104-slot-anchor` |
+| C-5 | "Preparation capacity" is undefined | Orders-per-slot per store (`slotMinutes`, `maxOrdersPerSlot`). Counted over live (`SUBMITTED`/`ACCEPTED`) phone orders falling in the same slot: a scheduled order by its `scheduledFor`, an **ASAP order by the slot it was taken in** (`createdAt`), and an **ASAP order moved here by the slot it ARRIVED in** — the `at` of the latest `REASSIGNED` event into the current store. Slots are half-open `[start, end)`: an order anchored exactly on a boundary belongs to the slot opening, not the one closing. The ASAP arm was missing until 09-24 (D-2). ~~Note a reassigned ASAP order keeps its original `createdAt` … `capacity.booked` is a floor rather than an exact count~~ — **superseded 09-25.** The arrival anchor closes that hole: a late or back-dated transfer now occupies a place at the destination and is refused past the cap, `booked` is an exact count of live orders anchored in the slot, and the check is atomic (advisory lock on (company, branch, slot), re-checked inside the writing transaction). A refused transfer leaves the source order untouched. Evidence in `docs/VC104-BACKEND-DEFECTS.md` §D-2 *The limitation is closed (09-25)*. **Scope of "exact", restored 09-25 (acceptance).** The count is exact over *phone* orders, which is not the same as the kitchen's load. Three things it deliberately does not do, none of them changed by the D-2 fix: (a) **walk-in and till orders are never counted** — `branchPrepCapacity` is read only in `api/routes/phoneOrders.js`, and `api/routes/orders.js` contains zero references to it, so a store at 2/2 on phone orders may be at any load in reality; (b) **a live order is released only by rejection or by a move** — there is no cancellation path (§4), so a scheduled no-show holds its place until someone rejects it; (c) **capacity is opt-in** — `reserveSlot` returns early when the store has no `branchPrepCapacity` row, so an unconfigured store is uncapped, not zero-capacity. Also unchanged: `/branch-options` counts outside any transaction and is a **forecast**, while `reserveSlot` re-counts under the advisory lock and is the **binding** check; two tills can both be told "1 left" and only one will get it |
 | C-6 | Delivery charge: GST treatment unknown | **OPEN — owner.** Quoted beside the order, never folded into `Order.total`, never taxed. Captured as data: `PhoneOrder.deliverySupplier` and `.deliveryChargeTreatment`, both defaulting to UNRESOLVED. See §12 |
 
 C-6 is the one that most needs an answer, and §12 states exactly what has to be
@@ -486,7 +510,10 @@ established before it can be closed.
 
 ## 11. Implementation status
 
-Base `bddbe82` + migration `20260924800000_vc104_phone_order_centre`.
+Base `bddbe82` + migrations `20260924800000_vc104_phone_order_centre` and
+`20260924800001_vc104_slot_count_indexes` (09-25, two additive indexes for the
+slot count — no column, no backfill; read its header before deploying, plain
+`CREATE INDEX` blocks writes).
 
 | § | Endpoint / capability | Status |
 |---|---|---|
@@ -501,7 +528,11 @@ Base `bddbe82` + migration `20260924800000_vc104_phone_order_centre`.
 | 7 | Fixtures | **DONE** — generated from the server |
 
 `IMPLEMENTED-UNVERIFIED` is per `LANE-BRIEF §5`: every row above has passing
-backend tests (39 in `tests/phoneOrders.test.js`, full suite 453/453), but
+backend tests. Counts as observed on 09-25, not as planned:
+**71 in `tests/phoneOrders.test.js`, full suite 675** across 22 files.
+(The earlier "39 … 453/453" in this section was stale by two lanes' worth of
+tests and is replaced rather than corrected upward on faith.)
+
 ACCEPTED additionally requires browser evidence, which is W2's half and has not
 been run. **No row here may be reported as ACCEPTED yet.**
 
