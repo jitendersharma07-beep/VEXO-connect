@@ -16,6 +16,7 @@ import { env } from '../../config/env.js';
 import { getAdapter } from '../../lib/gateway/index.js';
 import { sha256Hex } from '../../lib/gateway/signature.js';
 import { applyGatewayEvent, isDuplicateOf } from '../../lib/gateway/apply.js';
+import { webhookSecretCandidates } from '../../lib/gateway/accounts.js';
 import { audit } from '../../lib/audit.js';
 import { asyncHandler } from '../../lib/errors.js';
 
@@ -25,6 +26,39 @@ const router = express.Router();
 // reorder keys and drop whitespace, breaking every signature ever sent.
 const rawBody = express.raw({ type: '*/*', limit: '256kb' });
 
+// One URL, many merchant accounts.
+//
+// The provider signs with the secret of the account the attempt was opened on,
+// and this endpoint is reached before anything is known about which account
+// that was — the reference that would say is inside the body, which must not be
+// read until it verifies. So every configured secret is a candidate.
+//
+// Trying the next candidate is correct ONLY for a signature mismatch. Every
+// other refusal — a missing header, a body that will not parse, a timestamp
+// outside tolerance — either precedes the HMAC or follows a secret that already
+// matched, and no further secret can change it. Stopping there keeps the work
+// bounded and keeps a real structural fault from being reported as "signature
+// mismatch" after N pointless retries.
+const verifyAgainstCandidates = (adapter, { rawBody: body, headers, toleranceSeconds, nowMs }, candidates) => {
+  if (candidates.length === 0) {
+    return { verified: { valid: false, reason: 'no webhook secret is configured' }, account: null };
+  }
+  let last = null;
+  for (const candidate of candidates) {
+    const verified = adapter.verifyWebhook({
+      rawBody: body,
+      headers,
+      secret: candidate.secret,
+      toleranceSeconds,
+      nowMs,
+    });
+    if (verified.valid) return { verified, account: candidate };
+    last = verified;
+    if (verified.reason !== 'signature mismatch') return { verified, account: null };
+  }
+  return { verified: last, account: null };
+};
+
 router.post(
   '/webhook',
   rawBody,
@@ -32,13 +66,17 @@ router.post(
     const adapter = getAdapter();
     const body = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
 
-    const verified = adapter.verifyWebhook({
-      rawBody: body,
-      headers: req.headers,
-      secret: env.POS_GATEWAY_WEBHOOK_SECRET,
-      toleranceSeconds: env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS,
-      nowMs: Date.now(),
-    });
+    const candidates = await webhookSecretCandidates(adapter.name);
+    const { verified, account } = verifyAgainstCandidates(
+      adapter,
+      {
+        rawBody: body,
+        headers: req.headers,
+        toleranceSeconds: env.POS_GATEWAY_WEBHOOK_TOLERANCE_SECONDS,
+        nowMs: Date.now(),
+      },
+      candidates,
+    );
 
     if (!verified.valid) {
       // Recorded in the audit log, never in GatewayWebhookEvent: eventId comes
@@ -80,6 +118,12 @@ router.post(
           currency: verified.currency,
           method: verified.method,
           chargeRef: verified.chargeRef,
+          // Which account's secret verified this, and therefore the only
+          // company whose orders this delivery may touch. Null where the
+          // deployment-wide environment secret answered, which is the
+          // single-account arrangement and is box-scoped by construction.
+          accountId: account?.accountId ?? null,
+          expectCompanyId: account?.companyId ?? null,
         });
 
         await tx.gatewayWebhookEvent.update({

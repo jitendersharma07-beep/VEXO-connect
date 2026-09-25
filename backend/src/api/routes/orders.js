@@ -10,8 +10,18 @@ import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { getAdapter, gatewayAvailable } from '../../lib/gateway/index.js';
 import { applyGatewayEvent, isAlreadySettled, EVENT_SUCCEEDED } from '../../lib/gateway/apply.js';
+import { resolveAccount, resolveAccountRow, PaymentAccountError } from '../../lib/gateway/accounts.js';
 import { sha256Hex } from '../../lib/gateway/signature.js';
-import { asyncHandler, badGateway, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+import { getConnector } from '../../lib/terminal/index.js';
+import {
+  asyncHandler,
+  badGateway,
+  badRequest,
+  conflict,
+  forbidden,
+  notFound,
+  terminalUnavailable,
+} from '../../lib/errors.js';
 import { env } from '../../config/env.js';
 import { audit } from '../../lib/audit.js';
 import {
@@ -1298,6 +1308,13 @@ router.post(
           // hand the caller the power to attribute money to another store.
           branchId: order.branchId,
           method: body.method,
+          // This route is the hand-recorded one, and it says so on the row.
+          // A cashier typing "the customer paid by card" is a claim the POS
+          // cannot check, and it must stay distinguishable from a payment a
+          // provider or a terminal confirmed — which is the whole reason this
+          // column exists. Nothing on this path may ever write anything else.
+          channel: 'MANUAL',
+          entrySource: 'MANUAL_ENTRY',
           amount: (applied / 100).toFixed(2),
           tendered: tendered === null ? null : (tendered / 100).toFixed(2),
           note: body.note ?? null,
@@ -1354,6 +1371,61 @@ router.post(
 
 // --- gateway payment intents ------------------------------------------------
 
+// The merchant account THIS ORDER's money must settle into.
+//
+// Resolved from the order's company and store, never from the process. On a
+// deployment serving several companies, credentials held in environment
+// variables mean one merchant account for everyone, and every customer's card
+// payment landing in whoever's bank account the box was configured with. That
+// is not a risk; it is the only behaviour a process-global credential can have.
+//
+// A misconfiguration answers 409 with the operator's own words, because every
+// one of these is something a person can go and fix: no account, wrong store,
+// switched off, no key, live keys on a test box. None of them is a server
+// fault and none is a reason to fall through to somebody else's account.
+const accountForOrder = async (order, provider) => {
+  try {
+    return await resolveAccount({ companyId: order.companyId, branchId: order.branchId, provider });
+  } catch (err) {
+    if (err instanceof PaymentAccountError) throw conflict(err.message);
+    throw err;
+  }
+};
+
+// What the adapter needs, and nothing else. The account object carries the
+// decrypted secret, so it stays in this file's local scope and what crosses
+// into the adapter is the pair it authenticates with.
+const credentialsOf = (account) => ({ keyId: account.keyId, keySecret: account.keySecret });
+
+// The account an EXISTING attempt was opened on — which is not always the one
+// the order resolves to now. Accounts get switched off, moved from company to
+// store, and replaced; a refund or a status enquiry has to go back to the
+// account that actually holds the money, and asking a different merchant about
+// a charge it never took gets a 404 at best and refunds the wrong customer at
+// worst.
+//
+// Falls back to resolving from the order only where the intent names no
+// account, which is every intent created before accounts existed and every one
+// on a deployment still using the environment pair.
+const accountForIntent = async (intent, order, provider) => {
+  if (!intent.accountId) return accountForOrder(order, provider);
+  const row = await prisma.paymentProviderAccount.findFirst({
+    where: { id: intent.accountId, companyId: order.companyId },
+  });
+  if (!row) {
+    // Deleted out from under a live attempt. Resolving to the current account
+    // instead would send this charge's refund to a different merchant, so this
+    // stops and says so.
+    throw conflict('The merchant account this payment was opened on no longer exists');
+  }
+  try {
+    return resolveAccountRow(row);
+  } catch (err) {
+    if (err instanceof PaymentAccountError) throw conflict(err.message);
+    throw err;
+  }
+};
+
 // Opens one provider-side attempt to collect what is still due. On a
 // deployment with no provider configured — which is every deployment today —
 // this answers 501 and the cashier records the payment manually instead.
@@ -1373,6 +1445,10 @@ router.post(
   asyncHandler(async (req, res) => {
     const adapter = getAdapter();
     const order = await loadOrder(req);
+    // Resolved BEFORE the reservation, so a tenant with no merchant account
+    // configured is refused without leaving an intent row behind that nothing
+    // will ever be able to open with the provider.
+    const account = await accountForOrder(order, adapter.name);
 
     // PHASE 1 — reserve the attempt locally and commit, provider untouched.
     const reservation = await prisma.$transaction(async (tx) => {
@@ -1410,7 +1486,18 @@ router.post(
       const intent = await tx.paymentIntent.create({
         data: {
           orderId: order.id,
+          // Denormalised from the order on purpose. The webhook arrives with
+          // no session and no company scope, so the intent has to be able to
+          // say for itself whose money this is — and it has to keep saying so
+          // after the order is archived or the store is reassigned.
+          companyId: order.companyId,
+          branchId: order.branchId,
           provider: adapter.name,
+          // The account this attempt is being opened on, frozen now. A webhook
+          // landing months later must credit the account that actually took
+          // the money, not whichever one is configured by then.
+          accountId: account.accountId,
+          flow: 'CHECKOUT_LINK',
           // Null until the provider answers. CREATED, not PENDING: nothing has
           // been asked of anyone yet, and the difference is what phase 2 fills in.
           providerRef: null,
@@ -1434,6 +1521,7 @@ router.post(
           currency: 'INR',
           orderId: order.id,
           idempotencyKey: intent.idempotencyKey,
+          credentials: credentialsOf(account),
         });
         checkoutUrl = session.checkoutUrl ?? null;
         intent = await prisma.paymentIntent.update({
@@ -1475,8 +1563,13 @@ router.post(
       // Razorpay Checkout opens in the browser with the order id and the key
       // id. The key id is the publishable half of the pair and is designed to
       // ship to the client; the secret never leaves this process.
+      //
+      // From the resolved account, so the till opens Checkout against the same
+      // merchant the order was created on. Sending the deployment's key id
+      // here would open a payment page belonging to a different company.
       provider: adapter.name,
-      keyId: env.POS_GATEWAY_KEY_ID,
+      keyId: account.keyId,
+      capabilities: adapter.capabilities ?? null,
     });
   }),
 );
@@ -1520,10 +1613,13 @@ router.post(
       throw badRequest('This payment provider has no browser handoff to verify');
     }
 
+    // Signed with the key secret of the account this attempt was opened on, so
+    // a handoff from one tenant's Checkout cannot verify against another's.
     const verified = adapter.verifyCheckoutHandoff({
       intentProviderRef: intent.providerRef,
       paymentId: body.paymentId,
       signature: body.signature,
+      credentials: credentialsOf(await accountForIntent(intent, order, adapter.name)),
     });
     if (!verified) throw badRequest('The payment confirmation could not be verified');
 
@@ -1621,9 +1717,18 @@ router.post(
     // createSession and createRefund. A provider round trip that outlasts
     // Prisma's transaction timeout would roll back whatever the transaction
     // held while the provider carried on regardless.
+    // Outside the try below on purpose. A misconfigured account is not the
+    // provider failing to answer, and dressing it as one would write
+    // GATEWAY_SETTLEMENT_RECONCILE_FAILED against a provider nobody called.
+    const account = await accountForIntent(intent, order, adapter.name);
+
     let answer;
     try {
-      answer = await adapter.fetchSettlement({ intentProviderRef: intent.providerRef });
+      answer = await adapter.fetchSettlement({
+        intentProviderRef: intent.providerRef,
+        // The account that took the money, not the one configured now.
+        credentials: credentialsOf(account),
+      });
     } catch (err) {
       // Every failure mode of the fetch lands here and changes NOTHING. An
       // unreadable answer, two captures on one order, a network timeout — all
@@ -1738,6 +1843,13 @@ router.post(
           currency: answer.currency,
           method: answer.method,
           chargeRef: answer.chargeRef,
+          // Same reason the event row above says RECOVERY: nobody delivered
+          // this. The payment lands as RECONCILED, so a report can say which
+          // orders were closed by a signed delivery and which by a manager
+          // asking the provider afterwards. Both are provider evidence; they
+          // are not equally strong, and the row is the only place that survives.
+          eventSource: 'RECOVERY',
+          accountId: account.accountId,
         });
 
         await tx.gatewayWebhookEvent.update({
@@ -1824,6 +1936,600 @@ router.post(
   }),
 );
 
+// --- card terminal attempts -------------------------------------------------
+//
+// The card-present half of §2, and deliberately a different surface from the
+// checkout intents above. An online payment is collected in the customer's
+// browser; this is collected on a physical reader in the shop, and the two are
+// not interchangeable however similar the rows look afterwards.
+//
+// What they share is everything after the money moves: ONE PaymentIntent, ONE
+// applyGatewayEvent, ONE Payment table, one refund path, one day close. What
+// differs is two columns and which adapter is asked — see lib/terminal/index.js.
+//
+// NOTHING in here settles a payment because a cashier said so, because a screen
+// timed out, or because a reader stopped answering. Only the device's own
+// SUCCEEDED answer, carrying a charge reference, may write a payment row.
+
+// The reader that is to take this card.
+//
+// Resolved from the ORDER's store, never from the request's idea of which store
+// it is in, so a till cannot address a reader in another shop by knowing its
+// id. A reader is a Device like any other: same tenancy, same revocation, same
+// composite (id, branchId) the database enforces.
+const readerForOrder = async (req, order, deviceId) => {
+  const reader = await prisma.device.findFirst({
+    where: { id: deviceId, branchId: order.branchId, companyId: order.companyId },
+    select: { id: true, name: true, type: true, status: true, readerRef: true, terminalId: true },
+  });
+  // 404 rather than 403 for a reader in another company or another store: it is
+  // simply absent from where this order can see, and a different answer would
+  // make this an oracle for which device ids exist on the deployment.
+  if (!reader) throw notFound('Card reader not found in this store');
+  if (reader.type !== 'PAYMENT_TERMINAL') {
+    throw badRequest('That device is not a card reader', 'deviceId');
+  }
+  if (reader.status !== 'ACTIVE') {
+    throw conflict('That card reader is not active. Activate it on the devices screen first.');
+  }
+  // Without this there is nothing for a connector to address. It is a
+  // configuration gap a person can close, so it says so rather than failing
+  // later inside the connector with the customer already holding their card.
+  if (!reader.readerRef) {
+    throw conflict(
+      'That card reader has no vendor reference recorded, so no connector can address it. ' +
+        'Add the reference printed on the device before taking a card on it.',
+    );
+  }
+  // A reader bound to one till may only be driven by that till. Both sides have
+  // to name a till for this to mean anything: a store-level reader, or a browser
+  // till sending no device token, attributes less and is not refused for it.
+  if (req.device?.terminalId && reader.terminalId && req.device.terminalId !== reader.terminalId) {
+    throw forbidden('That card reader is registered to a different till');
+  }
+  return reader;
+};
+
+// The vendor reference for the reader an attempt was opened on. Read back from
+// the device rather than stored on the intent: the attempt names the device,
+// and the device is where the reference lives, so re-pointing a reader's
+// reference cannot leave live attempts addressing an id that no longer exists.
+const readerRefOf = async (deviceId) => {
+  if (!deviceId) return null;
+  const device = await prisma.device.findUnique({
+    where: { id: deviceId },
+    select: { readerRef: true },
+  });
+  return device?.readerRef ?? null;
+};
+
+const terminalStartSchema = z.object({
+  deviceId: z.string().min(1).max(60),
+  // Optional, and the reason it exists is split tenders: ₹500 in cash and the
+  // rest on the card is an ordinary restaurant bill, and a route that could
+  // only charge the whole balance would force the cashier to record the card
+  // leg by hand — which is precisely the manual entry this lane exists to stop
+  // being the only option. Omitted means the whole amount still due.
+  amount: money2.optional(),
+});
+
+// Puts an amount on a reader. Two phases, for the same reason the checkout
+// intents have two: the connector is reached over a network or a socket to a
+// device, and a database transaction must not be open across it.
+//
+// Nothing here records a payment. The reader has been ASKED for money; whether
+// it got any is the status route's question.
+router.post(
+  '/:id/terminal-payments',
+  ...operate,
+  asyncHandler(async (req, res) => {
+    // Throws 501 naming the missing dependency when the configured connector is
+    // a registered-but-unimplemented vendor — so a till is told "Pine Labs needs
+    // its integration pack" rather than being shown a button that does nothing.
+    const connector = getConnector();
+    const body = terminalStartSchema.parse(req.body);
+    const order = await loadOrder(req);
+    assertDeviceStore(req, order.branchId);
+    const reader = await readerForOrder(req, order, body.deviceId);
+
+    const asked = body.amount === undefined ? null : toPaise(body.amount);
+
+    // PHASE 1 — reserve locally and commit, reader untouched.
+    const reservation = await prisma.$transaction(async (tx) => {
+      // Serialises every attempt on this order, exactly as the checkout path
+      // does. Without it two tills pressing Charge at the same instant each read
+      // a state with the other's row invisible and both put the full balance on
+      // a reader — two cards, one bill, and both charged.
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
+      const cur = await tx.order.findUnique({
+        where: { id: order.id },
+        include: { payments: { select: { amount: true } } },
+      });
+      if (cur.status !== 'BILLED') throw conflict('Card payment is offered on billed orders only');
+      const due = paiseOf(cur.total) - cur.payments.reduce((a, p) => a + paiseOf(p.amount), 0);
+      if (due <= 0) throw conflict('Order has no amount due');
+      const amountPaise = asked ?? due;
+      if (amountPaise > due) {
+        throw badRequest('Amount exceeds the amount due', 'amount');
+      }
+
+      // One live attempt per order, whatever surface it is on. A checkout page
+      // and a reader both holding the same balance is the two-payable-sessions
+      // problem with an extra device in it.
+      const open = await tx.paymentIntent.findFirst({
+        where: { orderId: order.id, status: { in: ['CREATED', 'PENDING'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (open) {
+        if (open.flow !== 'TERMINAL') {
+          throw conflict('An online payment is already open on this order. Cancel it before using the card reader.');
+        }
+        if (open.deviceId !== reader.id) {
+          throw conflict('A card payment for this order is already open on a different reader');
+        }
+        if (paiseOf(open.amount) !== amountPaise) {
+          throw conflict('A card payment for a different amount is already open on this order');
+        }
+        // No providerRef means phase 2 never got an answer. Resuming carries
+        // the SAME idempotency key, so a connector with idempotency of its own
+        // returns the attempt already on the reader rather than stacking a
+        // second amount on it.
+        return { intent: open, amountPaise, resume: open.providerRef === null };
+      }
+
+      const intent = await tx.paymentIntent.create({
+        data: {
+          orderId: order.id,
+          // Denormalised from the order, the same way the checkout path does it
+          // and for the same reason: the attempt has to be able to say whose
+          // money this is without a session to ask.
+          companyId: order.companyId,
+          branchId: order.branchId,
+          provider: connector.name,
+          flow: 'TERMINAL',
+          // WHICH reader is holding the card, and which till that reader
+          // belongs to. Read off the resolved device row, never off the request.
+          deviceId: reader.id,
+          terminalId: reader.terminalId ?? req.device?.terminalId ?? null,
+          // No merchant account: no terminal connector needs credentials today
+          // (perAccountCredentials is false on every one of them). When a vendor
+          // connector arrives that does, it resolves through the same
+          // PaymentProviderAccount rows the gateway uses, keyed on its own name.
+          accountId: null,
+          providerRef: null,
+          amount: (amountPaise / 100).toFixed(2),
+          currency: 'INR',
+          status: 'CREATED',
+          idempotencyKey: randomUUID(),
+          createdById: req.user.id,
+        },
+      });
+      return { intent, amountPaise, resume: true, fresh: true };
+    });
+
+    // PHASE 2 — now put the amount on the reader.
+    let intent = reservation.intent;
+    if (reservation.resume) {
+      try {
+        const started = await connector.startPayment({
+          amountPaise: reservation.amountPaise,
+          currency: 'INR',
+          orderId: order.id,
+          readerRef: reader.readerRef,
+          idempotencyKey: intent.idempotencyKey,
+          credentials: null,
+        });
+        intent = await prisma.paymentIntent.update({
+          where: { id: intent.id },
+          data: { providerRef: started.providerRef ?? null, status: 'PENDING', failureReason: null },
+        });
+      } catch (err) {
+        // A reader that refused is an answer: nothing is on the device and the
+        // cashier can try another one or take the money another way. Anything
+        // else is UNKNOWN — the amount may be sitting on the reader right now —
+        // so the row stays open and the next press resumes it under the same
+        // key instead of putting a second amount on a device that may already
+        // be showing the first.
+        const detail = err?.message ? String(err.message).slice(0, 200) : 'the reader did not answer';
+        if (err?.providerRefused === true) {
+          await prisma.paymentIntent.update({
+            where: { id: intent.id },
+            data: { status: 'FAILED', failureReason: detail, closedAt: new Date() },
+          });
+        } else {
+          await prisma.paymentIntent.update({ where: { id: intent.id }, data: { failureReason: detail } });
+        }
+        throw terminalUnavailable('The card reader could not be given this payment');
+      }
+    }
+
+    if (reservation.fresh) {
+      await audit(req, {
+        action: 'TERMINAL_INTENT_CREATED',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: {
+          orderId: order.id,
+          connector: connector.name,
+          deviceId: reader.id,
+          amount: String(intent.amount),
+        },
+      });
+    }
+    res.status(reservation.fresh ? 201 : 200).json({
+      intent: publicIntent(intent),
+      connector: connector.name,
+      // So the till can show the right instruction — "tap, insert or swipe" on a
+      // reader that declares contactless, and "insert or swipe" on one that does
+      // not. Guessing that wrong tells a customer to tap a device that will not
+      // read a tap.
+      capabilities: connector.capabilities,
+      reader: { id: reader.id, name: reader.name },
+      // The reader has the amount. Nothing has been paid, and the till must poll
+      // the status route rather than infer anything from this response.
+      status: intent.status,
+    });
+  }),
+);
+
+// Asks the READER what happened, and records a payment only if it says one did.
+//
+// This is the only route that can settle a card-present payment, and it is a
+// poll rather than a callback because a reader has no webhook to send: the
+// device is on a counter, not on the internet. Everything §3 asks for about
+// duplicate, delayed and out-of-order outcomes therefore has to hold here.
+//
+// The rules it exists to enforce:
+//   - a timeout is not a decline. An enquiry that could not reach the device
+//     leaves the attempt exactly as it was, and says so.
+//   - UNCERTAIN is never resolved into anything. It is reported as UNCERTAIN,
+//     the attempt stays open, and the cashier is told in words not to record
+//     the payment by hand.
+//   - polling twice cannot pay twice. The charge reference is the event id, so
+//     a second poll collides on the unique index rather than settling again.
+router.post(
+  '/:id/terminal-payments/:intentId/status',
+  ...operate,
+  asyncHandler(async (req, res) => {
+    const connector = getConnector();
+    const order = await loadOrder(req);
+
+    // Found through the order, so an attempt on another bill or in another
+    // company is absent rather than probeable.
+    const intent = await prisma.paymentIntent.findFirst({
+      where: { id: req.params.intentId, orderId: order.id, flow: 'TERMINAL' },
+    });
+    if (!intent) throw notFound('Card payment not found');
+    if (intent.provider !== connector.name) {
+      throw conflict('This payment was started on a different card connector from the one configured now');
+    }
+    if (!intent.providerRef) {
+      throw conflict('This payment never reached the reader, so there is nothing to ask about');
+    }
+    // A settled attempt is polled all the time — a till that lost its answer,
+    // a second cashier looking at the same bill. It is not an error, and
+    // answering 200 with the truth is what stops anyone taking the money again.
+    if (intent.status === 'SUCCEEDED') {
+      return res.status(200).json({
+        status: 'SUCCEEDED',
+        recorded: false,
+        alreadyRecorded: true,
+        reason: 'this card payment has already been recorded',
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    // Counting the asks is how a stuck attempt becomes visible instead of being
+    // polled forever in silence. Neither column moves money.
+    await prisma.paymentIntent.update({
+      where: { id: intent.id },
+      data: { lastStatusCheckAt: new Date(), statusCheckCount: { increment: 1 } },
+    });
+
+    let answer;
+    try {
+      answer = await connector.getStatus({
+        providerRef: intent.providerRef,
+        readerRef: await readerRefOf(intent.deviceId),
+        credentials: null,
+      });
+    } catch (err) {
+      // The device could not be asked. That is not a decline, not a success and
+      // not a cancellation: it changes NOTHING about the attempt, which stays
+      // open and askable. Distinguished from an answer of UNCERTAIN on purpose —
+      // "we could not ask" and "we asked and it does not know" are different
+      // facts, and a shop chasing a missing payment needs to know which it had.
+      const detail = err?.message ? String(err.message).slice(0, 200) : 'the reader did not answer';
+      await prisma.paymentIntent.update({
+        where: { id: intent.id },
+        data: { failureReason: detail },
+      });
+      await audit(req, {
+        action: 'TERMINAL_STATUS_UNAVAILABLE',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, connector: connector.name, detail },
+      });
+      throw terminalUnavailable('The card reader could not be asked what happened to this payment');
+    }
+
+    const detail = typeof answer?.detail === 'string' ? answer.detail.slice(0, 200) : null;
+
+    if (answer.status === 'PENDING') {
+      return res.status(200).json({
+        status: 'PENDING',
+        recorded: false,
+        detail,
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    if (answer.status === 'UNCERTAIN') {
+      // The attempt is LEFT OPEN and left unresolved. This is the case the
+      // whole subsystem exists for: the customer may have been charged, and the
+      // two tempting moves — closing it so the till looks tidy, or letting the
+      // cashier record a manual card payment "to match" — are the two ways a
+      // customer gets charged twice.
+      await prisma.paymentIntent.update({
+        where: { id: intent.id },
+        data: { status: 'UNCERTAIN', failureReason: detail },
+      });
+      await audit(req, {
+        action: 'TERMINAL_OUTCOME_UNCERTAIN',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, connector: connector.name, detail },
+      });
+      return res.status(200).json({
+        status: 'UNCERTAIN',
+        recorded: false,
+        detail,
+        // Said in words because the cashier is the one who decides what happens
+        // next, and the wrong decision here is the expensive one.
+        advice:
+          'The reader could not say whether this card was charged. Do NOT record this payment by hand — ' +
+          'check the reader or the day’s batch first, then ask again.',
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    if (answer.status === 'FAILED' || answer.status === 'CANCELLED') {
+      // An answer, and the answer is no money. Closing the attempt is safe and
+      // necessary: it frees the balance so the cashier can present the card
+      // again or take it another way.
+      const closed = await prisma.paymentIntent.update({
+        where: { id: intent.id },
+        data: {
+          status: answer.status,
+          failureReason: detail,
+          failureCode: typeof answer.failureCode === 'string' ? answer.failureCode.slice(0, 60) : null,
+          cancelledAt: answer.status === 'CANCELLED' ? new Date() : null,
+          closedAt: new Date(),
+        },
+      });
+      await audit(req, {
+        action: answer.status === 'CANCELLED' ? 'TERMINAL_INTENT_CANCELLED' : 'TERMINAL_INTENT_FAILED',
+        entity: 'PaymentIntent',
+        entityId: intent.id,
+        companyId: req.companyScope.id,
+        meta: { orderId: order.id, connector: connector.name, detail, failureCode: closed.failureCode },
+      });
+      return res.status(200).json({
+        status: answer.status,
+        recorded: false,
+        detail,
+        failureCode: closed.failureCode,
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    if (answer.status !== 'SUCCEEDED') {
+      // Unreachable through the simulator, which normalises anything it does not
+      // know to UNCERTAIN. Kept because a vendor connector is a separate piece
+      // of code and this function must not treat an unrecognised word as
+      // approval by falling out of the bottom of the checks above.
+      throw terminalUnavailable('The card reader gave an answer this connector could not read');
+    }
+
+    // --- the reader says it took the money ---
+    //
+    // The charge reference is what makes settling exactly-once: it is the event
+    // id, so polling twice collides on (provider, eventId) instead of recording
+    // a second payment. Without one there is no such key, and no way to tell a
+    // repeat poll from a second charge — so this refuses rather than guessing.
+    if (!answer.chargeRef) {
+      throw conflict('This card payment could not be recorded: the reader did not name the charge');
+    }
+
+    let outcome;
+    try {
+      outcome = await prisma.$transaction(async (tx) => {
+        const event = await tx.gatewayWebhookEvent.create({
+          data: {
+            provider: connector.name,
+            eventId: answer.chargeRef,
+            kind: EVENT_SUCCEEDED,
+            payloadHash: sha256Hex(JSON.stringify(answer)),
+            // RECOVERY, because nobody delivered this — the till went and asked
+            // the device. A reader has no webhook to send, so every terminal
+            // settlement is a pull and the event row says so.
+            source: 'RECOVERY',
+          },
+        });
+
+        const applied = await applyGatewayEvent(tx, {
+          provider: connector.name,
+          providerRef: intent.providerRef,
+          kind: EVENT_SUCCEEDED,
+          amountPaise: answer.amountPaise,
+          currency: answer.currency,
+          method: answer.method ?? 'CARD',
+          chargeRef: answer.chargeRef,
+          eventSource: 'RECOVERY',
+          // The same amount, order-state and amount-due checks the webhook
+          // runs. eventSource does not decide the payment's entrySource here:
+          // the intent's flow does, and a TERMINAL attempt lands as
+          // TERMINAL_CONFIRMED. See lib/gateway/apply.js.
+          expectCompanyId: order.companyId,
+        });
+
+        await tx.gatewayWebhookEvent.update({
+          where: { id: event.id },
+          data: {
+            processedAt: new Date(),
+            intentId: applied.intentId ?? null,
+            skippedReason: applied.skippedReason ?? null,
+          },
+        });
+        return applied;
+      });
+    } catch (err) {
+      // Two tills polling the same attempt at the same instant. One of them
+      // wrote the payment; the unique index refused the other and rolled its
+      // whole transaction back. The money is recorded exactly once.
+      if (isAlreadySettled(err)) {
+        return res.status(200).json({
+          status: 'SUCCEEDED',
+          recorded: false,
+          alreadyRecorded: true,
+          reason: 'this card payment was already recorded',
+          order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+        });
+      }
+      throw err;
+    }
+
+    if (!outcome.payment) {
+      // The reader said yes and the payment was still not written — the amount
+      // disagreed with what was asked for, or the order moved on underneath.
+      // Recorded on the event row with its reason and surfaced by
+      // reconciliation, never silently smoothed over.
+      const recorded = await prisma.payment.findUnique({
+        where: { intentId: intent.id },
+        select: { id: true },
+      });
+      return res.status(200).json({
+        status: 'SUCCEEDED',
+        recorded: false,
+        ...(recorded ? { alreadyRecorded: true } : {}),
+        reason: recorded ? 'this card payment was already recorded' : (outcome.skippedReason ?? 'the payment was not applied'),
+        order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+      });
+    }
+
+    // ORDER_PAYMENT, the same action the manual route and the webhook write,
+    // because every report that reads takings has to see all three. `channel`
+    // and `via` are what tell them apart afterwards.
+    await audit(req, {
+      action: 'ORDER_PAYMENT',
+      entity: 'Order',
+      entityId: order.id,
+      companyId: req.companyScope.id,
+      meta: {
+        method: outcome.payment.method,
+        amount: String(outcome.payment.amount),
+        channel: 'TERMINAL',
+        connector: connector.name,
+        intentId: outcome.intentId,
+        via: 'TERMINAL',
+        chargeRef: answer.chargeRef,
+        entryMode: typeof answer.entryMode === 'string' ? answer.entryMode : null,
+      },
+    });
+
+    res.status(200).json({
+      status: 'SUCCEEDED',
+      recorded: true,
+      payment: publicPayment(outcome.payment),
+      order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+    });
+  }),
+);
+
+// Takes the amount back off the reader.
+//
+// Where the connector declares cancel, this is a real state change on the
+// device and the card can no longer be presented against it. Where it does not,
+// the POS closes its own row and SAYS SO — because a "cancelled" attempt whose
+// amount is still showing on a reader is a lie the next customer can disprove
+// by tapping.
+router.post(
+  '/:id/terminal-payments/:intentId/cancel',
+  ...operate,
+  asyncHandler(async (req, res) => {
+    const connector = getConnector();
+    const order = await loadOrder(req);
+
+    const intent = await prisma.paymentIntent.findFirst({
+      where: { id: req.params.intentId, orderId: order.id, flow: 'TERMINAL' },
+    });
+    if (!intent) throw notFound('Card payment not found');
+    if (intent.status === 'SUCCEEDED') {
+      throw conflict('This card payment has already been recorded and cannot be cancelled');
+    }
+    if (intent.provider !== connector.name) {
+      throw conflict('This payment was started on a different card connector from the one configured now');
+    }
+
+    let onDevice = false;
+    if (connector.capabilities.cancel && intent.providerRef) {
+      try {
+        const result = await connector.cancel({
+          providerRef: intent.providerRef,
+          readerRef: await readerRefOf(intent.deviceId),
+          credentials: null,
+        });
+        onDevice = result?.cancelled === true;
+      } catch {
+        // The device could not be told. Closing our row anyway would leave an
+        // amount live on a reader with nothing in the POS tracking it, which is
+        // how a customer pays a bill the till has already written off.
+        throw terminalUnavailable(
+          'The card reader could not be told to cancel. The amount may still be on the device — clear it there.',
+        );
+      }
+    }
+
+    const closed = await prisma.paymentIntent.update({
+      where: { id: intent.id },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt: new Date(),
+        closedAt: new Date(),
+        failureReason: onDevice ? null : 'cancelled in the POS; the reader was not able to be told',
+      },
+    });
+    await audit(req, {
+      action: 'TERMINAL_INTENT_CANCELLED',
+      entity: 'PaymentIntent',
+      entityId: intent.id,
+      companyId: req.companyScope.id,
+      meta: { orderId: order.id, connector: connector.name, onDevice },
+    });
+
+    res.status(200).json({
+      intent: publicIntent(closed),
+      // The honest half. False means the POS closed its own row and the reader
+      // was never told — so if the customer pays anyway, the money is real and a
+      // status enquiry will still find and record it. The attempt being
+      // CANCELLED here does not block that, deliberately.
+      cancelledOnDevice: onDevice,
+      ...(onDevice
+        ? {}
+        : {
+            advice:
+              'This connector cannot clear a reader remotely. Cancel the amount on the device itself — ' +
+              'until you do, a card presented to it may still be charged.',
+          }),
+      order: serializeOrder(await loadOrder(req, ORDER_INCLUDE)),
+    });
+  }),
+);
+
 // --- refunds ----------------------------------------------------------------
 
 const REFUND_PAYMENT_INCLUDE = {
@@ -1845,6 +2551,20 @@ const REFUND_STATE_SELECT = {
 
 const rupees = (paise) => (paise / 100).toFixed(2);
 
+// The merchant account a gateway refund has to be posted to: the one that took
+// the money, found through the attempt it was taken on. Sending a refund to
+// the account configured NOW would ask a merchant to return a charge it never
+// received — which fails outright if we are lucky, and takes the money out of
+// the wrong company's balance if we are not.
+const accountForRefundLeg = async (intentId, order, provider) => {
+  const intent = await prisma.paymentIntent.findFirst({
+    where: { id: intentId, orderId: order.id },
+    select: { accountId: true },
+  });
+  if (!intent) throw conflict('The payment this refund belongs to could not be found');
+  return credentialsOf(await accountForIntent(intent, order, provider));
+};
+
 // Asks the provider to return the money, OUTSIDE any database transaction and
 // always with the key already stored on the row.
 //
@@ -1854,7 +2574,7 @@ const rupees = (paise) => (paise / 100).toFixed(2);
 // paying out this second. Unknown must never be reported as refused, because
 // a refused refund frees its money to be requested again, and doing that to a
 // request that did go through pays the customer twice.
-const sendRefundToProvider = async (refund, leg, orderId) => {
+const sendRefundToProvider = async (refund, leg, orderId, credentials) => {
   try {
     const result = await getAdapter().createRefund({
       intentProviderRef: leg.intentProviderRef,
@@ -1863,6 +2583,7 @@ const sendRefundToProvider = async (refund, leg, orderId) => {
       currency: 'INR',
       orderId,
       idempotencyKey: refund.idempotencyKey,
+      credentials,
     });
     const providerRef = result?.providerRef ?? null;
     if (!providerRef) {
@@ -2031,7 +2752,12 @@ router.post(
     let refund = reservation.refund;
     let answer = { confirmed: true };
     if (refund.channel === 'GATEWAY') {
-      answer = await sendRefundToProvider(refund, reservation.leg, order.id);
+      answer = await sendRefundToProvider(
+        refund,
+        reservation.leg,
+        order.id,
+        await accountForRefundLeg(reservation.leg.intentId, order, getAdapter().name),
+      );
       refund = await recordProviderAnswer(refund.id, answer);
     }
 
@@ -2109,6 +2835,7 @@ router.post(
         chargeProviderRef: existing.intent?.payment?.providerRef ?? null,
       },
       order.id,
+      await accountForRefundLeg(existing.intentId, order, getAdapter().name),
     );
     const refund = await recordProviderAnswer(existing.id, answer);
 

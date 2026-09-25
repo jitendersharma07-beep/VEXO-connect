@@ -52,15 +52,42 @@ const isRefundEvent = (kind) =>
 const KNOWN_METHODS = new Set(['CARD', 'UPI', 'OTHER']);
 const normaliseMethod = (method) => (KNOWN_METHODS.has(method) ? method : 'OTHER');
 
+// WHOSE delivery this is allowed to touch.
+//
+// One webhook endpoint now verifies against every configured tenant's secret
+// (see accounts.webhookSecretCandidates), because the provider signs with the
+// account's secret and we cannot know which account opened an attempt until
+// after the signature verifies. That makes a valid signature proof of "some
+// tenant on this deployment", not of "the tenant who owns this order" — and a
+// tenant holding its own secret could otherwise sign a delivery naming a
+// COMPETITOR's providerRef and settle their bill.
+//
+// So the account that won verification names a company, and the intent or
+// refund the event points at has to belong to it. Null means the delivery was
+// verified by the deployment-wide environment secret, which is the
+// single-account arrangement that predates accounts and is scoped to the whole
+// box by construction — there is nothing narrower to check it against.
+const wrongCompany = (expectCompanyId, actualCompanyId) =>
+  expectCompanyId !== null &&
+  expectCompanyId !== undefined &&
+  actualCompanyId !== expectCompanyId;
+
 // A refund event's providerRef names the REFUND, not the original payment.
 // Until one of these arrives the refund is a request and nothing has moved, so
 // this is the only place a refund may be marked paid out.
-const applyRefundEvent = async (tx, { providerRef, kind, amountPaise }) => {
+const applyRefundEvent = async (tx, { providerRef, kind, amountPaise, expectCompanyId }) => {
   const refund = await tx.refund.findUnique({
     where: { providerRef },
     include: { order: { select: { id: true, companyId: true, branchId: true, status: true } } },
   });
   if (!refund) return { skippedReason: 'no refund matches this provider reference' };
+  if (wrongCompany(expectCompanyId, refund.order.companyId)) {
+    // Deliberately the same wording as "no refund matches", because to the
+    // sender these must be indistinguishable: a different answer here would
+    // turn this endpoint into an oracle for whether a given provider reference
+    // exists on the deployment at all.
+    return { skippedReason: 'no refund matches this provider reference' };
+  }
   const base = { intentId: refund.intentId ?? null, refundId: refund.id };
 
   if (refund.status !== 'PENDING') {
@@ -117,15 +144,46 @@ const applyRefundEvent = async (tx, { providerRef, kind, amountPaise }) => {
            companyId: order.companyId, branchId: order.branchId };
 };
 
-export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, currency, method, chargeRef }) => {
+// WHICH of the two evidence paths is calling. A signature-verified delivery is
+// PROVIDER_CONFIRMED; the pull-based reconcile, which ASKED the provider's API
+// after the fact, is RECONCILED. Both are provider evidence and both are
+// allowed to write a payment — the distinction is recorded because they are not
+// equally strong, and a reconciliation report has to be able to say which one
+// closed a given order.
+//
+// Defaulted to the webhook, because the webhook route is the only caller that
+// existed when this function was written and the reconcile route names its own.
+const ENTRY_SOURCE_BY_EVENT_SOURCE = { WEBHOOK: 'PROVIDER_CONFIRMED', RECOVERY: 'RECONCILED' };
+
+// WHICH surface actually took the money — read off the ATTEMPT, never off the
+// caller. A card dipped into a reader in the shop and a card typed into a
+// hosted page in a browser are different facts about how a business was done,
+// and the sales report, the chargeback and the day close all ask which it was.
+//
+// One function settles both because there is one payment ledger. What forks is
+// two columns, and they fork on PaymentIntent.flow, so a caller cannot get it
+// wrong by passing the wrong argument — there is no argument to pass.
+const settlementColumns = (intent, eventSource) =>
+  intent.flow === 'TERMINAL'
+    ? { channel: 'TERMINAL', entrySource: 'TERMINAL_CONFIRMED' }
+    : {
+        channel: 'GATEWAY',
+        entrySource: ENTRY_SOURCE_BY_EVENT_SOURCE[eventSource] ?? 'PROVIDER_CONFIRMED',
+      };
+
+export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amountPaise, currency, method, chargeRef, eventSource = 'WEBHOOK', accountId = null, expectCompanyId = null }) => {
   if (isRefundEvent(kind)) {
-    return applyRefundEvent(tx, { providerRef, kind, amountPaise });
+    return applyRefundEvent(tx, { providerRef, kind, amountPaise, expectCompanyId });
   }
 
   const intent = await tx.paymentIntent.findUnique({
     where: { provider_providerRef: { provider, providerRef } },
   });
   if (!intent) return { skippedReason: 'no intent matches this provider reference' };
+  // Same wording as the miss above, for the same reason: see wrongCompany.
+  if (wrongCompany(expectCompanyId, intent.companyId)) {
+    return { skippedReason: 'no intent matches this provider reference' };
+  }
 
   if (kind === EVENT_FAILED) {
     if (intent.status === 'SUCCEEDED') {
@@ -196,13 +254,28 @@ export const applyGatewayEvent = async (tx, { provider, providerRef, kind, amoun
       // takings the money lands in.
       branchId: order.branchId,
       method: normaliseMethod(method),
-      channel: 'GATEWAY',
+      // The three separated dimensions. `channel` says WHICH surface the money
+      // came through; `entrySource` says what evidence established it; and
+      // `provider` and `accountId` say whose account it settled into. A CHECK
+      // on the table keeps channel and entrySource agreeing.
+      ...settlementColumns(intent, eventSource),
+      provider: intent.provider,
+      // From the intent where the caller did not say, so a payment always
+      // names the account its own attempt was opened on rather than whatever
+      // is configured at the moment the webhook happens to land.
+      accountId: accountId ?? intent.accountId ?? null,
       amount: (amountPaise / 100).toFixed(2),
       // No tendered and no receiver: the provider settled this, so there was
       // no cash in a drawer and no member of staff to attribute it to.
       tendered: null,
       receivedById: null,
       intentId: intent.id,
+      // WHICH till and which device took it, carried over from the attempt. A
+      // terminal payment without them cannot be reconciled against the reader
+      // that holds the card slip, and a day close cannot attribute it. Null on
+      // a checkout attempt, where no device in the shop touched the money.
+      terminalId: intent.terminalId ?? null,
+      deviceId: intent.deviceId ?? null,
       // The provider's id for the charge, kept because the refund route needs
       // it: this row is the only place it is ever recorded.
       providerRef: typeof chargeRef === 'string' && chargeRef ? chargeRef : null,

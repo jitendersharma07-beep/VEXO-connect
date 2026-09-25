@@ -33,10 +33,61 @@ export const setTestSettlement = (intentProviderRef, answer) => {
   settlements.set(intentProviderRef, answer);
 };
 
-export const clearTestSettlements = () => settlements.clear();
+// What this fake provider will answer when asked where an attempt has got to.
+// Separate from settlements because the two questions have different answers:
+// an attempt can be PENDING, which fetchSettlement is deliberately unable to
+// express. Unprimed, it falls back to the settlement answer, so a test that
+// only cares about the settled case primes one map and not two.
+const statuses = new Map();
+
+export const setTestStatus = (intentProviderRef, answer) => {
+  statuses.set(intentProviderRef, answer);
+};
+
+// Attempts this fake provider has been told to treat as cancelled. A cancel
+// here is a REAL state change on the provider's side — the attempt stops being
+// payable — which is exactly what a provider that supports cancellation does
+// and what Razorpay, which does not, cannot.
+const cancelled = new Set();
+
+export const clearTestSettlements = () => {
+  settlements.clear();
+  statuses.clear();
+  cancelled.clear();
+};
 
 export const testAdapter = {
   name: 'test',
+
+  // The reference implementation supports everything the contract defines,
+  // which is what makes it useful for exercising the routes. It is NOT a
+  // statement about any real provider: see razorpay.js, where cancel,
+  // cardPresent and contactless are all false and say why.
+  capabilities: {
+    createSession: true,
+    getStatus: true,
+    cancel: true,
+    createRefund: true,
+    partialRefund: true,
+    fetchSettlement: true,
+    verifyWebhook: true,
+    checkoutHandoff: false,
+    perAccountCredentials: true,
+    verifyCredentials: true,
+    cardPresent: false,
+    contactless: false,
+  },
+
+  // Accepts anything with both halves present. It authenticates against
+  // nothing, so there is nothing to be right or wrong about — what it exercises
+  // is the route's handling of a yes and of a no, and the no is reachable by
+  // storing an account with no key id.
+  async verifyCredentials({ credentials }) {
+    if (!credentials?.keyId) {
+      return { ok: false, detail: 'no key id was supplied' };
+    }
+    return { ok: true, detail: 'the test adapter accepts any credentials' };
+  },
 
   async fetchSettlement({ intentProviderRef }) {
     const answer = settlements.get(intentProviderRef);
@@ -44,6 +95,34 @@ export const testAdapter = {
       return { settled: false, reason: 'the provider has no payment on this attempt' };
     }
     return typeof answer === 'function' ? answer() : answer;
+  },
+
+  async getStatus({ intentProviderRef }) {
+    if (cancelled.has(intentProviderRef)) {
+      return { status: 'CANCELLED', detail: 'this attempt was cancelled with the provider' };
+    }
+    const primed = statuses.get(intentProviderRef);
+    if (primed !== undefined) return typeof primed === 'function' ? primed() : primed;
+
+    const answer = settlements.get(intentProviderRef);
+    const resolved = typeof answer === 'function' ? answer() : answer;
+    if (resolved?.settled) {
+      return {
+        status: 'SUCCEEDED',
+        chargeRef: resolved.chargeRef ?? null,
+        amountPaise: resolved.amountPaise ?? null,
+        currency: resolved.currency ?? null,
+        method: resolved.method ?? 'OTHER',
+        detail: null,
+      };
+    }
+    // Not settled is not failed. The customer may still be on the page.
+    return { status: 'PENDING', detail: resolved?.reason ?? null };
+  },
+
+  async cancel({ intentProviderRef }) {
+    cancelled.add(intentProviderRef);
+    return { cancelled: true };
   },
 
   async createSession({ idempotencyKey }) {

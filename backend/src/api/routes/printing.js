@@ -22,7 +22,9 @@ import {
   requirePrintAgent, sha256, newEnrolCode, newAgentSecret,
 } from '../../lib/print/agentAuth.js';
 
-const HEARTBEAT_STALE_SEC = 90; // agent OFFLINE when silent 3× its 30 s beat
+// Exported because the drawer channel runs on the SAME agents and must not
+// reach its own verdict about which of them are alive.
+export const HEARTBEAT_STALE_SEC = 90; // agent OFFLINE when silent 3× its 30 s beat
 const LEASE_SEC = 60;
 const RETRY_BACKOFF_SEC = [5, 15, 45];
 

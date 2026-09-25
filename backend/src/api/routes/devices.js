@@ -18,6 +18,7 @@ import { asyncHandler, badRequest, conflict, notFound } from '../../lib/errors.j
 import { auditRequired } from '../../lib/audit.js';
 import { hashSecret } from '../../lib/crypto.js';
 import { mintDevicePublicId } from '../../lib/identity.js';
+import { connectorCatalogue } from '../../lib/terminal/index.js';
 import { requirePosAuth, resolveCompanyScope } from '../../middleware/auth.js';
 import { requireUsableLicense } from '../../middleware/rbac.js';
 import {
@@ -42,6 +43,7 @@ const publicDevice = (d) => ({
   branchName: d.branch?.name ?? null,
   terminalId: d.terminalId,
   terminalCode: d.terminal?.code ?? null,
+  readerRef: d.readerRef ?? null,
   lastSeenAt: d.lastSeenAt,
   activatedAt: d.activatedAt,
   revokedAt: d.revokedAt,
@@ -66,7 +68,28 @@ router.get(
   }),
 );
 
-const DEVICE_TYPES = ['COUNTER', 'KDS', 'CUSTOMER_DISPLAY', 'HANDHELD', 'OTHER'];
+// What each card-terminal connector declares it can do, and what the ones that
+// cannot run are waiting for.
+//
+// Deliberately lists the unavailable vendors too. "We do not have Pine Labs,
+// and here is what obtaining it needs" is the single most useful thing this
+// screen can tell an owner choosing a reader; showing only the connector that
+// happens to be configured would imply it is the only choice, and showing none
+// would leave them to discover the gap with a device in their hand.
+router.get(
+  '/reader-connectors',
+  requireAction('device.read'),
+  asyncHandler(async (_req, res) => {
+    res.json({ connectors: connectorCatalogue() });
+  }),
+);
+
+const DEVICE_TYPES = ['COUNTER', 'KDS', 'CUSTOMER_DISPLAY', 'HANDHELD', 'PAYMENT_TERMINAL', 'OTHER'];
+
+// The vendor's own id for a card reader. Free text because the format belongs
+// to the vendor, not to this product — a serial, a TID, a POS id, whatever the
+// connector addresses the device by. Unique per store in the database.
+const readerRefSchema = z.string().trim().min(1).max(120);
 
 // branchId is required, not optional. A device credential's whole security value
 // is that it is scoped to one store, and a device with no store would be a token
@@ -76,7 +99,26 @@ const createSchema = z.object({
   terminalId: z.string().trim().min(1).nullish(),
   type: z.enum(DEVICE_TYPES),
   name: z.string().trim().min(2).max(80),
+  readerRef: readerRefSchema.nullish(),
 });
+
+// Only a card reader may carry one. Allowing it on a KDS would put a value in
+// the column that the store's unique index then reserves against the reader
+// that actually needs it — and a reader is refused a payment when its reference
+// is missing, so the collision would surface as a card that cannot be taken.
+const assertReaderRefFits = (type, readerRef) => {
+  if (readerRef && type !== 'PAYMENT_TERMINAL') {
+    throw badRequest('Only a card reader can carry a vendor reference', 'readerRef');
+  }
+};
+
+// P2002 on (branchId, readerRef) means another device in this store already
+// claims the reader. Named rather than passed through as a 500, because it is
+// the likeliest mistake when a shop replaces a broken reader and enrols the new
+// one before revoking the old.
+const READER_TAKEN = 'Another device in this store already has that reader reference';
+const isReaderRefConflict = (err) =>
+  err?.code === 'P2002' && [].concat(err.meta?.target ?? []).some((t) => String(t).includes('readerRef'));
 
 // A terminal implies its store; naming both only works when they agree.
 const resolveTerminal = async (branch, terminalId) => {
@@ -100,36 +142,45 @@ router.post(
     const data = createSchema.parse(req.body);
     const branch = await resolveStoreInScope(req, data.branchId);
     const terminal = await resolveTerminal(branch, data.terminalId);
+    assertReaderRefFits(data.type, data.readerRef);
 
-    const device = await prisma.$transaction(async (tx) => {
-      const publicId = await mintDevicePublicId(tx);
-      const made = await tx.device.create({
-        data: {
-          companyId: branch.companyId,
-          publicId,
-          branchId: branch.id,
-          terminalId: terminal?.id ?? null,
-          type: data.type,
-          name: data.name,
-          enrolledById: req.user.id,
-        },
-        include,
+    let device;
+    try {
+      device = await prisma.$transaction(async (tx) => {
+        const publicId = await mintDevicePublicId(tx);
+        const made = await tx.device.create({
+          data: {
+            companyId: branch.companyId,
+            publicId,
+            branchId: branch.id,
+            terminalId: terminal?.id ?? null,
+            type: data.type,
+            name: data.name,
+            readerRef: data.readerRef ?? null,
+            enrolledById: req.user.id,
+          },
+          include,
+        });
+        await auditRequired(tx, req, {
+          action: 'DEVICE_ENROL',
+          entity: 'Device',
+          entityId: made.id,
+          companyId: req.companyScope.id,
+          meta: {
+            publicId: made.publicId,
+            type: made.type,
+            name: made.name,
+            branchId: made.branchId,
+            terminalId: made.terminalId,
+            readerRef: made.readerRef,
+          },
+        });
+        return made;
       });
-      await auditRequired(tx, req, {
-        action: 'DEVICE_ENROL',
-        entity: 'Device',
-        entityId: made.id,
-        companyId: req.companyScope.id,
-        meta: {
-          publicId: made.publicId,
-          type: made.type,
-          name: made.name,
-          branchId: made.branchId,
-          terminalId: made.terminalId,
-        },
-      });
-      return made;
-    });
+    } catch (err) {
+      if (isReaderRefConflict(err)) throw conflict(READER_TAKEN);
+      throw err;
+    }
     await auditPlatformWrite(req);
     res.status(201).json({ device: publicDevice(device) });
   }),
@@ -241,6 +292,10 @@ router.post(
 const updateSchema = z.object({
   name: z.string().trim().min(2).max(80).optional(),
   terminalId: z.string().trim().min(1).nullish(),
+  // Editable, unlike identity and store: a shop that swaps a faulty reader for
+  // a replacement under warranty keeps the same device row, the same history
+  // and the same till binding, and only the vendor's id for the box changes.
+  readerRef: readerRefSchema.nullish(),
 });
 
 router.patch(
@@ -262,22 +317,32 @@ router.patch(
       const terminal = await resolveTerminal({ id: before.branchId }, data.terminalId);
       patch.terminalId = terminal?.id ?? null;
     }
+    if (data.readerRef !== undefined) {
+      assertReaderRefFits(before.type, data.readerRef);
+      patch.readerRef = data.readerRef ?? null;
+    }
 
-    const device = await prisma.$transaction(async (tx) => {
-      const updated = await tx.device.update({ where: { id: before.id }, data: patch, include });
-      await auditRequired(tx, req, {
-        action: 'DEVICE_UPDATE',
-        entity: 'Device',
-        entityId: updated.id,
-        companyId: req.companyScope.id,
-        meta: {
-          publicId: updated.publicId,
-          before: { name: before.name, terminalId: before.terminalId },
-          after: { name: updated.name, terminalId: updated.terminalId },
-        },
+    let device;
+    try {
+      device = await prisma.$transaction(async (tx) => {
+        const updated = await tx.device.update({ where: { id: before.id }, data: patch, include });
+        await auditRequired(tx, req, {
+          action: 'DEVICE_UPDATE',
+          entity: 'Device',
+          entityId: updated.id,
+          companyId: req.companyScope.id,
+          meta: {
+            publicId: updated.publicId,
+            before: { name: before.name, terminalId: before.terminalId, readerRef: before.readerRef },
+            after: { name: updated.name, terminalId: updated.terminalId, readerRef: updated.readerRef },
+          },
+        });
+        return updated;
       });
-      return updated;
-    });
+    } catch (err) {
+      if (isReaderRefConflict(err)) throw conflict(READER_TAKEN);
+      throw err;
+    }
     await auditPlatformWrite(req);
     res.json({ device: publicDevice(device) });
   }),

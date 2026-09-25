@@ -1,12 +1,26 @@
 // Razorpay adapter for the contract in index.js.
 //
-// Written against Razorpay's published API. It is complete and exercised end
-// to end against a stub of that API (tests/razorpay.test.js), which proves the
-// wire format, the signatures and the failure classification — and proves
-// nothing whatsoever about a real Razorpay account. NO SANDBOX CALL HAS BEEN
-// MADE: that needs keys this repository does not have and must never hold.
-// Until someone runs it against real test keys, treat "verified" here as
-// "verified against the documentation", not "verified against Razorpay".
+// Written against Razorpay's published API and exercised end to end against a
+// stub of it (tests/razorpay.test.js). That stub proves the wire format, the
+// signatures and the failure classification — and, on its own, proves nothing
+// about a real Razorpay account: the same author wrote both sides of it.
+//
+// What HAS been asked of a real test account, and what has not:
+//
+//   verifyCredentials, getStatus, fetchSettlement — READ paths, verified
+//   against the sandbox on 2026-09-25 by scripts/razorpay-sandbox-read-probe.mjs,
+//   9/9, including a wrong secret rejected for the stated reason and an unpaid
+//   order read as PENDING rather than as success. Read-only; no money moved.
+//
+//   createSession, createRefund, verifyWebhook — the WRITE paths. Verified
+//   against a real account in the predecessor repository (see
+//   docs/RAZORPAY-SANDBOX.md, 2026-09-22: a genuine payment.captured applied,
+//   a genuine refund.processed settled). NOT re-run from this tree, and this
+//   tree changed how credentials reach them — per-account rather than from the
+//   environment. Treat the routing as covered by tests only until somebody
+//   takes one sandbox payment through a tenant-configured account.
+//
+// Keys live outside this repository and must never enter it.
 //
 // Three Razorpay facts drive most of the shape below.
 //
@@ -67,10 +81,29 @@ export const EVENT_ID_HEADER = 'x-razorpay-event-id';
 
 const apiBase = () => (env.POS_GATEWAY_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, '');
 
+// WHOSE Razorpay account this call is made against.
+//
+// Credentials arrive per call, from the caller, because on a multi-tenant
+// deployment the merchant account belongs to the company whose order is being
+// paid — not to the process. Reading them out of the environment in here is
+// what made every tenant's card payment settle into one bank account.
+//
+// The environment pair stays as the fallback for callers that pass nothing,
+// which is the single-account deployment this adapter was written for and every
+// existing test. See lib/gateway/accounts.js: once a tenant configures a row,
+// its calls always arrive with credentials and this fallback is unreachable
+// for it.
+const credentialsOf = (credentials) => ({
+  keyId: credentials?.keyId ?? env.POS_GATEWAY_KEY_ID,
+  keySecret: credentials?.keySecret ?? env.POS_GATEWAY_KEY_SECRET,
+});
+
 // Razorpay authenticates API calls with HTTP Basic, key id as the user and key
 // secret as the password.
-const authHeader = () =>
-  `Basic ${Buffer.from(`${env.POS_GATEWAY_KEY_ID}:${env.POS_GATEWAY_KEY_SECRET}`).toString('base64')}`;
+const authHeader = (credentials) => {
+  const { keyId, keySecret } = credentialsOf(credentials);
+  return `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString('base64')}`;
+};
 
 // Every failure out of this module is one of these, and the distinction is the
 // whole point: a caller may safely re-ask after a RETRYABLE one, because
@@ -125,13 +158,13 @@ const describeError = (status, parsed) => {
   };
 };
 
-const request = async (method, path, { body, headers = {} } = {}) => {
+const request = async (method, path, { body, headers = {}, credentials } = {}) => {
   let response;
   try {
     response = await fetch(`${apiBase()}${path}`, {
       method,
       headers: {
-        authorization: authHeader(),
+        authorization: authHeader(credentials),
         'content-type': 'application/json',
         accept: 'application/json',
         ...headers,
@@ -184,15 +217,15 @@ const paiseFrom = (value) => (Number.isSafeInteger(value) && value >= 0 ? value 
 // entity and is queryable. So the key is sent as the receipt, and a create that
 // fails in a way that might still have created something is resolved by looking
 // the receipt up rather than by posting again.
-const findOrderByReceipt = async (receipt) => {
-  const page = await request('GET', `/v1/orders?receipt=${encodeURIComponent(receipt)}&count=2`);
+const findOrderByReceipt = async (receipt, credentials) => {
+  const page = await request('GET', `/v1/orders?receipt=${encodeURIComponent(receipt)}&count=2`, { credentials });
   const items = Array.isArray(page?.items) ? page.items : [];
   // Two orders under one receipt means the recovery itself is ambiguous, and
   // picking one would be a guess about which the customer can pay.
   return items.length === 1 ? items[0] : null;
 };
 
-const createSession = async ({ amountPaise, currency, orderId, idempotencyKey }) => {
+const createSession = async ({ amountPaise, currency, orderId, idempotencyKey, credentials }) => {
   const payload = {
     amount: amountPaise,
     currency,
@@ -240,7 +273,7 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
 
   let created;
   try {
-    created = await request('POST', '/v1/orders', { body: payload });
+    created = await request('POST', '/v1/orders', { body: payload, credentials });
   } catch (err) {
     // A refusal created nothing, so there is nothing to recover. The test is
     // providerRefused rather than the TERMINAL label because only the former
@@ -250,7 +283,7 @@ const createSession = async ({ amountPaise, currency, orderId, idempotencyKey })
     // of, and opening a second would show the customer two payable pages for
     // one bill.
     if (err instanceof RazorpayError && err.providerRefused) throw err;
-    const recovered = await findOrderByReceipt(idempotencyKey).catch(() => null);
+    const recovered = await findOrderByReceipt(idempotencyKey, credentials).catch(() => null);
     if (!recovered?.id) throw err;
     created = recovered;
   }
@@ -298,7 +331,7 @@ const PAYMENT_PAGE_MAX = 100;
 //
 // Nothing here decides anything. It returns what the account says and lets
 // orders.js compare that against our own rows.
-const fetchSettlement = async ({ intentProviderRef }) => {
+const fetchSettlement = async ({ intentProviderRef, credentials }) => {
   if (typeof intentProviderRef !== 'string' || !intentProviderRef.startsWith('order_')) {
     // LOCAL: Razorpay was never asked, so it has no opinion. An intent with no
     // order_… was never opened with the provider and there is nothing to find.
@@ -308,10 +341,11 @@ const fetchSettlement = async ({ intentProviderRef }) => {
     );
   }
 
-  const order = await request('GET', `/v1/orders/${encodeURIComponent(intentProviderRef)}`);
+  const order = await request('GET', `/v1/orders/${encodeURIComponent(intentProviderRef)}`, { credentials });
   const page = await request(
     'GET',
     `/v1/orders/${encodeURIComponent(intentProviderRef)}/payments?count=${PAYMENT_PAGE_MAX}`,
+    { credentials },
   );
   const items = Array.isArray(page?.items) ? page.items : null;
   if (!items) {
@@ -398,10 +432,11 @@ const REFUND_PAGE_MAX = 100;
 //   FOUND     — a refund under this key exists; the provider acted.
 //   ABSENT    — the whole list was read and this key is not in it.
 //   AMBIGUOUS — could not be established. Not the same as ABSENT.
-const findRefundByKey = async (chargeProviderRef, idempotencyKey) => {
+const findRefundByKey = async (chargeProviderRef, idempotencyKey, credentials) => {
   const page = await request(
     'GET',
     `/v1/payments/${encodeURIComponent(chargeProviderRef)}/refunds?count=${REFUND_PAGE_MAX}`,
+    { credentials },
   );
   const items = Array.isArray(page?.items) ? page.items : null;
   if (!items) return { state: 'AMBIGUOUS', refund: null };
@@ -420,7 +455,7 @@ const findRefundByKey = async (chargeProviderRef, idempotencyKey) => {
 // chargeProviderRef is the pay_… the money actually landed on. intentProviderRef
 // — the order_… — cannot be refunded; Razorpay has no such route, and passing
 // it would 400 on every gateway refund ever raised.
-const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId, idempotencyKey }) => {
+const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId, idempotencyKey, credentials }) => {
   // LOCAL, not TERMINAL. Razorpay is never asked, so it cannot have refused:
   // this is our own record missing the charge id, and the refund is very
   // possibly still payable once that is put right. Calling it a refusal would
@@ -435,6 +470,7 @@ const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId,
   let refund;
   try {
     refund = await request('POST', `/v1/payments/${encodeURIComponent(chargeProviderRef)}/refund`, {
+      credentials,
       // Razorpay's own idempotency header for this route. With it, a retry of a
       // request we never saw the answer to returns the FIRST refund instead of
       // creating a second one — which is the difference between an unknown
@@ -458,7 +494,7 @@ const createRefund = async ({ chargeProviderRef, amountPaise, currency, orderId,
     // against the refunds that actually exist on the charge.
     let outcome;
     try {
-      outcome = await findRefundByKey(chargeProviderRef, idempotencyKey);
+      outcome = await findRefundByKey(chargeProviderRef, idempotencyKey, credentials);
     } catch {
       // The lookup failed, so the question stands unanswered.
       outcome = { state: 'AMBIGUOUS', refund: null };
@@ -624,20 +660,157 @@ export const verifyCheckoutSignature = ({ orderId, paymentId, signature, secret 
 };
 
 // The adapter's own wrapper, so the route never has to know which of the two
-// secrets signs a handoff. intentProviderRef is the order_… we opened.
-const verifyCheckoutHandoff = ({ intentProviderRef, paymentId, signature }) =>
+// secrets signs a handoff. intentProviderRef is the order_… we opened, and the
+// secret is the one belonging to the account that opened it — a handoff from a
+// tenant's own account does not verify against the deployment's shared key.
+const verifyCheckoutHandoff = ({ intentProviderRef, paymentId, signature, credentials }) =>
   verifyCheckoutSignature({
     orderId: intentProviderRef,
     paymentId,
     signature,
-    secret: env.POS_GATEWAY_KEY_SECRET,
+    secret: credentialsOf(credentials).keySecret,
   });
+
+// --- status enquiry ---------------------------------------------------------
+
+// Where has this attempt got to?
+//
+// Distinct from fetchSettlement, which answers the narrower and more dangerous
+// question "may money be recorded". This one answers "what should the cashier's
+// screen say", and it is allowed to say PENDING — the state fetchSettlement
+// deliberately collapses into `settled: false`, because a caller that may write
+// a payment must not be able to read "not yet" as "no".
+//
+// Built on the two GETs Razorpay documents for an order, and on nothing else:
+//   Fetch an Order            https://razorpay.com/docs/api/orders/fetch-with-id/
+//   Fetch Payments for Order  https://razorpay.com/docs/api/orders/fetch-payments/
+//
+// Razorpay's order status is 'created' | 'attempted' | 'paid'. 'attempted'
+// means somebody tried and it did not go through — an interesting fact for the
+// screen, and NOT a failure of the attempt: the same order stays payable.
+const ORDER_STATUS = new Map([
+  ['created', 'PENDING'],
+  ['attempted', 'PENDING'],
+  ['paid', 'SUCCEEDED'],
+]);
+
+const getStatus = async ({ intentProviderRef, credentials }) => {
+  if (typeof intentProviderRef !== 'string' || !intentProviderRef.startsWith('order_')) {
+    throw new RazorpayError(
+      'this payment attempt has no Razorpay order id recorded, so the provider cannot be asked about it',
+      { kind: 'LOCAL' },
+    );
+  }
+  const order = await request('GET', `/v1/orders/${encodeURIComponent(intentProviderRef)}`, { credentials });
+  const status = ORDER_STATUS.get(order?.status) ?? null;
+  if (status === null) {
+    // An unrecognised status is UNCERTAIN, never a guess. A new Razorpay order
+    // state read as PENDING would leave a paid bill open; read as SUCCEEDED it
+    // would close an unpaid one.
+    return { status: 'UNCERTAIN', detail: `Razorpay reports an order status this adapter does not know: ${order?.status}` };
+  }
+  if (status !== 'SUCCEEDED') {
+    return { status, detail: order?.status === 'attempted' ? 'the customer has tried and not completed payment' : null };
+  }
+
+  // 'paid' is the provider's word for the ORDER. The charge behind it is what
+  // carries the amount and the capture, so it is read rather than assumed —
+  // the same two-field rule fetchSettlement applies.
+  const page = await request(
+    'GET',
+    `/v1/orders/${encodeURIComponent(intentProviderRef)}/payments?count=${PAYMENT_PAGE_MAX}`,
+    { credentials },
+  );
+  const items = Array.isArray(page?.items) ? page.items : [];
+  const captures = items.filter((p) => p?.status === 'captured' && p?.captured === true);
+  if (captures.length !== 1) {
+    return {
+      status: 'UNCERTAIN',
+      detail: 'Razorpay reports the order paid but not exactly one captured payment on it',
+    };
+  }
+  return {
+    status: 'SUCCEEDED',
+    chargeRef: typeof captures[0].id === 'string' ? captures[0].id : null,
+    amountPaise: paiseFrom(captures[0].amount),
+    currency: typeof captures[0].currency === 'string' ? captures[0].currency : null,
+    method: METHOD_MAP.get(captures[0].method) ?? 'OTHER',
+    detail: null,
+  };
+};
+
+// --- credential check -------------------------------------------------------
+
+// Do these keys authenticate against Razorpay?
+//
+// The cheapest authenticated READ Razorpay documents: list one order. It takes
+// no money, creates nothing, and needs no order to exist — an account with
+// none answers 200 with an empty list, which is a pass. What it proves is the
+// only thing worth proving before a customer is standing at the counter: the
+// key pair is real and belongs to an account this deployment can reach.
+//
+//   Fetch All Orders   https://razorpay.com/docs/api/orders/fetch-all/
+//
+// A 401 is a clear no. Anything else — a timeout, a 500 — is NOT a no: it is
+// an unanswered question, and saying "these credentials are wrong" because
+// Razorpay was briefly unreachable sends an operator to re-enter a key that
+// was correct all along.
+const verifyCredentials = async ({ credentials }) => {
+  try {
+    await request('GET', '/v1/orders?count=1', { credentials });
+    return { ok: true, detail: 'Razorpay accepted these credentials' };
+  } catch (err) {
+    const status = err instanceof RazorpayError ? err.status : null;
+    if (status === 401 || status === 403) {
+      return { ok: false, detail: 'Razorpay rejected these credentials' };
+    }
+    return {
+      ok: false,
+      detail: `Razorpay could not be asked, so these credentials are unchecked: ${err?.message ?? 'no answer'}`,
+    };
+  }
+};
+
+// WHAT THIS ADAPTER CAN AND CANNOT DO. Declared rather than inferred, because
+// the difference between "the method is missing" and "the method is missing
+// today" is the difference between a capability matrix a buyer can rely on and
+// one that has to be re-derived by reading the source.
+//
+// cancel is false for a reason worth stating: Razorpay publishes NO endpoint
+// that cancels or voids an order. Their Orders API has create, fetch, fetch-all,
+// fetch-payments and update-notes, and nothing else. An order stays payable
+// until it expires on Razorpay's side, so there is nothing truthful to call
+// here and nothing has been invented to fill the gap.
+//
+// cardPresent and contactless are false for a larger reason. This is an ONLINE
+// CHECKOUT integration. It collects money through a browser or a payment link,
+// and it does not drive a card terminal, read a chip, or accept a tap — those
+// need a terminal connector and a device (see lib/terminal/), which is a
+// different integration with different hardware and a different certification.
+// Nothing about having Razorpay working gets a shop card-present acceptance.
+const capabilities = {
+  createSession: true,
+  getStatus: true,
+  cancel: false,
+  createRefund: true,
+  partialRefund: true,
+  fetchSettlement: true,
+  verifyWebhook: true,
+  checkoutHandoff: true,
+  perAccountCredentials: true,
+  verifyCredentials: true,
+  cardPresent: false,
+  contactless: false,
+};
 
 export const razorpayAdapter = {
   name: 'razorpay',
+  capabilities,
   createSession,
+  getStatus,
   createRefund,
   fetchSettlement,
   verifyWebhook,
   verifyCheckoutHandoff,
+  verifyCredentials,
 };
