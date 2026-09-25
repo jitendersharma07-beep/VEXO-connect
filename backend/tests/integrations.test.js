@@ -20,7 +20,8 @@
 //
 // Runs ONLY against a database whose name ends in _test — it truncates tables.
 
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { createServer } from 'node:http';
 import request from 'supertest';
 
 if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
@@ -51,13 +52,19 @@ const { onOrderBilled } = await import('../src/lib/integrations/hooks.js');
 // the way the route would have left one. Re-implementing the digest in the test
 // would only prove that the test and the route agree on SHA-256.
 const { fingerprint, runReport } = await import('../src/lib/integrations/loyaltyImport.js');
+// Imported so the compare-and-set inside applyState can be driven the way two
+// app processes drive it: both deciding against the same row snapshot, before
+// either has written. Two HTTP deliveries cannot reproduce that — supertest
+// awaits each one, so the second always reads the first's result.
+const { applyState } = await import('../src/lib/integrations/aggregatorOrders.js');
 
 const app = createApp();
 
-const wipe = async () => {
-  // Lane children before their parents. Traced from the schema's FK actions
-  // rather than guessed: LoyaltyOperation → Customer and AggregatorOrder →
-  // IntegrationOutlet are Restrict, so the order below is load-bearing.
+// All twelve of this lane's tables, children before their parents. Traced from
+// the schema's FK actions rather than guessed: LoyaltyOperation → Customer and
+// AggregatorOrder → IntegrationOutlet are Restrict, so the order is load-bearing.
+// Separate from wipe() because afterAll needs this half on its own — see there.
+const wipeLane = async () => {
   await prisma.loyaltyImportException.deleteMany();
   await prisma.loyaltyImportRun.deleteMany();
   await prisma.loyaltyOperation.deleteMany();
@@ -70,6 +77,10 @@ const wipe = async () => {
   await prisma.integrationEvent.deleteMany();
   await prisma.integrationOutlet.deleteMany();
   await prisma.integrationConnection.deleteMany();
+};
+
+const wipe = async () => {
+  await wipeLane();
   await prisma.phoneOrderEvent.deleteMany();
   await prisma.phoneOrder.deleteMany();
   await prisma.customerAddress.deleteMany();
@@ -162,6 +173,22 @@ const reeloCredential = {
 // reached inside the shop network and a URL in this field is how "do not expose
 // Tally to the internet" gets violated from the settings screen.
 const tallyCredential = { host: '127.0.0.1', port: 9000 };
+
+// A voucher shaped the way accounting.js shapes one, so a test that drives the
+// adapter directly is exercising the real XML path rather than a stub.
+const salesVoucherPayload = () => ({
+  date: '2026-09-25',
+  voucherNumber: 'VCX-TEST-1',
+  narration: 'VEXO Connect test sale',
+  partyLedgerName: 'Walk-in Customer',
+  partyAmount: 118,
+  reference: 'VCX-TEST-1',
+  lines: [
+    { ledgerName: 'Sales - Dine In', amount: 100 },
+    { ledgerName: 'Output CGST', amount: 9 },
+    { ledgerName: 'Output SGST', amount: 9 },
+  ],
+});
 
 const tallyConfig = {
   companyName: 'Test Cafe Books',
@@ -339,6 +366,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   clearAdapterOverrides();
+  // Every other suite here wipes only the tables IT knows about, in beforeAll,
+  // and leaves its rows behind. That works only while no suite owns tables the
+  // others have never heard of. This one owns twelve, and their FKs into Branch
+  // and Customer are Restrict — so leaving them behind turns the next file's
+  // `customer.deleteMany()` into a foreign-key error. This file is the largest,
+  // so vitest's sequencer runs it first and the residue hits nearly everything
+  // after it: the full suite failed 17 of 23 files exactly this way before this
+  // hook existed. Clearing the lane's own rows on the way out restores the
+  // invariant the other files depend on, without editing any of them.
+  await wipeLane();
   await prisma.$disconnect();
 });
 
@@ -563,6 +600,488 @@ describe('credential handling', () => {
       .send({ credential: { host: '192.168.1.5', port: 9000 } });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
   });
+
+  // The first version of this guard rejected an `http://` prefix and nothing
+  // else, so every host below except the first one SAVED CLEANLY. `134744072` is
+  // the one worth staring at: the WHATWG URL parser reads a bare integer as an
+  // IPv4 address, so that string dials 8.8.8.8. These are the measured bypasses,
+  // not hypothetical ones.
+  const OFF_LAN_HOSTS = [
+    ['a scheme', 'https://tally.example.com'],
+    ['a public IPv4 literal', '8.8.8.8'],
+    ['a public domain name', 'tally.example.com'],
+    ['8.8.8.8 spelled as a decimal integer', '134744072'],
+    ['8.8.8.8 spelled in hex', '0x8080808'],
+    ['8.8.8.8 spelled as an octal dotted quad', '010.010.010.010'],
+    ['a public address hidden behind userinfo', '192.168.1.1@8.8.8.8'],
+    ['a public IPv6 literal', '2001:4860:4860::8888'],
+    ['a port smuggled into the host field', '8.8.8.8:9000'],
+  ];
+
+  for (const [label, host] of OFF_LAN_HOSTS) {
+    it(`refuses a Tally host given as ${label}`, async () => {
+      await request(app).put('/api/integrations/TALLY').set(auth(tokens.owner))
+        .send({ enabled: true, config: tallyConfig });
+      const res = await request(app).put('/api/integrations/TALLY/credential').set(auth(tokens.owner))
+        .send({ credential: { host, port: 9000 } });
+      expect(res.status, `host ${host} was accepted: ${JSON.stringify(res.body)}`).toBe(400);
+      // The message has to name the destination, or an operator who typed a
+      // decimal integer has no way to learn it meant 8.8.8.8.
+      expect(JSON.stringify(res.body).toLowerCase()).toMatch(/lan|network|host|ip|url/);
+    });
+  }
+
+  // The positive controls. Without these the block above would pass just as well
+  // against a field that refused every host, which would be a different bug.
+  const ON_LAN_HOSTS = [
+    ['a 192.168 address', '192.168.1.50'],
+    ['a 10.x address', '10.0.0.5'],
+    ['a 172.16-31 address', '172.20.3.4'],
+    ['loopback', '127.0.0.1'],
+    ['a bare LAN machine name', 'TALLYPC'],
+    ['an .local name', 'tally.local'],
+    // Octal and hex spellings of loopback and 192.168.1.50. Allowed on purpose:
+    // the gate judges the address the parser produces, not the spelling, and
+    // these addresses really are on the LAN.
+    ['loopback in octal', '0177.0.0.1'],
+    ['192.168.1.50 in hex', '0xc0.0xa8.1.50'],
+  ];
+
+  for (const [label, host] of ON_LAN_HOSTS) {
+    it(`accepts a Tally host given as ${label}`, async () => {
+      await request(app).put('/api/integrations/TALLY').set(auth(tokens.owner))
+        .send({ enabled: true, config: tallyConfig });
+      const res = await request(app).put('/api/integrations/TALLY/credential').set(auth(tokens.owner))
+        .send({ credential: { host, port: 9000 } });
+      expect(res.status, `host ${host} was refused: ${JSON.stringify(res.body)}`).toBe(200);
+    });
+  }
+});
+
+// --- Tally's destination, checked at call time --------------------------------
+
+// The settings gate above answers a question about SPELLING, which is all a form
+// has. It cannot answer the one that matters: `tallypc` is a perfectly good LAN
+// name that a search domain or a poisoned resolver can point anywhere. Only
+// resolution can tell, and it has to happen immediately before the call rather
+// than when the host was saved.
+//
+// Every refusal here asserts that `fetch` was never reached. "Refused with a
+// sensible message" is not the claim; "no bytes left this machine" is.
+describe('Tally will not send to a destination it cannot confirm is on the LAN', () => {
+  const resolvesTo = (addresses) => async () => addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
+  const fails = (code) => async () => { const e = new Error('lookup failed'); e.code = code; throw e; };
+
+  let tallyAdapter;
+  let fetchSpy;
+
+  beforeAll(async () => {
+    ({ adapter: tallyAdapter } = await import('../src/lib/integrations/adapters/tally.js'));
+  });
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = null;
+  });
+
+  const expectNothingSent = async (host, resolver) => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    await expect(
+      tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host, port: 9000 },
+        config: tallyConfig,
+        resolver,
+      }),
+    ).rejects.toThrow();
+    expect(fetchSpy, `a request was attempted to ${host}`).not.toHaveBeenCalled();
+    return fetchSpy;
+  };
+
+  it('refuses a LAN-looking name that resolves to a public address', async () => {
+    await expectNothingSent('tallypc', resolvesTo(['203.0.113.9']));
+  });
+
+  it('refuses a name that resolves to one private AND one public address', async () => {
+    // Which of the two fetch would pick is not ours to choose, so one public
+    // answer is enough to refuse the whole name.
+    await expectNothingSent('tallypc', resolvesTo(['192.168.1.50', '203.0.113.9']));
+  });
+
+  it('refuses when the name cannot be resolved at all', async () => {
+    // The uncomfortable direction, on purpose: a DNS outage stops Tally posting.
+    // The alternative is sending an unauthenticated voucher write to an address
+    // we could not verify, and the queue exists to hold work until a person looks.
+    await expectNothingSent('tallypc', fails('ENOTFOUND'));
+  });
+
+  it('refuses when resolution succeeds but returns no address', async () => {
+    await expectNothingSent('tallypc', async () => []);
+  });
+
+  it('refuses a public address dressed up as a decimal integer, at call time too', async () => {
+    // Not just at the settings screen: a credential saved before this guard
+    // existed still cannot reach the internet.
+    const spy = await expectNothingSent('134744072', resolvesTo(['192.168.1.50']));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('names the address it refused, so the reason is actionable', async () => {
+    await expect(
+      tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: 'tallypc', port: 9000 },
+        config: tallyConfig,
+        resolver: resolvesTo(['203.0.113.9']),
+      }),
+    ).rejects.toThrow(/203\.0\.113\.9/);
+  });
+
+  it('classifies the refusal as TERMINAL so the queue stops instead of retrying', async () => {
+    // A destination that is off-LAN will still be off-LAN in thirty seconds.
+    // Retrying it eight times turns one clear refusal into eight identical ones.
+    const err = await tallyAdapter
+      .perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: '8.8.8.8', port: 9000 },
+        config: tallyConfig,
+      })
+      .then(() => null, (e) => e);
+    expect(err).toBeTruthy();
+    expect(err.retryable).toBe(false);
+    expect(err.providerRefused).toBe(true);
+  });
+
+  // THE POSITIVE CONTROL, and the reason this block is not just a list of
+  // refusals: a real HTTP server on loopback, answering the way Tally answers.
+  // If the gate refused everything, this would fail.
+  it('does send to a host that resolves privately, proving the gate is not refusing everything', async () => {
+    const seen = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push(body);
+        res.writeHead(200, { 'Content-Type': 'text/xml' });
+        res.end('<RESPONSE><CREATED>1</CREATED><ALTERED>0</ALTERED><ERRORS>0</ERRORS><EXCEPTIONS>0</EXCEPTIONS></RESPONSE>');
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    try {
+      const result = await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: '127.0.0.1', port },
+        config: tallyConfig,
+      });
+      expect(seen.length).toBe(1);
+      expect(seen[0]).toContain('<TALLYMESSAGE');
+      expect(result.detail.created).toBe(1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('reaches a LAN machine NAME once it resolves privately, and dials the verified address not the name', async () => {
+    // Two claims in one test because they are the same mechanism. First, the
+    // kind=name path passes traffic rather than merely passing validation.
+    // Second — the security-relevant half — the request goes to the ADDRESS we
+    // approved. Handing the NAME to fetch would make fetch resolve it a second
+    // time, and a second answer can differ from the one just approved. The Host
+    // header proves which of the two happened.
+    const seen = [];
+    const server = createServer((req, res) => {
+      seen.push(req.headers.host);
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end('<RESPONSE><CREATED>1</CREATED><ERRORS>0</ERRORS></RESPONSE>');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    try {
+      const res = await tallyAdapter.checkConnection({
+        credential: { host: 'tallypc', port },
+        config: tallyConfig,
+        resolver: resolvesTo(['127.0.0.1']),
+      });
+      expect(seen).toEqual([`127.0.0.1:${port}`]);
+      expect(seen[0]).not.toContain('tallypc');
+      // checkConnection looks for the company name in the answer; this stub does
+      // not carry one, so ok:false is the honest result. The load-bearing
+      // assertion is that the request happened, and where it went.
+      expect(res.detail).toBeTruthy();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('reads a successful Tally import as success, not as a rejection', async () => {
+    // A regression guard for a defect the positive control above uncovered: the
+    // error-text matcher also matched <ERRORS>0</ERRORS>, the success COUNT, so
+    // every voucher Tally accepted was reported as rejected. Exercised against a
+    // response shaped the way Tally actually answers an import.
+    const { parseImportResponse } = await import('../src/lib/integrations/adapters/tally.js');
+    const success = parseImportResponse(
+      '<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><IMPORTRESULT>' +
+        '<CREATED>1</CREATED><ALTERED>0</ALTERED><LASTVCHID>0</LASTVCHID>' +
+        '<ERRORS>0</ERRORS><EXCEPTIONS>0</EXCEPTIONS>' +
+        '</IMPORTRESULT></DATA></BODY></ENVELOPE>',
+    );
+    expect(success.errorText).toBeNull();
+    expect(success.created).toBe(1);
+    expect(success.ok).toBe(true);
+
+    // And the negative control: a real import failure is still read as one, with
+    // Tally's own wording preserved so the operator sees the actual reason.
+    const failure = parseImportResponse(
+      '<ENVELOPE><BODY><DATA><IMPORTRESULT><CREATED>0</CREATED><ERRORS>1</ERRORS>' +
+        '<LINEERROR>Ledger &apos;Sales - Dine In&apos; does not exist</LINEERROR>' +
+        '</IMPORTRESULT></DATA></BODY></ENVELOPE>',
+    );
+    expect(failure.ok).toBe(false);
+    expect(failure.errorText).toContain('does not exist');
+  });
+
+  it('does not consult DNS for an IP literal that is already on the LAN', async () => {
+    // A literal address needs no name lookup, and a gate that asked anyway would
+    // make Tally posting depend on DNS for no reason.
+    let asked = false;
+    const server = createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end('<RESPONSE><CREATED>1</CREATED><ERRORS>0</ERRORS></RESPONSE>');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    try {
+      await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: '127.0.0.1', port },
+        config: tallyConfig,
+        resolver: async () => { asked = true; return []; },
+      });
+      expect(asked).toBe(false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+// A stand-in Tally, answering over real HTTP on loopback so the adapter's own
+// request building, LAN gate and response parsing are all exercised. `reply`
+// receives the request body and returns either XML to answer with, or null to
+// destroy the socket — which is how the interesting failure is reproduced: Tally
+// received and applied the import, and the answer never came back.
+const fakeTally = async (reply) => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const isImport = body.includes('<TALLYREQUEST>Import</TALLYREQUEST>');
+      requests.push({ isImport, isDayBook: body.includes('<ID>Day Book</ID>'), body });
+      const answer = reply(body, requests);
+      if (answer === null) {
+        req.socket.destroy();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end(answer);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    port: server.address().port,
+    requests,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+};
+
+const IMPORT_OK = '<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><IMPORTRESULT>' +
+  '<CREATED>1</CREATED><ALTERED>0</ALTERED><ERRORS>0</ERRORS><EXCEPTIONS>0</EXCEPTIONS>' +
+  '</IMPORTRESULT></DATA></BODY></ENVELOPE>';
+
+const dayBookWith = (...vouchers) =>
+  `<ENVELOPE><BODY><DATA><COLLECTION>${vouchers
+    .map(({ number, masterId, type = 'Sales' }) =>
+      `<VOUCHER REMOTEID="00000000-0000-0000-0000-000000000001-0000008a" VCHTYPE="${type}">` +
+      `<DATE>20260925</DATE><VOUCHERTYPENAME>${type}</VOUCHERTYPENAME>` +
+      `<VOUCHERNUMBER>${number}</VOUCHERNUMBER>` +
+      (masterId ? `<MASTERID>${masterId}</MASTERID>` : '') +
+      '</VOUCHER>')
+    .join('')}</COLLECTION></DATA></BODY></ENVELOPE>`;
+
+describe('Tally recovers a voucher whose acknowledgement was lost, without sending it twice', () => {
+  // The failure this block is about: Tally imports the sales voucher, and the
+  // answer never arrives. The queue's default instinct — retry an UNKNOWN — puts
+  // a SECOND sale in the client's books, because Tally publishes no
+  // duplicate-detection for imports and our own unique index is on our own table.
+  // Nothing about a local queue's dedupe key can prevent that.
+  let tallyAdapter;
+  beforeAll(async () => {
+    ({ adapter: tallyAdapter } = await import('../src/lib/integrations/adapters/tally.js'));
+  });
+
+  it('asks Tally whether the voucher is there, and reports success without resending it', async () => {
+    const payload = salesVoucherPayload();
+    const tally = await fakeTally((body) =>
+      body.includes('<TALLYREQUEST>Import</TALLYREQUEST>')
+        // The import is applied and the answer is thrown away. From the client's
+        // side this is indistinguishable from Tally never having seen it, which
+        // is precisely why it must not be guessed at.
+        ? null
+        : dayBookWith({ number: payload.voucherNumber, masterId: '41337' }));
+    try {
+      const result = await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload,
+        credential: { host: '127.0.0.1', port: tally.port },
+        config: tallyConfig,
+      });
+
+      // Exactly one import. This is the assertion the whole mechanism exists for:
+      // a second one here is a duplicate sale in a real client's books.
+      expect(tally.requests.filter((r) => r.isImport)).toHaveLength(1);
+      expect(tally.requests.filter((r) => r.isDayBook)).toHaveLength(1);
+
+      expect(result.detail.ok).toBe(true);
+      expect(result.detail.recoveredFromLostAcknowledgement).toBe(true);
+      // Reported by the route it was actually established by, not as an ordinary
+      // import acknowledgement — the two are different evidence.
+      expect(result.detail.confirmedBy).toBe('Day Book export');
+      expect(result.detail.originalError).toMatch(/did not answer/i);
+      // Tally's own handle for the voucher, which an import response never gives.
+      expect(result.externalRef).toBe('41337');
+    } finally {
+      await tally.close();
+    }
+  });
+
+  it('refuses to resend when Tally does not list the voucher, and says why in words an operator can act on', async () => {
+    const payload = salesVoucherPayload();
+    const tally = await fakeTally((body) =>
+      body.includes('<TALLYREQUEST>Import</TALLYREQUEST>')
+        ? null
+        // Someone else's voucher, so the export is a real answer that simply does
+        // not contain ours.
+        : dayBookWith({ number: 'SOMEBODY-ELSE-99', masterId: '90001' }));
+    try {
+      const err = await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload,
+        credential: { host: '127.0.0.1', port: tally.port },
+        config: tallyConfig,
+      }).catch((e) => e);
+
+      expect(tally.requests.filter((r) => r.isImport)).toHaveLength(1);
+      // TERMINAL, so the queue stops. Not because we know the voucher is absent —
+      // we do not — but because an export that omits a voucher is weaker evidence
+      // than one that lists it, and the cost of being wrong is a duplicated sale.
+      expect(err.retryable).toBe(false);
+      expect(err.providerRefused).toBe(true);
+      expect(err.message).toContain(payload.voucherNumber);
+      expect(err.message).toMatch(/not been sent again/i);
+      expect(err.message).toMatch(/not proof/i);
+      expect(err.message).toMatch(/Retry/);
+    } finally {
+      await tally.close();
+    }
+  });
+
+  it('keeps the plain automatic retry when the request never reached Tally at all', async () => {
+    // The counterweight, and the reason this is not just "make every Tally blip a
+    // manual job". A refused connection means Tally read no bytes, so nothing was
+    // applied and there is nothing to look up: the queue should recover from a
+    // back-office PC that was rebooting without anybody being told.
+    const closed = await fakeTally(() => IMPORT_OK);
+    const deadPort = closed.port;
+    await closed.close();
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    try {
+      const err = await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: '127.0.0.1', port: deadPort },
+        config: tallyConfig,
+      }).catch((e) => e);
+
+      expect(err.code).toBe('ECONNREFUSED');
+      expect(err.retryable).toBe(true);
+      expect(err.providerRefused).toBe(false);
+      // One attempt, and no Day Book lookup: asking would cost a round trip to
+      // learn nothing, and would have failed the same way.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not look anything up when Tally answers normally', async () => {
+    // The positive control. If the recovery path ran on every send, the tests
+    // above would pass while the happy path did twice the work and the
+    // acknowledgement being read would prove nothing.
+    const tally = await fakeTally(() => IMPORT_OK);
+    try {
+      const result = await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: '127.0.0.1', port: tally.port },
+        config: tallyConfig,
+      });
+      expect(result.detail.created).toBe(1);
+      expect(result.detail.recoveredFromLostAcknowledgement).toBeUndefined();
+      expect(tally.requests).toHaveLength(1);
+      expect(tally.requests[0].isDayBook).toBe(false);
+    } finally {
+      await tally.close();
+    }
+  });
+
+  it('does not look up a voucher Tally has explicitly rejected', async () => {
+    // A rejection is an ANSWER. Nothing was applied, so there is nothing to
+    // confirm, and Tally's own wording is what the operator needs to see.
+    const tally = await fakeTally(() =>
+      '<ENVELOPE><BODY><DATA><IMPORTRESULT><CREATED>0</CREATED><ERRORS>1</ERRORS>' +
+      '<LINEERROR>Ledger &apos;Sales - Dine In&apos; does not exist</LINEERROR>' +
+      '</IMPORTRESULT></DATA></BODY></ENVELOPE>');
+    try {
+      const err = await tallyAdapter.perform({
+        kind: 'TALLY_SALES',
+        payload: salesVoucherPayload(),
+        credential: { host: '127.0.0.1', port: tally.port },
+        config: tallyConfig,
+      }).catch((e) => e);
+      expect(err.message).toContain('does not exist');
+      expect(tally.requests.filter((r) => r.isDayBook)).toHaveLength(0);
+    } finally {
+      await tally.close();
+    }
+  });
+
+  it('reads a voucher number together with its own voucher, not a neighbour’s', async () => {
+    const { findVoucherInExport } = await import('../src/lib/integrations/adapters/tally.js');
+    const raw = dayBookWith(
+      { number: 'INV-1', masterId: '111' },
+      { number: 'INV-2', masterId: '222' },
+      { number: 'INV-3', masterId: '333' },
+    );
+    // The reason the parser splits on voucher boundaries first. A flat regex over
+    // the whole document finds INV-2 and then the FIRST master id in the file, and
+    // would have written 111 against INV-2 — a wrong Tally handle is worse than no
+    // handle, because a later amendment would target somebody else's voucher.
+    expect(findVoucherInExport(raw, 'INV-2')).toMatchObject({ found: true, masterId: '222' });
+    expect(findVoucherInExport(raw, 'INV-3')).toMatchObject({ found: true, masterId: '333' });
+
+    // Absent, and not confused by a number that merely contains ours.
+    expect(findVoucherInExport(raw, 'INV-9').found).toBe(false);
+    expect(findVoucherInExport(dayBookWith({ number: 'INV-10' }), 'INV-1').found).toBe(false);
+    expect(findVoucherInExport('', 'INV-1').found).toBe(false);
+    expect(findVoucherInExport(raw, '').found).toBe(false);
+  });
 });
 
 // --- inbound callbacks -------------------------------------------------------
@@ -758,6 +1277,160 @@ describe('duplicate and out-of-order callbacks', () => {
     });
     expect(agg.state).toBe('CANCELLED');
     expect(agg.cancelReason).toBe('customer changed their mind');
+  });
+
+  // --- a state change that overtakes its own placement -------------------------
+  //
+  // Everything above this line is about ONE event arriving twice, and a unique
+  // index settles it. These are about TWO DIFFERENT events arriving in the wrong
+  // order, which no uniqueness constraint can see: both are genuine, both are
+  // new, and the damage is done by acting on the second as though the first had
+  // never happened. Uniqueness on the event id proves neither of the next four
+  // things.
+
+  it('records a cancellation that arrives before the order it cancels', async () => {
+    const id = `zo-early-cancel-${++evtSeq}`;
+    const res = await deliver(connId, stateChange(id, 'CANCELLED', {
+      providerSequence: 4, cancelReason: 'customer cancelled before we heard of the order',
+    }));
+    expect(res.status).toBe(200);
+    // Processed, not held. Holding is the honest description of the ordering but
+    // the wrong outcome: it leaves a real cancellation depending on a retry the
+    // provider has no reason to send.
+    expect(res.body.processed).toBe(true);
+
+    const agg = await prisma.aggregatorOrder.findUnique({
+      where: { connectionId_externalOrderId: { connectionId: connId, externalOrderId: id } },
+    });
+    expect(agg).toBeTruthy();
+    expect(agg.state).toBe('CANCELLED');
+    expect(agg.cancelReason).toBe('customer cancelled before we heard of the order');
+    // The point of the column. This row records a state, not an order anybody
+    // has sent us, and placedAt stays null because the provider never said when
+    // the order was placed — inventing a time would put a fiction on the one row
+    // that exists to say we have not seen it.
+    expect(agg.placementReceivedAt).toBeNull();
+    expect(agg.placedAt).toBeNull();
+    expect(agg.orderId).toBeNull();
+    expect(await prisma.order.count({ where: { companyId: company.id, externalOrderId: id } })).toBe(0);
+  });
+
+  it('sends nothing to the kitchen when the placement arrives after the provider cancelled it', async () => {
+    const id = `zo-late-place-${++evtSeq}`;
+    const early = await deliver(connId, stateChange(id, 'CANCELLED', {
+      providerSequence: 4, cancelReason: 'rider never assigned',
+    }));
+    expect(early.body.processed).toBe(true);
+
+    const late = await deliver(connId, placement({ externalOrderId: id, providerSequence: 1 }));
+    expect(late.status).toBe(200);
+    // 200 and processed. The delivery was genuine and there is nothing left to
+    // do with it, so answering anything else buys an endless redelivery of an
+    // order that must never be cooked.
+    expect(late.body.processed).toBe(true);
+
+    const agg = await prisma.aggregatorOrder.findUnique({
+      where: { connectionId_externalOrderId: { connectionId: connId, externalOrderId: id } },
+    });
+    // The cancellation stands, and the placement filled in the details it
+    // carried so there is something for a person to look at.
+    expect(agg.state).toBe('CANCELLED');
+    expect(agg.cancelReason).toBe('rider never assigned');
+    expect(agg.placementReceivedAt).toBeTruthy();
+    expect(agg.placedAt).toBeTruthy();
+    expect(String(agg.grossAmount)).toBe('400');
+
+    // The three things this whole mechanism exists to prevent.
+    expect(agg.orderId).toBeNull();
+    expect(await prisma.order.count({ where: { companyId: company.id, externalOrderId: id } })).toBe(0);
+    expect(await prisma.kot.count({ where: { order: { externalOrderId: id } } })).toBe(0);
+
+    const rows = await request(app).get('/api/integrations/ZOMATO/discrepancies?state=OPEN')
+      .set(auth(tokens.owner));
+    const d = rows.body.discrepancies.find((x) => x.externalRef === id && x.kind === 'TERMINAL_BEFORE_PLACEMENT');
+    // Checked by its CAUSE, not merely by its existence: this row is the only
+    // place the operator learns that the platform and the restaurant disagree
+    // about an order that was never made.
+    expect(d).toBeTruthy();
+    expect(d.detail.state).toBe('CANCELLED');
+    expect(d.detail.note).toMatch(/No POS order, kitchen ticket or stock movement was created/);
+  });
+
+  it('still makes the order when the state that arrived first was not terminal', async () => {
+    // The positive control for the two tests above, and the reason they are not
+    // just proving that we drop late placements. The gate is on TERMINAL states.
+    // An ACCEPTED that overtook its own placement is an order the restaurant is
+    // expected to cook, and it must end with exactly one kitchen ticket.
+    const id = `zo-early-accept-${++evtSeq}`;
+    const early = await deliver(connId, stateChange(id, 'ACCEPTED', { providerSequence: 4 }));
+    expect(early.body.processed).toBe(true);
+    const shell = await prisma.aggregatorOrder.findUnique({
+      where: { connectionId_externalOrderId: { connectionId: connId, externalOrderId: id } },
+    });
+    expect(shell.placementReceivedAt).toBeNull();
+    expect(shell.orderId).toBeNull();
+
+    const late = await deliver(connId, placement({ externalOrderId: id, providerSequence: 1 }));
+    expect(late.body.processed).toBe(true);
+
+    const agg = await prisma.aggregatorOrder.findUnique({
+      where: { connectionId_externalOrderId: { connectionId: connId, externalOrderId: id } },
+    });
+    expect(agg.orderId).toBeTruthy();
+    expect(agg.placementReceivedAt).toBeTruthy();
+    // Not rewound to RECEIVED. The placement is older news than the acceptance,
+    // and materialising must not undo a state the provider has already reported.
+    expect(agg.state).toBe('ACCEPTED');
+    expect(await prisma.kot.count({ where: { orderId: agg.orderId } })).toBe(1);
+    expect(await prisma.order.count({ where: { companyId: company.id, externalOrderId: id } })).toBe(1);
+
+    // And the order carries on from there rather than being stuck: the next
+    // state change lands on a materialised row.
+    const ready = await deliver(connId, stateChange(id, 'READY', { providerSequence: 5 }));
+    expect(ready.body.processed).toBe(true);
+    const done = await prisma.aggregatorOrder.findUnique({ where: { id: agg.id } });
+    expect(done.state).toBe('READY');
+    expect(done.orderId).toBe(agg.orderId);
+  });
+
+  it('does not let a slower event overwrite a state the order has already moved past', async () => {
+    // applyState reads the row, decides the transition is permitted, then writes.
+    // Between the decision and the write another process can move the row, and
+    // the decision was made against a state that no longer exists. Ordering
+    // metadata does not help here — both events are in order relative to the
+    // snapshot each one read. The compare-and-set in the UPDATE is what settles
+    // it, and this is the only way to make both decisions race.
+    const envelope = placement();
+    await deliver(connId, envelope);
+    const id = envelope.externalOrderId;
+    const snapshot = await prisma.aggregatorOrder.findUnique({
+      where: { connectionId_externalOrderId: { connectionId: connId, externalOrderId: id } },
+    });
+    expect(snapshot.state).toBe('RECEIVED');
+
+    const at = new Date();
+    const first = await applyState(prisma, {
+      aggOrder: snapshot,
+      state: 'ACCEPTED',
+      envelope: { providerSequence: 2, providerEventAt: at },
+    });
+    const second = await applyState(prisma, {
+      aggOrder: snapshot,
+      state: 'CANCELLED',
+      envelope: { providerSequence: 3, providerEventAt: at, cancelReason: 'lost the race' },
+    });
+
+    expect(first.applied).toBe(true);
+    expect(second.applied).toBe(false);
+    // By its reason. A refusal for the wrong cause — a stale sequence, a
+    // forbidden transition — would pass this assertion while the compare-and-set
+    // was missing entirely.
+    expect(second.reason).toMatch(/moved out of RECEIVED while this event was being applied/);
+
+    const after = await prisma.aggregatorOrder.findUnique({ where: { id: snapshot.id } });
+    expect(after.state).toBe('ACCEPTED');
+    expect(after.cancelReason).toBeNull();
+    expect(after.cancelledAt).toBeNull();
   });
 
   it('records a discrepancy when an order is cancelled after it reached the kitchen', async () => {
@@ -2142,6 +2815,49 @@ describe('historical loyalty import', () => {
     // Still R-90: the provider identity the import established is the one the till
     // uses, which is the entire point of having imported it.
     expect(links[0].externalCustomerId).toBe('R-90');
+  });
+
+  it('shows an imported customer’s balance as unknown, never as zero, when nobody can say what it is', async () => {
+    // The case the real migration turns on. The client's export may not carry a
+    // points column at all, or may carry it blank for some customers, and Reelo
+    // may be unreachable at the moment a cashier asks. Displaying 0 there tells
+    // the cashier this customer has earned nothing — so a person with a real
+    // balance is refused a redemption they are entitled to, and the migration has
+    // materially harmed the client's own customer. "We do not know" is the only
+    // honest answer and it must survive all the way to the till.
+    const file = csv(['R-91,9000009002,Blank Balance Person,,SILVER']);
+    const imported = await post({ csv: file, dryRun: false, confirm: 'IMPORT CUSTOMERS' });
+    expect(imported.status, JSON.stringify(imported.body)).toBe(200);
+
+    const link = await prisma.loyaltyProfileLink.findFirst({
+      where: { connectionId: connId, externalCustomerId: 'R-91' },
+    });
+    // Null in the cache, not 0. An import that defaulted the column would make
+    // every unknown balance indistinguishable from a genuine empty one, and no
+    // later lookup could tell them apart.
+    expect(link).toBeTruthy();
+    expect(link.lastKnownBalance).toBeNull();
+
+    // And the provider cannot be reached, so there is no live figure either.
+    testControl.reset();
+    testControl.failNextWith('UNKNOWN', 'Reelo did not answer');
+    const res = await request(app).post('/api/loyalty/lookup').set(auth(tokens.cashier)).send({ phone: '9000009002' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    // Known as a person, unknown as a balance. Those are separate facts and the
+    // till is told both.
+    expect(res.body.known).toBe(true);
+    expect(res.body.balance.points).toBeNull();
+    expect(res.body.balance.source).toBe('UNKNOWN');
+    expect(res.body.balance.points).not.toBe(0);
+
+    // The positive control, and the reason the assertion above is not simply
+    // proving that this endpoint always answers UNKNOWN: the same customer, once
+    // Reelo answers, reads the real figure.
+    testControl.reset();
+    testControl.setBalance('9000009002', 5000);
+    const live = await request(app).post('/api/loyalty/lookup').set(auth(tokens.cashier)).send({ phone: '9000009002' });
+    expect(live.body.balance.points).toBe(5000);
+    expect(live.body.balance.source).toBe('PROVIDER');
   });
 });
 
