@@ -5,6 +5,54 @@ command run in this session against the live host `atc-noc`. Where a claim from
 the supplied handoff could not be reproduced, the handoff is corrected here and
 the correcting command is named.
 
+## Certification status: INCONCLUSIVE
+
+> Added by **window-5** at 2026-09-25 20:40Z, at the owner's instruction, without
+> altering window-1's analysis below. Four points, each verified independently
+> against the preserved log.
+
+**The 19:43Z run does not certify `cf9c4a0` — in either direction.** It is a
+genuine and useful measurement, and the analysis below stands, but it cannot be
+cited as the gate.
+
+1. **153 tests never executed, so no count from this run can read as green.**
+   `gateway.test.js` (76) and `phoneOrders.test.js` (77) lost their `beforeAll` to
+   the 30 s `hookTimeout` at 35,952 ms and 60,027 ms. Confirmed not authored
+   skips: neither file contains `skipIf`, `runIf`, `describe.skip`, `it.skip` or
+   `test.skip`. The whole Razorpay and phone-orders money path is unmeasured here
+   while the summary still reads `46 passed`.
+
+2. **"Four of the five are the clock" is not yet established.** Item #5 is
+   independently attributable to code — it failed in 110 ms on a value mismatch.
+   Items #1–#4 are wall-clock expiries under measured external load, which is a
+   strong hypothesis and not a finding: no quiet comparison run exists. They stay
+   open as observations. If a quiet run reproduces any of them, the cause gets
+   fixed — not the ceiling raised, not the test skipped.
+
+3. **The quiet run that was meant to settle this never started.** The gate at
+   `/tmp/clean-cert-run.sh` (sid 1165194) waited 11.5 min for zero foreign vitest
+   processes, never saw zero, and was gone by 20:33Z — no `BOX QUIET` line and no
+   `/tmp/clean-cert-cf9c4a0.log`. Recorded as `verdict: ABORTED` in
+   `/tmp/clean-cert-cf9c4a0.witness`. Zero-foreign is unreachable on this box;
+   ~24 sessions launch short targeted runs continuously, and fresh suites started
+   at 20:20, 20:22 and 20:30Z despite the stand-down.
+
+4. **The next run must pin `bb18b1c` or later, not `cf9c4a0`.** `02ee253` is the
+   fix for item #5. Certifying `cf9c4a0` would reproduce that failure on a
+   perfectly quiet box, because item #5 is real.
+
+One correction to the figures: the log carries **six** `[test-db-lock] reconnected`
+events, at lines 85, 89, 97, 195, 237 and 390 — not four, as
+`~/vexo-connect-x-tools/SUITE-STANDDOWN.md` states. Each says "no other run held
+the key", so correctness was never at risk; they measure connection pressure on
+`:5440`.
+
+The log has been preserved out of volatile `/tmp` at
+`~/vexo-connect-x-evidence/integration/20260925-1943Z-contended-run.log`
+(md5 `901074e8b0b5cd608910909564ce3da9`), alongside the as-run scripts, the
+aborted gate's witness, and a per-failure classification in
+`OBSERVATIONS-20260925.md`.
+
 ## What this candidate is
 
 | | |
