@@ -112,13 +112,36 @@ const FAMILIES = [
   },
 ];
 
+// Reconciled when the reporting and providers lanes met on main. Reporting was
+// written against an IntegrationConnection carrying a `kind`; the providers lane
+// landed the model with a `provider` enum and `lastSuccessfulSyncAt` instead.
+// Neither side is wrong — a report family asks "is anything of this KIND
+// connected?", and the connection itself only knows which provider it is — so the
+// mapping lives here rather than in either lane's model.
+const PROVIDERS_FOR_KIND = {
+  LOYALTY: ['REELO'],
+  AGGREGATOR: ['SWIGGY', 'ZOMATO'],
+  ACCOUNTING: ['TALLY'],
+};
+
 const connectionState = async (companyId, kind) => {
   if (!prisma?.integrationConnection) return null;
+  const providers = PROVIDERS_FOR_KIND[kind];
+  // An unmapped kind is a reporting family naming a provider class this build
+  // has no integration for. That is UNAVAILABLE territory, not an empty list.
+  if (!providers) return null;
   const rows = await prisma.integrationConnection.findMany({
-    where: { companyId, kind },
-    select: { id: true, provider: true, status: true, lastSyncAt: true, lastError: true },
+    where: { companyId, provider: { in: providers } },
+    select: {
+      id: true,
+      provider: true,
+      status: true,
+      lastSuccessfulSyncAt: true,
+      lastError: true,
+    },
   });
-  return rows;
+  // The callers below, and the API payload, speak `lastSyncAt`; keep that name.
+  return rows.map((r) => ({ ...r, lastSyncAt: r.lastSuccessfulSyncAt ?? null }));
 };
 
 /**

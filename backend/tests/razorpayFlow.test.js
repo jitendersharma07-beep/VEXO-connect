@@ -1117,6 +1117,10 @@ describe('which gateway charge a refund posts against, when two are tied', () =>
       return prisma.payment.create({
         data: {
           orderId: order.id, branchId, method: 'UPI', channel: 'GATEWAY',
+          // Payment_channel_entry_source (payments lane): a GATEWAY payment must say
+          // who established it. This leg has a SUCCEEDED intent and a pay_ reference,
+          // so the provider confirmed it.
+          entrySource: 'PROVIDER_CONFIRMED',
           amount: (half / 100).toFixed(2), intentId: intent.id, providerRef: payRef,
         },
       });
