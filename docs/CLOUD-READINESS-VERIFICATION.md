@@ -1076,11 +1076,175 @@ both errors:
   by the `x/accounts` and inventory sessions are theirs, measured on their
   trees, and are not merged into this figure.
 
+## Close-out measurements — 2026-09-25T07:40–07:58Z, at `ef567c6`
+
+### The account question: there is no lockout, and there is no lockout *mechanism*
+
+Asked to distinguish a disabled/locked account from rejected credentials, rate
+limiting and connectivity failure. All four are separable here, and three of
+them are ruled out by construction rather than by observation.
+
+**A locked state does not exist in this schema.** `PosUserStatus` has exactly
+two values:
+
+```
+$ psql -c "SELECT unnest(enum_range(NULL::\"PosUserStatus\"));"
+ ACTIVE
+ DISABLED
+```
+
+`PosUser` carries **no** `failedLoginAttempts`, `lockedUntil` or `lockedAt`
+column — the full column list is id, companyId, branchId, email, fullName,
+passwordHash, role, status, mustChangePassword, lastLoginAt, createdAt,
+updatedAt, regionId, emailVerifiedAt, pendingEmail. So no sequence of failed
+logins can ever change an account's state. This is worth stating positively:
+the reason the owner account is not locked out is not that it escaped a
+lockout, it is that **nothing in this product can lock an account out.**
+
+**All 11 accounts read `ACTIVE`**, none `DISABLED`, including
+`ai.atcinfo@gmail.com` (`POS_SUPER_ADMIN`, `mustChangePassword = false`).
+
+**Every login refusal in the entire history was a credential refusal.** The API
+deliberately returns one indistinct `401 Invalid email or password` for unknown
+email, wrong password, disabled user and suspended company (`auth.js:78-89`), so
+the HTTP response cannot answer this question — but it records the true reason
+in `PosAuditLog.meta.reason`:
+
+| reason | count |
+|---|---|
+| `unknown-email` | 7 |
+| `bad-password` | 3 |
+| `user-disabled` | **0** |
+| `no-company` / `company-*` | **0** |
+
+Itemised, because 10 rows is small enough to read rather than summarise:
+
+- **6 of the 7** `unknown-email` rows are `assert@invalid.test` — the deliberate
+  negative control inside `deploy/staging-assert.sh`, not a failure. The 7th is
+  `nobody@example.invalid`, the same idea from an earlier probe.
+- **3** `bad-password`: `owner.alpha@cr-staging.example` twice (09-24 17:59,
+  18:09) and `ai.atcinfo@gmail.com` once (09-24 17:56:37).
+- The owner's single mistyped password at 17:56:37 was followed by a **successful
+  login at 18:12:31** the same evening. A wrong password, then a right one.
+
+**Rate limiting was never reached, and is not an account property anyway.**
+`loginLimiter` is `express-rate-limit`, 10 per 15 min **per IP**, with
+`skipSuccessfulRequests: true`, answering `429 POS_RATE_LIMITED` — a status never
+observed in any log here. It is in-memory and per-process, so it evaporates on
+restart and is scoped to a client address, never to a user.
+
+**Connectivity failure is excluded** by the traffic itself: requests arrive and
+are answered, `/api/health` → 200, and there are **4 live sessions** right now.
+
+**The positive control — login demonstrably works, in a browser, with `Origin`.**
+`owner.alpha@cr-staging.example`, an authorised staging test account, has
+`lastLoginAt = 2026-09-25 07:49:10.987`, matching a `POST /api/auth/login` →
+**200** in `api.log` at 07:49:11 from HeadlessChrome carrying
+`origin: http://127.0.0.1:8120`, followed by 200s on `/api/permissions/me`,
+`/api/dashboard/summary`, `/api/branches` and `/api/regions`. An earlier success
+at 07:47:50 likewise. **This is a peer session's harness, not my run** — I am
+reading its trace, not claiming it. It is recorded because a curl probe could
+not have produced it: curl sends no `Origin`, and the missing header is waved
+through, so only a real browser closes this.
+
+No password was guessed, and no account was reset, unlocked or modified. Every
+check above is a read.
+
+### SMTP: the timeout does not reproduce — the connection layer is healthy
+
+The open item said "unresolved SMTP port timeouts" and recorded a disagreement
+with the `x/accounts` session, who reported TLS validating. **They were right
+and my measurement was transient.** Re-measured 07:55Z:
+
+| Probe | Result |
+|---|---|
+| `mail.vexoconnect.com` A | `103.168.211.147` |
+| `vexoconnect.com` MX | `0 mail.vexoconnect.com` |
+| TCP 587 / 465 / 25 | **all OPEN** — 276 ms, 10 ms, 10 ms (previously 8 s timeouts) |
+| Controls: `smtp.gmail.com` 587/465, `1.1.1.1:443` | OPEN — so no outbound egress filter on this host |
+| STARTTLS on 587 | **TLSv1.3**, `TLS_AES_256_GCM_SHA384`, **`Verification: OK`** |
+| Certificate | Let's Encrypt, `CN=www.vexoconnect.com`, valid 2026-09-24 → 2026-12-23 |
+| SANs | `vexoconnect.com`, `mail.vexoconnect.com`, `cpanel.vexoconnect.com`, `webmail.vexoconnect.com`, `ftp.vexoconnect.com`, `www.` |
+| AUTH offered after STARTTLS | `250-AUTH PLAIN LOGIN` |
+
+So **everything up to authentication is proven working**, which is the layer the
+brief asked to settle first. The cert genuinely covers `mail.vexoconnect.com`
+via SAN, so `SMTP_SECURITY=tls` on 465 or `starttls` on 587 will both validate.
+
+Two things worth carrying forward:
+
+- **The banner is `220 ns1.atcinfocom.in ESMTP Postfix`**, not a vexoconnect
+  name and not Exim. The `cpanel.` and `webmail.` SANs confirm it *is* a cPanel
+  box, so this is ordinary shared hosting whose system hostname belongs to the
+  estate's other domain — no contradiction with the owner's "cPanel" answer. But
+  the HELO name a receiving server sees is `ns1.atcinfocom.in`, which is what the
+  FCrDNS finding is about, and it is an alignment question for deliverability
+  rather than a connection fault.
+- **A healthy connection is not delivery.** SPF and PTR do not prove delivery and
+  neither does a TLS handshake. What remains untested is authentication and an
+  accepted message, and both need the mailbox password.
+
+**Dependency, stated exactly:** the only missing input is the password for
+`admin@vexoconnect.com`. It must not be typed into chat. Run
+`bash /home/atc-noc/vcx-cloudready-local/set-staging-smtp.sh`, which reads it
+with `read -rs`, writes mode-600 `.secret-mail` and prints key *names* only.
+
+### `staging.vexoconnect.com` does not resolve — so `APP_URL` stays on loopback
+
+```
+$ dig +short staging.vexoconnect.com A
+(no answer)
+```
+
+The A record from `evidence/02b-…` Step 1 has not been created, so the approved
+public hostname cannot be used for `APP_URL` yet, and TLS, routing and generated
+action links cannot be verified against it. `APP_URL` remains
+`http://127.0.0.1:8120`, confirmed live by `staging-assert.sh`. The apex
+`vexoconnect.com` → `160.19.41.196` was **not** touched and must not be
+repointed; the change is a new sub-domain record only.
+
+### Which code the running process loaded — settled on content, not timestamps
+
+File mtimes are not sufficient, and this no longer rests on them. Three
+independent lines:
+
+1. **The kernel says which tree.** `/proc/2257874/cwd` →
+   `/home/atc-noc/vexo-connect-x-lanes/cloud-readiness/backend`, `cmdline` =
+   `node src/index.js`. Not a filesystem stat — a live property of the process.
+2. **Every candidate revision is byte-identical in `backend/src`.** This is the
+   argument that removes the question rather than answering it:
+
+   ```
+   $ for c in b6462a8 3fbc35a 97457ee 856e179 fdaccdf 6eed775 ccde375 ef567c6; do
+         git rev-parse $c:backend/src; done
+   631eb3135e10fc06aad1b148c530e66daf05cdff   (×8, identical)
+   $ git diff --quiet HEAD -- backend/src   → clean
+   ```
+
+   Whichever revision was checked out at 04:02:44, `backend/src` was the same
+   bytes as the reviewed `ef567c6`. "Which commit did it load" has no observable
+   answer because there is nothing to distinguish.
+3. **The running process behaves as the reviewed code does.** `staging-assert.sh
+   --live`, run here at 07:57Z: **14/14 PASS**, including `login POST with
+   Origin: http://127.0.0.1:8120 reached the handler (HTTP 401)` — a 500 there
+   is the CORS defect, and it is absent from the live process.
+
+**The verification gap, recorded rather than glossed.** None of this excludes an
+**uncommitted edit that was present at 04:02:44 and reverted before now**. Such
+an edit would leave no trace in git and none in the current tree. Only a restart
+closes it, and a restart is not available to this session — `vcxcr down` was
+refused, and separately `web.pid` points at a dead process so `down` would not
+stop the SPA anyway. The gap is narrow and it is real: **the claim is that the
+loaded source is identical to reviewed source, on the assumption the tree was
+clean at load time, which is evidenced but not proven.**
+
 ### Verdict — unchanged
 
 **NOT READY for owner acceptance.** The three blockers stand. Two of them now
 have a named target, a written procedure and a rollback plan instead of an open
-question, which is progress in preparation and not in status.
+question, which is progress in preparation and not in status. The SMTP
+connection layer moved from "unresolved timeout" to "proven healthy", which
+narrows blocker 2 to a single missing credential without closing it.
 
 Nothing in this section is evidence that the product is complete. A backend test
 count cannot establish that, and this section adds no test count at all.
