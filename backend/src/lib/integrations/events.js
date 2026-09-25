@@ -143,7 +143,8 @@ export const isStale = (existing, { providerSequence, providerEventAt }) => {
 // already cancelled must not un-cancel it, and no sequence number is going to
 // make that the right thing to do — so this is enforced on the state machine
 // and not only on the ordering.
-const TERMINAL = new Set(['DELIVERED', 'CANCELLED', 'REJECTED']);
+export const TERMINAL_STATES = new Set(['DELIVERED', 'CANCELLED', 'REJECTED']);
+const TERMINAL = TERMINAL_STATES;
 
 // Which transitions an inbound event may make. Deliberately permissive forward
 // (aggregators skip states — a picked-up callback can arrive with no ready

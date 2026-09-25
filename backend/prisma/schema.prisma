@@ -2614,6 +2614,14 @@ model AggregatorOrder {
   // diagnosed against what actually arrived rather than against a guess.
   normalised Json
 
+  // Null means: a state change for this provider order arrived BEFORE its
+  // placement did, and this row records that state rather than an order we have
+  // actually seen. It exists because dropping such an event loses a cancellation
+  // — the placement then turns up later and the kitchen cooks an order the
+  // provider had already killed. Set when the placement arrives, and it is the
+  // gate on materialising an Order and a kitchen ticket.
+  placementReceivedAt DateTime?
+
   placedAt     DateTime?
   acceptedAt   DateTime?
   rejectedAt   DateTime?

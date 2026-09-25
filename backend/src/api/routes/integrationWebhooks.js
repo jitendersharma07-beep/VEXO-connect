@@ -35,12 +35,14 @@ import {
   markProcessed,
   markSkipped,
   markFailed,
+  TERMINAL_STATES,
 } from '../../lib/integrations/events.js';
 import {
   resolveOutlet,
   upsertAggregatorOrder,
   materialise,
   applyState,
+  recordStateBeforePlacement,
 } from '../../lib/integrations/aggregatorOrders.js';
 
 const router = express.Router();
@@ -199,6 +201,38 @@ const handlePlacement = async ({ connection, envelope }) => {
     return { processed: true, reason: null };
   }
 
+  // THE ORDERING GATE. The provider has already told us this order is finished,
+  // in an event that arrived before the placement it refers to. Materialising now
+  // would put a kitchen ticket on the rail for food nobody is coming to collect,
+  // and a sale in the books for an order that was cancelled. Event-id uniqueness
+  // cannot catch this: both events are genuine and distinct, they simply arrived
+  // in the wrong order.
+  //
+  // So: no Order, no KOT, no stock movement. A discrepancy instead, because an
+  // order that was cancelled before we saw it is something the operator should
+  // know happened rather than something to silently discard.
+  if (TERMINAL_STATES.has(aggOrder.state)) {
+    await prisma.integrationDiscrepancy.create({
+      data: {
+        companyId: connection.companyId,
+        connectionId: connection.id,
+        kind: 'TERMINAL_BEFORE_PLACEMENT',
+        externalRef: envelope.externalOrderId,
+        detail: {
+          state: aggOrder.state,
+          cancelReason: aggOrder.cancelReason ?? null,
+          note:
+            `The provider reported this order as ${aggOrder.state} before it delivered the order itself. ` +
+            'No POS order, kitchen ticket or stock movement was created. The order details are recorded for reference only.',
+        },
+      },
+    });
+    return {
+      processed: true,
+      reason: `the provider had already reported this order ${aggOrder.state} before sending it; nothing was sent to the kitchen`,
+    };
+  }
+
   // Which user the POS order is attributed to. An aggregator order has no
   // cashier, and putting whoever is on shift on it would place a sale in the
   // name of someone who never touched it. Configured as a dedicated service
@@ -272,11 +306,47 @@ const handleStateChange = async ({ connection, envelope }) => {
     },
   });
 
-  // A state change for an order we never received. Held rather than invented:
-  // creating a shell order from a "cancelled" callback would put a cancellation
-  // on the books for a sale that, as far as this POS knows, never happened.
+  // A state change for an order we have never seen. This is the out-of-order
+  // case, and it used to be dropped — which quietly lost the one event we most
+  // need to keep. A cancellation that overtakes its own placement, dropped, means
+  // the placement arrives later and the kitchen cooks an order the provider had
+  // already killed. So the state is RECORDED against the provider's order id,
+  // with placementReceivedAt null to say plainly that no order has been seen.
+  //
+  // It is not an invented order: it has no Order, no kitchen ticket and no money
+  // on it. It is a note that outranks the placement when the placement arrives.
   if (!aggOrder) {
-    return { processed: false, reason: 'no order with this provider id has been received' };
+    if (!envelope.state) {
+      return { processed: false, reason: `unrecognised provider state "${envelope.rawState ?? ''}"` };
+    }
+    try {
+      await recordStateBeforePlacement(prisma, {
+        companyId: connection.companyId,
+        connectionId: connection.id,
+        provider: connection.provider,
+        envelope,
+        state: envelope.state,
+      });
+    } catch (err) {
+      // P2002: the placement landed in the gap between the read and this write.
+      // The row now exists, so the ordinary path is the right one — handled by
+      // the provider's own retry rather than by racing it here.
+      if (err?.code !== 'P2002') throw err;
+      return { processed: false, reason: 'the placement arrived while this event was being recorded; retry it' };
+    }
+    return {
+      processed: true,
+      reason: `recorded ${envelope.state} for an order whose placement has not arrived yet`,
+    };
+  }
+
+  // The placement still has not arrived, so there is nothing to advance and no
+  // kitchen ticket to affect. Record the later state on the shell and stop.
+  if (!aggOrder.placementReceivedAt) {
+    const applied = await applyState(prisma, { aggOrder, state: envelope.state, envelope });
+    return applied.applied
+      ? { processed: true, reason: 'the placement for this order has still not arrived' }
+      : { processed: false, reason: applied.reason };
   }
 
   const applied = await applyState(prisma, { aggOrder, state: envelope.state, envelope });

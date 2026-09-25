@@ -85,15 +85,74 @@ export const upsertAggregatorOrder = async (client, { companyId, connectionId, p
 
   return client.aggregatorOrder.upsert({
     where: { connectionId_externalOrderId: { connectionId, externalOrderId: envelope.externalOrderId } },
-    create: { companyId, connectionId, externalOrderId: envelope.externalOrderId, ...base },
+    create: {
+      companyId,
+      connectionId,
+      externalOrderId: envelope.externalOrderId,
+      // This IS the placement, so the row is a real order from the moment it is
+      // written. The only rows with a null here are the shells created by a state
+      // change that overtook its own placement.
+      placementReceivedAt: new Date(),
+      ...base,
+    },
     // On a repeat, the identity fields are NOT rewritten and neither is `state`
     // — state is only ever moved by applyState() through the state machine. An
     // upsert that reset state would let a redelivered "placed" un-cancel an
     // order, which is the exact bug the state machine exists to stop.
+    //
+    // The money and payment columns ARE filled in here, because the row being
+    // updated may be a shell written from a cancellation that carried none of
+    // them. They are only ever written from a placement, so a later state change
+    // cannot overwrite the provider's arithmetic.
     update: {
       outletId: base.outletId,
       branchId: base.branchId,
       normalised: base.normalised,
+      placementReceivedAt: new Date(),
+      externalOrderDisplayId: base.externalOrderDisplayId,
+      grossAmount: base.grossAmount,
+      providerDiscountAmount: base.providerDiscountAmount,
+      restaurantDiscountAmount: base.restaurantDiscountAmount,
+      commissionAmount: base.commissionAmount,
+      taxAmount: base.taxAmount,
+      deliveryFeeAmount: base.deliveryFeeAmount,
+      packagingFeeAmount: base.packagingFeeAmount,
+      netPayoutAmount: base.netPayoutAmount,
+      paymentMode: base.paymentMode,
+      placedAt: base.placedAt,
+    },
+  });
+};
+
+// A state change that arrived before the order it refers to. Recorded rather than
+// dropped, because the event we are most likely to see early is a CANCELLATION,
+// and dropping a cancellation is how a kitchen ends up cooking an order the
+// provider already killed.
+//
+// The row created here is deliberately NOT a normal order: placementReceivedAt is
+// null, `normalised` holds the state event rather than an order, and there is no
+// Order or kitchen ticket behind it. It is a note saying "the provider has told us
+// this order is CANCELLED; we have never seen the order itself".
+export const recordStateBeforePlacement = async (
+  client,
+  { companyId, connectionId, provider, envelope, state },
+) => {
+  const stamp = STATE_STAMP[state];
+  const at = envelope.providerEventAt ?? new Date();
+  return client.aggregatorOrder.create({
+    data: {
+      companyId,
+      connectionId,
+      provider,
+      externalOrderId: envelope.externalOrderId,
+      externalOrderDisplayId: envelope.externalOrderDisplayId ?? null,
+      state,
+      placementReceivedAt: null,
+      normalised: { awaitingPlacement: true, arrivedOutOfOrder: true, event: envelope },
+      ...(stamp ? { [stamp]: at } : {}),
+      ...(state === 'CANCELLED' && envelope.cancelReason ? { cancelReason: envelope.cancelReason } : {}),
+      lastSequence: envelope.providerSequence ?? null,
+      lastEventAt: at,
     },
   });
 };
@@ -253,6 +312,14 @@ export const materialise = async (tx, { companyId, connection, aggOrder, envelop
 // terminal state, and refuses an event the order has already seen — each for a
 // different reason, and each reported distinctly so a support conversation can
 // tell "we ignored a duplicate" from "we ignored a contradiction".
+//
+// The write is a COMPARE-AND-SET against the state that was checked, not a plain
+// update. Checking `canTransition` and then updating unconditionally is safe only
+// when one event is in flight: two DISTINCT events delivered at the same instant
+// both read RECEIVED, both pass the check against it, and both write — so whichever
+// finishes last wins, and a CANCELLED can be overwritten by a READY. The guarded
+// updateMany makes the loser see zero rows changed and report a lost race rather
+// than silently applying a superseded state.
 export const applyState = async (client, { aggOrder, state, envelope }) => {
   if (!state) return { applied: false, reason: `unrecognised provider state "${envelope.rawState ?? ''}"` };
   if (isStale(aggOrder, envelope)) return { applied: false, reason: 'event is older than what this order has already seen' };
@@ -261,19 +328,25 @@ export const applyState = async (client, { aggOrder, state, envelope }) => {
   }
 
   const stamp = STATE_STAMP[state];
-  return {
-    applied: true,
-    order: await client.aggregatorOrder.update({
-      where: { id: aggOrder.id },
-      data: {
-        state,
-        ...(stamp ? { [stamp]: envelope.providerEventAt ?? new Date() } : {}),
-        ...(state === 'CANCELLED' && envelope.cancelReason ? { cancelReason: envelope.cancelReason } : {}),
-        lastSequence: envelope.providerSequence ?? aggOrder.lastSequence,
-        lastEventAt: envelope.providerEventAt ?? new Date(),
-      },
-    }),
-  };
+  const { count } = await client.aggregatorOrder.updateMany({
+    where: { id: aggOrder.id, state: aggOrder.state },
+    data: {
+      state,
+      ...(stamp ? { [stamp]: envelope.providerEventAt ?? new Date() } : {}),
+      ...(state === 'CANCELLED' && envelope.cancelReason ? { cancelReason: envelope.cancelReason } : {}),
+      lastSequence: envelope.providerSequence ?? aggOrder.lastSequence,
+      lastEventAt: envelope.providerEventAt ?? new Date(),
+    },
+  });
+
+  if (count === 0) {
+    return {
+      applied: false,
+      reason: `the order moved out of ${aggOrder.state} while this event was being applied; it was not overwritten`,
+    };
+  }
+
+  return { applied: true, order: await client.aggregatorOrder.findUnique({ where: { id: aggOrder.id } }) };
 };
 
 // --- reconciliation ----------------------------------------------------------
@@ -285,10 +358,29 @@ export const applyState = async (client, { aggOrder, state, envelope }) => {
 export const reconcileDay = async ({ companyId, connectionId, isoDate }) => {
   const start = new Date(`${isoDate}T00:00:00.000+05:30`);
   const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-  const orders = await prisma.aggregatorOrder.findMany({
-    where: { companyId, connectionId, placedAt: { gte: start, lt: end } },
+  // Two conditions, not one. A row whose placement has not arrived has no
+  // placedAt to file it under — the provider never told us when the order was
+  // placed — so it would fall outside a report keyed on placedAt alone and a
+  // cancellation that overtook its own order would be invisible for the day. Its
+  // event time is what we do know, so that is what it is filed under. placedAt is
+  // left null rather than back-filled, because inventing one would put a made-up
+  // time on a row that exists precisely to say we have not seen the order.
+  const rows = await prisma.aggregatorOrder.findMany({
+    where: {
+      companyId,
+      connectionId,
+      OR: [
+        { placedAt: { gte: start, lt: end } },
+        { placementReceivedAt: null, lastEventAt: { gte: start, lt: end } },
+      ],
+    },
     include: { order: { select: { total: true, status: true } } },
   });
+
+  // Money and order counts are about orders. A shell is not an order, so it is
+  // counted separately and contributes to no total.
+  const orders = rows.filter((o) => o.placementReceivedAt);
+  const awaitingPlacement = rows.filter((o) => !o.placementReceivedAt);
 
   const sum = (pick) =>
     orders.reduce((acc, o) => {
@@ -304,8 +396,16 @@ export const reconcileDay = async ({ companyId, connectionId, isoDate }) => {
     date: isoDate,
     orderCount: orders.length,
     // Held orders are the headline, not a footnote: these are orders the
-    // restaurant may have served and not billed.
+    // restaurant may have served and not billed. Rows awaiting their own
+    // placement are excluded — nothing was served, because the order itself has
+    // never arrived — and counted on their own line below, so the two conditions
+    // never get added together into a number that means neither.
     heldCount: orders.filter((o) => !o.orderId && !['CANCELLED', 'REJECTED'].includes(o.state)).length,
+    // Orders the provider has told us something about but never actually sent.
+    // Usually a cancellation that overtook its own placement. Reported on its own
+    // line because it is neither a held order nor a served one.
+    awaitingPlacementCount: awaitingPlacement.length,
+    awaitingPlacementExternalIds: awaitingPlacement.map((o) => o.externalOrderId).slice(0, 100),
     cancelledCount: orders.filter((o) => o.state === 'CANCELLED').length,
     providerGrossPaise: sum((o) => o.grossAmount),
     providerCommissionPaise: sum((o) => o.commissionAmount),
