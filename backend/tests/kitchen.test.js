@@ -33,10 +33,30 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  // Integration wipe-UNION, 2026-09-25. This file came from the kitchen lane,
+  // whose schema carried no promotions or modifiers, so its wipe has no
+  // statement for them. On the shared test database that is not optional:
+  // OrderItemModifier_orderItemId_fkey is RESTRICT, so a single residue row
+  // left by promotions or catalogModifiers makes the orderItem delete below
+  // throw inside beforeAll and takes every test in this file with it.
+  //
+  // It has not fired here yet only because vitest orders files by size
+  // descending and this one lands late in the run, behind the files that
+  // clean up after themselves. That is placement luck, not a contract — the
+  // same gap already fired in printJobs.test.js once two new tests grew that
+  // file and moved it up behind promotions. Completed here for the same
+  // reason: the wipe must not depend on where the file sorts.
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -47,6 +67,7 @@ const wipe = async () => {
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -303,6 +324,9 @@ describe('derived readiness + overview', () => {
 
 const wipeOrdersOnly = async () => {
   await prisma.kitchenItem.deleteMany();
+  // Same RESTRICT foreign key as in wipe() above: OrderItemModifier must go
+  // before the order lines it points at, or this helper throws mid-file.
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();

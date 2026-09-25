@@ -32,10 +32,30 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  // Integration wipe-UNION, 2026-09-25. This file came from the kitchen lane,
+  // whose schema had no promotions or modifiers, so its wipe had no statement
+  // for them. On the shared test database that is not optional:
+  // OrderItemModifier_orderItemId_fkey is RESTRICT, so one residue row from
+  // catalogModifiers or promotions makes the orderItem delete below throw in
+  // beforeAll and takes all 26 tests in this file with it.
+  //
+  // It was latent rather than absent before. Vitest orders files by size
+  // descending; this file sat at position 14 behind discountSettings, and
+  // nothing ahead of it left modifier rows. The two new tests grew the file,
+  // which moved it to position 8 directly behind promotions, and the same
+  // unchanged wipe then threw. File size is not a contract, so the wipe is
+  // completed here rather than left to depend on where the file lands.
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -46,6 +66,7 @@ const wipe = async () => {
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
