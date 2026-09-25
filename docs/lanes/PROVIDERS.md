@@ -487,10 +487,17 @@ cannot drift. This table is what the *lane* did not do.
 | **NOT DONE** | Duplicate stock consumption was not tested, because **this build has no stock or inventory engine**. `grep -in stock prisma/schema.prisma` finds only the `INVENTORY` permission-group name. The requirement is vacuous here, and is recorded rather than quietly ticked: if a stock engine lands later, the aggregator ingestion path must be re-verified against it. |
 | **IMPLEMENTED-UNVERIFIED** | Every adapter. They match the published documentation and pass deterministic tests; that is not the same as a provider having accepted a request, and this lane does not claim it is. |
 
-### 8.1 The push, for whoever does it
+### 8.1 The push
 
-Owner decision 2026-09-25: the owner pushes this, not the lane. The command is
-recorded here so it does not have to be reconstructed later:
+**Superseded, 2026-09-25 08:3x UTC.** The earlier entry here recorded an owner
+decision that the owner would push this branch rather than the lane, and kept the
+command so it would not have to be reconstructed. The owner has since authorised
+commit and push explicitly, so the lane performs it. Both states are left visible
+rather than the first being deleted: an instruction that reversed is a fact about
+the work, and a reader who finds only the later one cannot tell whether the
+earlier restriction was lifted or forgotten.
+
+The command, unchanged from when it was written down:
 
 ```
 git -C /home/atc-noc/vexo-connect-x-lanes/providers push -u github x/providers
@@ -550,18 +557,112 @@ conclusively.
 by anyone the moment it lands, permanently — a public repository cannot be
 un-published, and deleting a branch does not remove it from forks, caches or
 anyone who cloned in between. The diff has been scanned for credentials and
-contains none. That is a separate question from who can read it, and the answer to
-the second one is now: everybody.
+contains none — §8.2 records what that scan actually looked for and what it hit.
+That is a separate question from who can read it, and the answer to the second one
+is now: everybody.
 
 Note also that the default branch is `sprint/client-handover-rc`, **not** `main`.
 Anyone opening a pull request from this branch should check the base.
 
-Nothing in the diff is a credential either way — that was checked, and is not the
-same question as who can read it.
+### 8.2 What the outgoing range was scanned for before it was published
 
-Nothing in these commits contains a credential. The staged diff was scanned for
-connection strings, bearer tokens and key-shaped assignments before each commit,
-and `POS_INTEGRATION_SECRET_KEY` is read from the environment with no default.
+The push publishes **13 commits / 39 files** — everything on `x/providers` not
+already reachable from any `github` ref, `5b8d54d` through the head of this
+branch. The range was materialised as a single diff
+(`git diff $(git merge-base HEAD github/main)..HEAD`, 14,650 lines) and scanned
+before the push rather than trusting a per-commit habit.
+
+| Scanned for | Result |
+|---|---|
+| Provider/cloud key formats — `sk_live_`, `sk_test_`, `rzp_live_`, `rzp_test_…`, `AKIA…`, `ghp_…`, `github_pat_`, `xox[baprs]-`, `AIza…`, and `BEGIN … PRIVATE KEY` | none |
+| Added lines assigning a literal to `password` / `secret` / `token` / `api_key` / `credential`, excluding `process.env`, zod schemas and placeholders | one hit, and it is UI copy: `'Replace credential'` / `'Store credential'` button text |
+| Added string literals of 32+ opaque characters | 25 hits, all of them SQL identifiers in the migration — `CREATE UNIQUE INDEX "IntegrationConnection_companyId_provider_key"` and its siblings. The word `_key` in an index name is what matched |
+| Tracked files whose *name* suggests a secret | `.env.example` (placeholders, pre-existing) and `backend/src/lib/integrations/secrets.js`, which is the sealing mechanism, not a secret |
+| Where the sealing key comes from | `secrets.js:33` throws `CredentialSealError` when `POS_INTEGRATION_SECRET_KEY` is unset; AES-256-GCM with a random IV per seal. No default, no fallback, nothing embedded |
+
+The long-literal check is the one worth keeping. It is deliberately over-broad —
+it cannot tell an index name from an API key — and that is the property that makes
+it useful: a scan tuned to produce no false positives would also be a scan that
+misses a credential in a format nobody anticipated. 25 hits that all resolve to
+DDL is a cheap result to read.
+
+The range contains **no build output, no screenshots, no logs and no `.env`**.
+The 39 files are backend source, one test file, the migrations, three frontend
+files and the two documents.
+
+### 8.3 Release content and the Docker build context
+
+Checked for this lane's own deliverable, on the understanding that "not in the
+shipped image" and "not in the build context" are different claims and the second
+is the stronger one.
+
+- **Backend.** `backend/.dockerignore` excludes `node_modules`, `tests`, `*.md`
+  and `.env*`. No `.md` exists below `backend/`'s top level and no `.env*` exists
+  anywhere in the backend context on disk, so docker's `*`-does-not-cross-a-slash
+  behaviour has nothing to leak here. Checked rather than assumed, because that
+  rule is exactly what made the frontend's `*.md` ineffective.
+- **Frontend runtime image.** `frontend/Dockerfile.prod` builds with `COPY . .`
+  and then its runtime stage copies only `dist/` and `nginx.conf` into
+  `nginx:1.27-alpine`. So the 48 acceptance-only entries tracked under
+  `frontend/docs/screens/` and `frontend/qa/` — 38 PNGs, `results-vc104.json`,
+  `results-vc105.json`, the browser-QA runners — **do not reach the shipped
+  image**. They do enter the build context and therefore an intermediate layer.
+- **`frontend/.dockerignore` does not exist on this branch.** Confirmed by ref:
+  absent on `x/providers`, absent on `github/main`, present only on
+  `x/kitchen-integration`. It is new work from the VC-103 close-out, not something
+  this lane dropped.
+- **This lane adds none of it.** The 39 files above contain no image, no JSON
+  result file and no build output. This lane's own acceptance screenshots were
+  written to `/tmp/vcx-integrations-shots4`, outside the repository, and its logs
+  to `/tmp`.
+
+**Deliberately not fixed here.** The obvious move is to add a
+`frontend/.dockerignore` to this branch. It is the wrong move: the VC-103 lane has
+one, measured rather than reasoned — a throwaway `alpine` image whose only
+instruction is `COPY . /ctx` counted 114 context entries, 48 of them
+acceptance-only — and it is better than anything written from scratch here.
+Adding a second version on this branch produces an **add/add conflict** on merge
+over a file whose every line is a considered rule, with a real chance of the
+measured version losing. The gap closes when `x/kitchen-integration` merges. That
+is a dependency, recorded, not a defect in this lane.
+
+### 8.4 The refund-ordering fix is VC-103's, and is not duplicated here
+
+The close-out brief that authorised this push also asked for the
+`REFUND_PAYMENT_INCLUDE` → `pickRefundLeg` ordering fix. It was already done,
+committed and published before this lane was asked: `94e4b89` on
+`x/kitchen-integration`, and `git ls-remote github` reports that branch at
+`82283c0`, which contains it.
+
+Read in full rather than taken from its subject line, because the defect it fixes
+is precisely a commit whose message named an outcome its diff did not reach.
+`72b11e0` gave `ORDER_INCLUDE.payments` a `[createdAt, id]` tie-break and
+justified it on the refund path — but `pickRefundLeg`'s only call site never read
+through `ORDER_INCLUDE`. It used a local `REFUND_PAYMENT_INCLUDE` that was a bare
+`select:` with no `ORDER BY`, so the receipt's tender order became deterministic
+while the half that moves money stayed at the query planner's discretion.
+`94e4b89` moves the include into `lib/orders.js` beside its only consumers, adds
+`orderBy: [{createdAt:'asc'},{id:'asc'}]`, and exports it so the rule can be
+asserted as a declaration — which matters, because a behavioural test of a tie can
+pass by luck whenever the planner happens to agree.
+
+`[createdAt, id]` is a **total** order, which is the property the requirement
+about equal timestamps needs: tied `createdAt` resolves on `id` instead of on heap
+position.
+
+This branch still carries the pre-fix copy, because it branched before it. That is
+correct and it stays: `backend/src/api/routes/orders.js` and
+`backend/src/lib/orders.js` are not this lane's files, and porting a one-line
+change into a shared file that already has it elsewhere produces a conflict for
+whoever merges and no behaviour that the merge would not deliver anyway.
+
+One limitation worth carrying forward, since it belongs to the money path rather
+than to either lane: the tie-break makes leg selection **reproducible, not
+correct**. Ascending cuid follows the order rows were inserted locally; it is not
+evidence of the order the provider captured the charges in. If Finance rules that
+a tie should prefer "most headroom" or "oldest provider intent", that is a
+different rule rather than a tuning of this one, and attributions already stored
+under the current rule stay as they are.
 
 ---
 
