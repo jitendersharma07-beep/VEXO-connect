@@ -414,12 +414,18 @@ const detectors = [
   // Leaving them out would be the more comfortable choice and the wrong one: the
   // screen would show six kinds of exception and an owner would reasonably read
   // the absence of a stock alert as the absence of a stock problem.
+  //
+  // `implemented: false` is what keeps that promise. Model presence is NOT
+  // enough: each `run` below is a stub, so a detector whose models arrive from
+  // another lane would start answering `found: 0` — "looked, found none" — for a
+  // check nobody has written. That is worse than saying nothing.
   // -------------------------------------------------------------------------
   {
     kind: 'LOW_STOCK',
     label: 'Items below their reorder level',
     responsibleRole: 'INVENTORY',
     needs: ['stockItem', 'stockLevel'],
+    implemented: false,
     unavailableNote:
       'Stock levels are not recorded in this deployment, so low stock cannot be detected. This is not a statement that stock is sufficient.',
     run: async () => [],
@@ -429,8 +435,9 @@ const detectors = [
     label: 'Batches near expiry or on hold',
     responsibleRole: 'INVENTORY',
     needs: ['stockBatch'],
+    implemented: false,
     unavailableNote:
-      'Batch tracking is not part of this deployment, so expiry cannot be detected. No batch is being reported as safe.',
+      'Expiry is not detected in this build. StockBatch now exists, but nothing here reads it, so no batch is being checked and none is being reported as safe.',
     run: async () => [],
   },
   {
@@ -438,8 +445,9 @@ const detectors = [
     label: 'Warehouse requests past their due date',
     responsibleRole: 'INVENTORY',
     needs: ['storeRequest'],
+    implemented: false,
     unavailableNote:
-      'Store requests and transfers are not part of this deployment, so none can be overdue here.',
+      'Overdue requests are not detected in this build. StoreRequest now exists, but nothing here reads its due date, so no request is being checked against one.',
     run: async () => [],
   },
   {
@@ -448,8 +456,11 @@ const detectors = [
     responsibleRole: 'FINANCE',
     needs: [],
     integration: () => gatewayAvailable(),
+    implemented: false,
     pendingNote:
       'No payment provider is connected, so there is no settlement file to compare takings against.',
+    unavailableNote:
+      'Settlement comparison is not written in this build, so takings are not being checked against any settlement file.',
     run: async () => [],
   },
 ];
@@ -462,6 +473,11 @@ const detectorState = (d) => {
   }
   if (d.integration && !d.integration()) {
     return { state: PENDING_INTEGRATION, note: d.pendingNote ?? 'Waiting on an integration.' };
+  }
+  // Last, so a missing model or a missing provider still gets the more specific
+  // answer. Reached when the data arrived but the detector was never written.
+  if (d.implemented === false) {
+    return { state: UNAVAILABLE, note: d.unavailableNote ?? 'Not implemented in this build.' };
   }
   return { state: AVAILABLE, note: null };
 };
