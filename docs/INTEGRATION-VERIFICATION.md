@@ -20,6 +20,27 @@ nothing, because nobody has the credentials.
 | **Provider sandbox** | A request has been made to the provider's own test environment and the provider answered. |
 | **Live activation** | Switched on for real traffic. Requires the owner. |
 
+### Readiness, stated once and plainly
+
+| Stage | Status |
+|---|---|
+| Local implementation | **VERIFIED** — 747/747 backend tests (`SUITE_EXIT=0`) and 62/62 browser checks, bound to committed source by content hash, not by timestamp (§6.1) |
+| Migration rehearsal on populated data | **PASSED** — 22/22 assertions, exit status 0, observed output in §6 |
+| Provider sandbox verification | **NOT RUN** — no provider has been contacted, for any of the four |
+| Production integration | **NOT VERIFIED** — nothing has run against a live provider account or real traffic |
+
+**What `operable` does not mean.** The registry exposes a per-provider boolean
+called `operable`, and it is the narrowest possible claim: *this adapter has
+enough of a documented contract and enough configuration surface that the portal
+can let an operator switch it on.* It is computed from our own registry. It is
+**not** evidence that the provider would accept a single request. No provider has
+accepted one. A provider can be `operable: true` and still fail on its first real
+call — that is the expected state of all three operable providers here, and it is
+the gap that only provider sandbox verification can close.
+
+Read the four rows above as a chain: each depends on the one before it, and this
+lane has finished the first two.
+
 ---
 
 ## 1. The verdict, per provider
@@ -98,6 +119,10 @@ Counts, from the same read: `SWIGGY operable=false {UNSPECIFIED: 7}` ·
 `ZOMATO operable=true {PATH_ONLY: 8, NOT_OFFERED: 2}` ·
 `REELO operable=true {SPECIFIED: 6, NOT_OFFERED: 3}` ·
 `TALLY operable=true {SPECIFIED: 3, PATH_ONLY: 5, NOT_OFFERED: 1}`.
+
+`operable=true` on three of these means only that the portal will let an operator
+switch them on — see "What `operable` does not mean" at the top of this document.
+None of the three has had a request accepted by the provider it names.
 
 **† offered by Zomato, not built here.** These four carry a separate
 `notImplementedHere` note in the registry, kept apart from the grade so the two
@@ -477,10 +502,34 @@ database `vcx_providers_test` on 127.0.0.1:5440.
 bash /home/atc-noc/vcx-providers-local/vcxp test
 ```
 
-Result: **Test Files 23 passed (23) · Tests 747 passed (747)**, duration 676.76s,
-log `/tmp/vcxp-full-gate2.log`. This lane's file is **119** of those tests and
-563.97s of that duration, including the 100,000-row scale test (461.4s at
-217 rows/s).
+Result: **Test Files 23 passed (23) · Tests 747 passed (747) · `SUITE_EXIT=0`**,
+duration 899.80s, 04:12:32 → 04:27:37 UTC on 2026-09-25, log
+`/tmp/vcxp-bound-gate.log`.
+This lane's file is **119** of those tests and 683.24s of that duration, including
+the 100,000-row scale test — 671.89s, the import itself 599.0s at 167 rows/s.
+
+The suite was run twice at this same source content. The first run
+(`/tmp/vcxp-full-gate2.log`, 676.76s, 100k import 461.4s at 217 rows/s) gave the
+same 23/23 and 747/747; the second was re-run for one reason only, to carry the
+content-hash header described in §6.1, because the first run's evidence rested on
+file modification times. The two differ by 223s of wall clock and by nothing else,
+which is what a machine under different incidental load looks like: the 100k
+import is I/O-bound on one Postgres instance, so its throughput is a property of
+the box that hour, not of the code. It is reported as a measurement, not as a
+performance guarantee.
+
+Two lines in the log deserve reading rather than skipping. `[test-db-lock]
+acquired as vcx-test-lock:2319510` is the advisory lock that makes this lane's
+run exclusive; `lock session was retired by the pool and the lock has been
+re-taken — no other run intervened` appears twice, which is the harness noticing
+that Prisma's connection pool dropped the session holding the lock during the
+671s test and re-acquiring it. It re-acquired successfully both times, and that
+is the load-bearing part: the re-take is a `pg_try_advisory_lock`, which does not
+wait. Had another run held the lock in that interval, the call would have
+returned false, and `tests/globalSetup.js:233` calls `process.exit(1)` on that
+branch rather than printing a warning and carrying on. So a note reading
+"re-taken" can only be produced when nobody else held the lock. The alternative
+outcome is an aborted run with no results at all, not a quieter log.
 
 The command matters. The first revision of this document reported
 `vcxp test tests/integrations.test.js` — one file — as the full suite. Run
@@ -503,6 +552,86 @@ What this lane's 119 tests cover, in the task's own terms:
 | Loyalty adjustments | Redeem, reversal and sale-return, plus the assertion that an unknown balance reads UNKNOWN and never 0 |
 | Duplicate accounting postings | One bill → one voucher across repeated queue runs |
 | Audit trail | Newest-first ordering, actor identity, tenant isolation, provider filter, and that **no credential material reaches the response** |
+
+### 6.1 How this evidence is bound to the committed source
+
+A test result is only evidence if you can say which bytes it was measured
+against. The previous revision offered file modification times — no source file
+was newer than the log — which is not a binding at all: an mtime is metadata, it
+is trivially changed without changing content and trivially unchanged while
+content moves under it.
+
+So the run is bound by content hash instead. The suite log opens with the git
+object hashes of the source it ran against, captured before the run and again
+after it:
+
+```
+date_start    : 2026-09-25T04:12:32+00:00
+HEAD          : 142f67bab38e374922f5fdaa6681c11c94697027
+tree          : 14d2b3736885cee96283506b5f07889405cc6bfb
+backend/src   : d527c4be077ab57206f538db48e72848b1e07940
+backend/tests : 7f9e4bc16b2072011f6866a26c378899e13fa21d
+backend/prisma: 36e8deb44bfee2f6ccc0096dd199679fad04cb76
+git diff HEAD : EMPTY
+...
+SUITE_EXIT=0
+date_end      : 2026-09-25T04:27:37+00:00
+HEAD after    : 142f67bab38e374922f5fdaa6681c11c94697027
+tree after    : 14d2b3736885cee96283506b5f07889405cc6bfb
+git diff HEAD : DIRTY
+```
+
+A git object hash is a SHA-1 of the content itself, so these name the bytes and
+nothing else.
+
+**The closing line reads DIRTY, and that is reported rather than tidied away.** It
+is true and it needs explaining, because a reader who takes it at face value would
+be right to distrust the result. What made the tree dirty is this file and
+`docs/lanes/PROVIDERS.md`: they were being written while the 15-minute suite ran.
+The check that answers the question is narrower and it is empty —
+
+```
+$ git diff HEAD -- backend/
+(no output)
+```
+
+— and the three subtree hashes above are unchanged when re-read now, after the
+doc edits. So no file the suite executed differs from the committed tree, then or
+now.
+
+This is precisely why the subtree hashes were recorded and not only `HEAD`.
+`git diff HEAD` over the whole tree conflates "the code under test moved" with
+"somebody typed a sentence in a Markdown file", and those are not the same event.
+`backend/src`, `backend/tests` and `backend/prisma` cannot be moved by a
+documentation commit, so they stay valid bindings for this result after any later
+doc edit — including the commit that adds this paragraph. A whole-tree check
+would have been invalidated by the very act of writing down what it proved.
+
+What the pair of readings does establish: `HEAD` and `tree` are identical before
+and after, so no commit, checkout or rebase happened during the run, and the
+suite cannot have started on one revision and finished on another.
+
+Individual file blobs, for anyone checking a specific claim with
+`git cat-file blob <hash>`:
+
+| Blob | File |
+|---|---|
+| `dc60051c5ceab51f374e852143ec4a0639c50ebf` | `backend/tests/integrations.test.js` |
+| `340d9013adf50af4181b837772d834163cae8a8d` | `backend/src/lib/integrations/providers.js` |
+| `1bb1e229fdffc2d66bf9a2d17f01163078e1f425` | `backend/src/lib/integrations/aggregatorOrders.js` |
+| `38c0e0ec5d79adab54d5e6262336f8e95a2bd5f2` | `backend/src/lib/integrations/adapters/tally.js` |
+| `114e9506e775e407a6bd5b17079f84df59902f73` | `backend/src/lib/integrations/lanHost.js` |
+| `83efc73001b5feef32a122c58beb5778c2edd00e` | `frontend/src/pages/Integrations.jsx` |
+| `8ea95db1ea9499f508953e5aea01d196e346e42c` | `backend/prisma/schema.prisma` |
+
+**The browser evidence binds the same way, by a hash that was already there.**
+Vite derives an asset's filename from a hash of its content, so
+`index-rDFyA5u7.js` is a content address. Rebuilding from the committed
+`frontend/src` (`33e180a953bb35ebbceb444d81aca6eb5888f1ae`) reproduces that exact
+filename, which means the bundle the harness rendered and the bundle this commit
+builds are the same bytes. That is also why the hash was tracked as it moved
+(`C-5KaRTN → 03I3UPMH → rDFyA5u7`) across the two UI fixes: each move proved the
+page under test had actually changed.
 
 ### Browser acceptance
 
@@ -530,43 +659,120 @@ document.
 bash /home/atc-noc/vcx-providers-local/rehearseMigration.sh
 ```
 
-Result: **NOT RE-RUN — the recorded PASS does not cover this tree.**
+Result: **REHEARSAL: PASS — 22 of 22 assertions, exit status 0.**
+Full output retained at `/tmp/vcxp-rehearsal-run.log`; the populated-database
+schema diff at `/tmp/vcxp-reh-diff.sql`.
 
-`vcxp migsql` proves the migrations reproduce `schema.prisma` on an *empty*
-database. The rehearsal proves the part that actually breaks: this lane adds
-`ALTER TABLE "Order" ADD COLUMN "channel" NOT NULL DEFAULT 'POS'`, so the
-migrations are applied to a database **already populated** with two companies,
-branches, users, customers and priced orders. On 2026-09-24 that returned
-**REHEARSAL: PASS** (12 checks): order count unchanged, order money
-byte-identical (357.00), every pre-existing order backfilled to `channel = POS`,
-**no** pre-existing order attributed to a provider, **no** loyalty links invented
-for existing customers, and a second `migrate deploy` a clean no-op.
+This replaces the 2026-09-24 result, which was a genuine PASS of 12 assertions
+against a tree that did not yet contain migration 3. The history of that
+correction is below, because the reason the old figure could not simply be
+re-used is the more useful half of the record.
 
-That result is real and it is **stale**. It was measured before migration 3
-existed, so it says nothing about it — and migration 3 is the one migration here
-whose entire content is a backfill, which is exactly the class the rehearsal was
-built to catch. Reading the script before re-running it showed it would not have
-covered migration 3 anyway: it stripped only the two migrations it knew about, so
-its "state before this lane" stage would have retained a migration depending on a
-table that stage never creates, and died on the first step.
+**Isolation, checked before it was run.** The script issues `DROP DATABASE`, so
+the target was verified first. It names one database, `vcx_providers_rehearsal`,
+a constant in the script — distinct from the lane's dev database
+(`vcx_providers`), its test database (`vcx_providers_test`, which holds the
+100,000-row import fixture) and Prisma's shadow database. The pre-existing copy
+was a 12 MB leftover of the 2026-09-24 run, so nothing of value was destroyed.
 
-The script is now corrected. Migration 3 gets a stage of its own, because a
-backfill applied in the same step as the migration that *creates* the table runs
-its `UPDATE` over an empty table and proves nothing. Stage B stops before it,
-three `AggregatorOrder` rows go in with `createdAt` spread over nine days, and
-stage C applies it and asserts every row's `placementReceivedAt` equals **its
-own** `createdAt` — deliberately spread, because identical rows cannot distinguish
-a per-row copy from a blanket `SET … = now()`. It also asserts the column is
-absent beforehand, so the backfill cannot pass by having already happened, and
-that the three order states are unchanged, since normalising a state would
-destroy the cancellation this migration exists to preserve.
+Reviewing it also found a real hazard. The scratch connection string is built by
+a `sed` substitution on `DATABASE_URL`, and **a `sed` that does not match is not
+an error — it returns the subject unchanged.** Had `DATABASE_URL` stopped
+containing the literal `/vcx_providers?`, every `migrate deploy` in the script
+would have silently landed on the lane's real database, all assertions would still
+have passed, and the rehearsal would have reported PASS having just migrated
+`vcx_providers`. A guard now refuses to run unless the substitution demonstrably
+fired and the parsed database name matches the intended scratch name, and it sits
+above the `DROP`. It is the first line of the output.
 
-Executing it is **BLOCKED**: refused twice by this environment's command
-classifier, and a denied command is recorded here rather than retried under
-another spelling. It drops and recreates a scratch database
-(`vcx_providers_rehearsal`, lane-private, no worktree file touched), which is the
-likely reason for the refusal and a fair reason to read it before trusting it.
-One command, outstanding for the owner; nothing else in this lane depends on it.
+Confirmed afterwards from outside the script: `vcx_providers` has no
+`_prisma_migrations` table and no `placementReceivedAt` column, so it was never
+touched.
+
+**Observed output, all 22 lines:**
+
+```
+PASS  isolation guard: target is the disposable scratch database vcx_providers_rehearsal, not the lane's dev or test database
+PASS  pre-lane migrations apply to a fresh database
+PASS  stage A is genuinely pre-lane (none of the new tables present)
+PASS  database populated before the lane migrations run (3 orders, 2 companies)
+PASS  lane migrations apply to a POPULATED database
+PASS  both lane migrations recorded as applied
+PASS  the three new tables exist after stage B
+PASS  pre-existing orders survived the migration
+PASS  order money is byte-identical after the migration (357.00)
+PASS  existing orders backfilled to channel=POS
+PASS  no pre-existing order was attributed to a provider
+PASS  migration created no loyalty links for existing customers
+PASS  stage B is genuinely before the backfill (placementReceivedAt absent)
+PASS  aggregator orders exist before the backfill runs (3 rows, 3 distinct createdAt)
+PASS  the backfill migration applies to a populated AggregatorOrder
+PASS  the backfill migration is recorded as applied
+PASS  no pre-existing aggregator order was left looking like a shell
+PASS  placementReceivedAt was backfilled from each row's own createdAt
+PASS  aggregator order states survived the backfill
+PASS  re-running deploy is a no-op
+PASS  the migrated populated database matches schema.prisma exactly (no drift)
+PASS  after every migration and both deploys: 3 orders, 357.00, 3 aggregator orders — unchanged
+
+REHEARSAL: PASS
+```
+
+**Backfill correctness, re-queried independently of the script** — because a
+script that reports on itself is one bug away from reporting what it hoped:
+
+| id | state | createdAt | placementReceivedAt | equal |
+|---|---|---|---|---|
+| `reh-ao-1` | DELIVERED | 2026-09-16 04:10:44.572 | 2026-09-16 04:10:44.572 | yes |
+| `reh-ao-2` | CANCELLED | 2026-09-21 04:10:44.572 | 2026-09-21 04:10:44.572 | yes |
+| `reh-ao-3` | RECEIVED  | 2026-09-25 03:10:44.572 | 2026-09-25 03:10:44.572 | yes |
+
+`COUNT(DISTINCT "createdAt")` = 3 and `COUNT(DISTINCT "placementReceivedAt")` = 3.
+That is the assertion that matters: the seed spreads `createdAt` over nine days
+precisely so a blanket `SET … = now()` would collapse the second count to 1 and
+fail. Three distinct values proves a per-row copy. States are unchanged, so the
+backfill did not normalise away the `CANCELLED` row this migration exists to
+preserve.
+
+**Migration/schema agreement, on the populated database.** `vcxp migsql` diffs the
+migration *folder* against `schema.prisma` and never looks at a database. The
+rehearsal now also diffs the real database that has just had all three migrations
+applied over live rows:
+
+```
+prisma migrate diff --from-url <scratch> --to-schema-datamodel schema.prisma --script
+→ -- This is an empty migration.        (32 bytes, /tmp/vcxp-reh-diff.sql)
+```
+
+Empty means the migrated populated database matches `schema.prisma` exactly, so
+every query Prisma builds from that schema is addressing columns that are really
+there. All three lane migrations are recorded `finished`, none rolled back.
+
+<details>
+<summary>Why the 2026-09-24 figure could not be reused</summary>
+
+The old PASS predates migration 3, which is the one migration here whose entire
+content is a backfill — exactly the class this rehearsal exists to catch. Reading
+the script before re-running it showed it would not have covered migration 3
+anyway: it stripped only the two migrations it knew about, so its "state before
+this lane" stage would have retained a migration depending on a table that stage
+never creates, and died on the first step. Migration 3 now gets a stage of its
+own, because a backfill applied in the same step as the migration that *creates*
+the table runs its `UPDATE` over an empty table and proves nothing.
+
+Two earlier attempts to run it were refused by this environment's command
+classifier and were recorded as BLOCKED rather than retried under another
+spelling. The run above succeeded on a later attempt under explicit instruction.
+</details>
+
+**Why any of this is run at all.** `vcxp migsql` proves the migrations reproduce
+`schema.prisma` on an *empty* database, which is the easy half. The half that
+breaks in production is a migration meeting rows: this lane adds
+`ALTER TABLE "Order" ADD COLUMN "channel" NOT NULL DEFAULT 'POS'` and backfills
+`placementReceivedAt`, and neither of those can fail on an empty table. So the
+rehearsal brings a scratch database to the state *before* this lane, seeds it with
+two companies, branches, users, customers and priced orders, and only then applies
+the migrations — in two stages, with a second seed in front of the backfill.
 
 ### Schema drift
 
@@ -609,6 +815,72 @@ it. Ordered by what stops the most work.
 Items 1 and 6 are the two worth escalating first: 1 because it is the longest
 lead time and no engineering runs in parallel with it, 6 because it is the only
 one whose failure mode is visible to the client's customers.
+
+### 7.1 Owner action list — what ATC must obtain
+
+The fourteen rows above, collapsed into the eight things somebody has to actually
+go and get, in the order worth starting them. "Unblocks" names the verification
+each one makes possible; until then that verification cannot be run at all, by
+anyone.
+
+**Never send any of these through chat.** Credentials go into the project's secret
+mechanism (`POS_INTEGRATION_SECRET_KEY`-sealed config, read from the environment);
+files go on disk. Nothing below should be pasted into a conversation.
+
+| # | ATC must obtain | From | Rows | Unblocks |
+|---|---|---|---|---|
+| **A** | Swiggy POS-partner onboarding, **or** a middleware contract (UrbanPiper is the best-corroborated route) | Swiggy, or the vendor | 1 | Everything Swiggy. No adapter can be written against a contract nobody has published, and endpoints must not be guessed |
+| **B** | Written confirmation that connecting a POS to Reelo triggers **no** enrolment message and **no** welcome campaign | Reelo | 6 | Permission to connect the client's real Reelo account at all. See §7.2 — this gates ~100,000 customers' inboxes and is the one item on this list with an irreversible failure mode |
+| **C** | One real Reelo CSV export, plus which column carries Reelo's own customer id, plus the export's as-of timestamp | The client's Reelo account | 3, 4, 5 | Confirming the importer's column mapping, stable identity for the existing customers, and honest balance provenance. All three arrive in one file and one email, so they are one errand |
+| **D** | Reelo POS API credentials and the confirmed auth-header scheme | Reelo / the client | 7, 8 | Live balance lookups, redemptions and reversals. Until then balances read `UNKNOWN` by design, never a guessed zero |
+| **E** | Zomato partner documentation pack and credentials | The client's Zomato partner account | 2 | The 8 `PATH_ONLY` request/response bodies and the inbound callback header. The paths are already known from public docs; the bodies are not, so no request can be assembled |
+| **F** | A reachable TallyPrime instance with the client's company loaded, an XML export of one real voucher per type, and the exact chart of accounts | The client's back office | 10, 11, 12 | Voucher reconciliation against real Tally, the Day Book recovery path, and enabling credit-note / receipt / purchase / GST / cost-centre postings. One site visit covers all three |
+| **G** | Written authorisation naming the export file for the real import | The client, countersigned by the owner | 9 | Running the real customer import, which is reserved to the owner |
+| **H** | Approval of the prepared changes for live activation; and two PANs if Tally group entities are in scope | **The owner** | 13, 14 | Production activation, live financial transactions, the real import, any external message |
+
+A–B are commercial and start now because nothing engineering-side shortens them.
+C–F are technical: each is a file or a fact, and each turns a NOT RUN row in the
+readiness table into something testable the same day it arrives. G–H are the
+approval gates and come last by definition.
+
+### 7.2 Standing rule: the client's real Reelo account stays disconnected
+
+**The client's live Reelo account is not to be connected until item B — written
+no-enrolment, no-message confirmation — is in hand.** This is a standing
+restriction, not a to-do, and it holds regardless of what else becomes ready.
+
+The reason it outranks the rest of this list is that its failure mode is the only
+irreversible one here. Every other unknown costs a failed request, a wrong ledger
+name, a retry. This one reaches roughly 100,000 people, and a welcome campaign
+cannot be recalled once it has gone out. The client's balances are the real asset
+and they live in Reelo, not here.
+
+What the code already refuses to do, so the risk is narrower than it sounds: no
+points are reset or recalculated, no customer is re-enrolled, no bulk message is
+sent from this lane at all, and an unknown balance reads `UNKNOWN` rather than 0.
+The exposure is not our writes — it is whatever **Reelo** does on its own side
+when a POS is attached to an existing programme, which is precisely the thing no
+amount of local testing can discover.
+
+**Verification plan, in order. Do not skip to step 4.**
+
+| Step | Action | Gate to the next step |
+|---|---|---|
+| 1 | Obtain item B in writing from Reelo, naming enrolment messages and welcome campaigns explicitly | The written answer exists and says no |
+| 2 | Obtain a Reelo **sandbox or non-production programme**, or a throwaway programme the client is content to have messaged | A programme exists whose contacts are all ours |
+| 3 | Connect that programme with **2–3 controlled test contacts** on phone numbers ATC owns and monitors. Not client numbers, and not numbers drawn from the export | For 48 hours: zero unexpected SMS, WhatsApp or email to those numbers, and balances read back unchanged |
+| 4 | Dry-run the import against the real export with the preview path only, writing nothing | Exception report reviewed; matched/unmatched counts explained |
+| 5 | Owner approval (items G and H), then the real connection | — |
+
+Step 3 is the actual experiment, and the controlled contacts are what make it one:
+if Reelo does send something on connection, it arrives at a number ATC is
+watching, and the blast radius is three people instead of a hundred thousand. A
+programme that has been quiet for 48 hours with real contacts attached is the
+first evidence that connecting is safe — and it is evidence, where item B alone is
+only a promise.
+
+Nothing in steps 1–4 requires the client's customer base to be touched. Step 5
+does, and it is the owner's to authorise.
 
 ---
 
