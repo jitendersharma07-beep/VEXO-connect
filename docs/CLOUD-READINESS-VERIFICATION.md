@@ -983,8 +983,25 @@ without a restart." Do not reuse the paragraph without re-checking the log.
 `docs/W2-INTEGRATION-CLOSE.md` on `main` cites `src/lib/{totp,userAuthority}.js`
 for account recovery. The recovery half is accurate. **`totp.js` is wired to
 nothing**: `grep -rln totp backend/src` returns exactly one path — the file
-itself. No importer, no enrolment endpoint, no second factor at login. It is
-unused scaffolding.
+itself. No importer, no enrolment endpoint, no second factor at login.
+
+**Unwired is not the same as unexercised, and the distinction matters here.**
+An earlier draft of this section called `totp.js` "unused scaffolding", which
+understates it. Widening the search past `src/` finds a second file:
+
+```
+$ grep -rln totp backend --include=*.js | grep -v node_modules
+backend/src/lib/totp.js
+backend/tests/totp.test.js
+```
+
+`backend/tests/totp.test.js` imports `../src/lib/totp.js` and runs **39 tests**,
+all passing in the suite recorded below, including the RFC 4226 published test
+vectors. So the correct statement is: the algorithm is implemented and tested;
+it is simply **not imported by any route, and there is no second factor at
+login.** The gap is integration, not correctness — which changes the size of the
+work if MFA is ever asked for, and is why the wording is being corrected rather
+than left as a conservative-sounding overstatement.
 
 Raised by the `x/accounts` session against its own lane's document and verified
 here independently. **No readiness verdict in this document claims MFA is
@@ -1014,6 +1031,50 @@ no provisioning API, no UI, and no enforcement on module routes, because there
 are no module routes. **Billing → stock → reports cannot be verified**, and the
 reason is not a skipped check: the tables do not exist here. No lane was merged
 to change that, and this document does not ask for one.
+
+### The final suite, run here — 815/815 at `6eed775`
+
+The brief asks for results "against the exact commit", and for my runs to be
+distinguished from peer-reported ones. This is **my run**, not a figure carried
+forward from a report:
+
+```
+$ bash ~/vcx-cloudready-local/vcxcr test
+ Test Files  32 passed (32)
+      Tests  815 passed (815)
+   Start at  05:24:30
+   Duration  220.56s (transform 1.38s, setup 0ms, collect 13.24s,
+                      tests 198.72s, environment 7ms, prepare 2.08s)
+```
+
+Run against the working tree at `6eed775`, on `vcx_staging_test` at
+127.0.0.1:5440 (`vcxcr test` sets `DATABASE_URL="$TEST_DATABASE_URL"` and
+`NODE_ENV=test`, so it does not touch the staging database).
+
+**The number also holds for `b6462a8`, and that is checkable rather than
+assumed.** The brief's last reported state was 815/815 at `b6462a8`; four
+commits have landed since. None of them is a code change:
+
+```
+$ git log --oneline b6462a8..HEAD -- backend/
+(no output — zero commits)
+```
+
+The four commits touch only `docs/` and `deploy/`. So the agreement between my
+count and the reported one is not a coincidence to be explained, and equally it
+is **not independent corroboration** — it is the same tree measured twice.
+
+Two things this number does not do, stated because a bare "815/815" invites
+both errors:
+
+- **It does not make the product complete.** No test in this repository
+  exercises physical paper, real SMTP delivery, an off-server backup restore, or
+  a module route that does not exist. The three blockers are outside the suite's
+  reach by construction, which is why a green suite and a NOT READY verdict sit
+  together here without contradiction.
+- **It does not cover the peer lanes.** 32 files is this tree. Results reported
+  by the `x/accounts` and inventory sessions are theirs, measured on their
+  trees, and are not merged into this figure.
 
 ### Verdict — unchanged
 
