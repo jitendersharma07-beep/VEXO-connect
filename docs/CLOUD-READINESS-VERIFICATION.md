@@ -3,8 +3,9 @@
 Run 2026-09-24 on `atc-noc` against an isolated staging stack built from this
 tree. Scope: public HTTPS access, permanent real platform-admin access, email
 password recovery, tenant and store isolation, the complete operational flow,
-and backup/recovery. Physical printer acceptance is deliberately out of scope
-and stays NOT TESTED until paper is observed.
+and backup/recovery. Physical printer acceptance is deliberately out of scope;
+its hardware/driver half is VERIFIED as of 2026-09-25, and VEXO's own output on
+paper stays NOT TESTED until paper is observed.
 
 **Verdict: NOT READY for owner acceptance.** Three blockers, listed at the end.
 Nothing here blocks the product's core; what is blocked is *cloud* readiness —
@@ -54,7 +55,7 @@ lane or worktree was modified.
 | Tenant / store isolation | **PASS** — 58/58 probes, all **authenticated** and all pre-merge — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 5**: the merged *unauthenticated* recovery paths were not covered by these, and are now covered separately | `1c7e8e6`; extended at `bcfa6ed` | `evidence/05-*`; `backend/tests/authTenantIsolation.test.js` | Inventory scope untestable here because inventory is not in this build. |
 | Billing / payment / inventory / reporting | **PASS for what this build implements** — re-checked at `bcfa6ed`, still accurate | `1c7e8e6` | `evidence/06-*` | Three sub-checks are **NOT IN THIS BUILD** (recipe/modifier consumption, stock quantity/unit handling, restocking policy) — they live on unmerged lane `x/inventory`, confirmed **not an ancestor** of the candidate. Re-run after merge; see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 4. |
 | Encrypted backup restore | **PASS** for schedule + restore (16/16); **BLOCKED** for decryption — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 6**: the rehearsal round-trip is not evidence about the owner's actual archive, and closing decryption does not close recoverability | archive `pos-prod-20260923T211456Z` | `evidence/07-*` | One owner-run command closes the decryption half. Destination-side deletion protection is **NOT VERIFIED**. Key custody (CR-3) is the larger issue. |
-| Physical printer acceptance | **NOT TESTED** | — | — | Stays NOT TESTED until observed paper output exists. Never claim from emulation. |
+| Physical printer acceptance | **PARTIAL** — hardware/driver **VERIFIED**, VEXO output on paper **NOT TESTED** | owner photographs, 2026-09-25 | `docs/PRINTER-UAT-RUNBOOK.md` Record A | DC RP30 self-test and a Windows print via `POS-80C` on `USB001` are photographed, so the unit and the spooler→driver→USB chain are proven. **No photograph shows a VEXO document**, so receipt/KOT/reprint on paper stay NOT TESTED and Record B is PENDING in full. Never claim from emulation, and never let Record A stand in for Record B. Owner-attested — the images are not filed in this evidence set. |
 
 Evidence directory: `/home/atc-noc/vcx-cloudready-local/evidence/` on `atc-noc`.
 It is kept **outside this repository on purpose** — it records host addresses,
@@ -271,7 +272,9 @@ this repository and outside this task's authority to change.
   not folded into `can()`: a permission decides what an employee may do inside a
   tenant that already has the feature; it cannot express "this customer did not
   buy KDS".
-- **Physical printing** — browser print only, unobserved on paper.
+- **Physical printing** — hardware and driver verified 2026-09-25 (DC RP30
+  self-test, Windows `POS-80C`/`USB001`); VEXO's own receipt/KOT/reprint still
+  browser-print only, unobserved on paper.
 
 ## Blockers to owner acceptance
 
@@ -286,7 +289,9 @@ this repository and outside this task's authority to change.
    written and checked, closes it. Send back only the `RESULT:` line.
 
 Not blockers, but they gate specific claims rather than the release: physical
-printing stays NOT TESTED; destination-side deletion protection stays NOT
+printing of **VEXO documents** stays NOT TESTED (the printer and its Windows
+driver are verified as of 2026-09-25 — that is the prerequisite, not the
+acceptance); destination-side deletion protection stays NOT
 VERIFIED; and inventory-dependent flow checks must be re-run once that lane
 merges.
 
@@ -675,7 +680,8 @@ for the code the merge brought in.
 
 **This section is about cloud readiness only.** A green 815 is not evidence that
 inventory, payments, providers or physical printing are done — the first is not
-merged, and the last has never been observed on paper. Nothing here supports
+merged, and for the last, only the printer and its driver have been observed;
+no VEXO document has ever come out on paper. Nothing here supports
 labelling the portal complete.
 
 ## Owner inputs still needed — the consolidated list
@@ -725,5 +731,12 @@ These are decisions but not blockers, and none of them is waiting on a value:
 - **Which plans include which modules**, whether a route should set
   `License.modules`, and whether the UI should hide an unlicensed module
   (item 3). Product decisions; the enforcement they would rely on now exists.
-- **Physical printing** stays NOT TESTED until paper is observed. No input closes
-  this — it needs hardware.
+- **Physical printing of VEXO documents** stays NOT TESTED until paper is
+  observed. The hardware half closed on 2026-09-25 — the owner photographed a
+  DC RP30 self-test and a Windows `POS-80C`/`USB001` print — so what remains no
+  longer needs *hardware*, it needs a **session**: sign in on the Windows box,
+  print a KOT, a receipt and a reprint, and photograph the strips against
+  `PRINTER-UAT-RUNBOOK.md` Record B. One cheap thing first: read the
+  characters-per-line off the self-test photograph already in hand. At ~32 or
+  fewer the unit is 58 mm, which is a code change, and the whole session would
+  be measuring the wrong target.

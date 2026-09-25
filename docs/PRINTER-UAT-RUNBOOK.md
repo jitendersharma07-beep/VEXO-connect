@@ -1,8 +1,23 @@
 # Physical receipt / KOT print — UAT run-book (2026-09-24)
 
-**Status: PENDING — physical results stay pending until paper is observed.**
-Nothing in this document claims a printer works. It exists so the session
-with the real printer is a checklist, not an improvisation.
+**Status (2026-09-25): hardware and driver VERIFIED; VEXO output on paper still
+PENDING.** The owner has photographed a DCode DC RP30 self-test and a successful
+Windows print through the `POS-80C` driver on `USB001` — that is **Record A**
+below, and it closes the "is the printer and its driver working" question.
+
+It does **not** close printer acceptance. No photograph yet shows a VEXO
+receipt, KOT or reprint on paper, so **Record B is PENDING in full** and this
+document still claims no VEXO print works. Three kinds of evidence live here
+and must not be merged:
+
+| | What it is | Status |
+|---|---|---|
+| Automated | Chromium pagination + CSS geometry, in pixels, no printer | PASS — "What is already proven" |
+| Record A | Hardware + driver, owner photographs | **VERIFIED 2026-09-25** |
+| Record B | VEXO documents on physical paper | **PENDING** |
+
+It exists so the session with the real printer is a checklist, not an
+improvisation.
 
 **This is the single procedure AND results record for printer acceptance.**
 Consolidated 2026-09-24 by Window 3 (printing / peripherals / operational
@@ -75,16 +90,16 @@ dialog and paper: driver, page size, margins, whether 80 mm thermal at
   added 2026-09-24) records the explicit Print click only — it is a DIALOG
   event, never evidence of paper.
 
-## Kit — filled in when the owner supplies the hardware
+## Kit — partially supplied 2026-09-25 (owner photographs)
 
 | | Value | Notes |
 |---|---|---|
-| Printer make/model (from the unit's label) | ________ | |
-| Head (from self-test) | ____ dpi / ____ chars per line | See the dpi table — 48 (203 dpi) and 42 (180 dpi) are BOTH passes; **~32 or fewer means a 58 mm printer: STOP** (58 mm is a code change, not a setting) |
-| Connection | USB / LAN / Bluetooth / Serial | |
-| Attached computer + OS | ________ | Decides the driver steps below |
-| Browser | ________ (Chromium preferred; 100 % zoom) | |
-| Paper | 80 mm roll (~72 mm printable) | |
+| Printer make/model (from the unit's label) | **DCode DC RP30** | Owner-supplied photograph, 2026-09-25 |
+| Head (from self-test) | ____ dpi / ____ chars per line | **STILL BLANK — and it is the one gating value.** See the dpi table: 48 (203 dpi) and 42 (180 dpi) are BOTH passes; **~32 or fewer means a 58 mm printer: STOP** (58 mm is a code change, not a setting). The self-test photo already in hand should show this — see "the cheapest open question" below |
+| Connection | **USB** | Owner-supplied photograph: Windows port `USB001` |
+| Attached computer + OS | **Windows**, driver `POS-80C` on port `USB001` | Owner-supplied photograph of a successful Windows print |
+| Browser | ________ (Chromium preferred; 100 % zoom) | Not yet recorded; the app-output rows below need it |
+| Paper | 80 mm roll (~72 mm printable) | Implied by the `POS-80C` driver, **not** independently confirmed |
 
 **Expected characters-per-line by head — both rows pass:**
 
@@ -138,7 +153,60 @@ dialog and paper: driver, page size, margins, whether 80 mm thermal at
    photographs + kept paper are the evidence, recorded against the exact
    build noted above.
 
-## Record — fill only from observed paper
+## Record A — hardware and driver, from owner photographs (2026-09-25)
+
+**This table is not the acceptance.** It is the prerequisite the acceptance
+sits on, and it is kept apart on purpose: the two tables answer different
+questions, and collapsing them is how "the printer works" becomes "printing
+works". Record B below is the acceptance and is still open.
+
+| # | Check | Result |
+|---|-------|--------|
+| H-1 | The unit powers up and its own **self-test prints cleanly** — head, paper feed and thermal line all functional, before any driver or app is involved | **VERIFIED** — DCode DC RP30, owner photograph, 2026-09-25 |
+| H-2 | **Windows driver path delivers to paper**: a print issued through the `POS-80C` driver on port `USB001` reaches the printer | **VERIFIED** — owner photograph, 2026-09-25 |
+
+What those two facts buy, precisely: the hardware is not dead, the USB port and
+cable carry data, and the Windows spooler → `POS-80C` → `USB001` chain is
+configured and delivering. Every failure of *that* class is now excluded, which
+is worth real money in diagnosis time — a blank strip from VEXO can no longer be
+blamed on the printer or the driver being unconfigured.
+
+What they do **not** buy, and this is the whole reason for two tables: neither
+photograph shows a VEXO document. A self-test is the printer's own stored
+pattern and a Windows test page is Microsoft's; both are generated below our
+code, prove nothing about our stylesheet, and would look identical on a stack
+where VEXO's receipt renders at the wrong width. Column alignment, the 72 mm
+band, wrap of a long item name, per-rate tax lines, cut position and the 9 px
+refund labels are all still unobserved. **Record B stays PENDING in full.**
+
+### Provenance — read before citing these two rows
+
+Neither photograph has been inspected by the session writing this record, and
+neither is filed in the evidence set. Both rows are **owner-attested**: the
+owner states the photographs exist and show the above. That is a legitimate
+basis for a hardware check — the owner is the person holding the printer — but
+it is a weaker artifact than the rest of this run-book, where every claim points
+at a file. **File the two images beside this document and replace this
+paragraph with their paths.** Until then, an auditor reading this has the
+owner's word and not the picture.
+
+### The cheapest open question in this document
+
+The Kit table's **chars-per-line is still blank, and the self-test photograph
+already in hand almost certainly shows it** — a self-test strip prints a
+character ruler. Reading it off costs seconds and closes a check the run-book
+treats as a **STOP**: at ~32 or fewer characters the unit is 58 mm, which is a
+code change rather than a setting, and every row of Record B would then be
+measuring the wrong target. 48 or 42 characters and it is 80 mm and fine. The
+`POS-80C` driver name implies 80 mm, but a driver name is a label somebody
+typed, not a measurement — do not close a STOP check on it.
+
+## Record B — VEXO application output, fill only from observed paper
+
+**Still PENDING in full.** Record A above does not advance any row here. The
+automated evidence in "What is already proven" is a third, separate thing:
+it is Chromium pagination and CSS geometry, measured in pixels, and it never
+touched a printer.
 
 | # | Check | Result |
 |---|-------|--------|
@@ -149,7 +217,7 @@ dialog and paper: driver, page size, margins, whether 80 mm thermal at
 | 5 | ~72 mm printable width fits — no horizontal truncation; measured printed band ____ mm | PENDING |
 | 6 | Feed/cut proportionate: KOT and long receipt feed DIFFERENT lengths; blank after last line ____ mm; if the printer cuts, cut lands after the footer | PENDING |
 | 7 | Reprint (step 4) matches the first print and is identifiable (same invoice no./totals) | PENDING |
-| 8 | Driver self-test prints cleanly, before the app; chars/line matches the head's row in the table | PENDING |
+| 8 | Driver self-test prints cleanly, before the app; chars/line matches the head's row in the table | **SPLIT** — "prints cleanly" is **VERIFIED** at Record A H-1; "chars/line matches" is **still PENDING** and is the STOP check. Do not read this row as closed |
 | 9 | The long item name wraps onto a second line, nothing clipped, amount column stays hard right | PENDING |
 | 10 | Each tax rate prints its own line and subtotal + taxes = TOTAL by hand-addition | PENDING |
 | 11 | After the partial refund: refund line prints with a minus sign, and `REFUND HANDED BACK — recorded by staff` + `MANUAL PAYMENT RECORD — not gateway-verified` print in full and legibly (9 px — smallest type on the receipt) | PENDING |
