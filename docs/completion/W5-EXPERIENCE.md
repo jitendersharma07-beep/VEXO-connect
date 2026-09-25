@@ -272,8 +272,12 @@ captain-reach.sh}`.
 
 | SHA | |
 |---|---|
-| `77242fe` | base this branch was cut from and all results above were measured on |
+| `77242fe` | base this branch was cut from, and the source all results above were measured on |
 | `6764af3` | the delivery — 9 files, +2977 |
+| `9c8fc7e` | this section, plus §10 |
+
+Later commits on `x/experience` may sit on top; `6764af3` is the one that
+carries the tested source.
 
 Branch `x/experience`, **not yet on the remote**. It does not exist on
 `github` (`git ls-remote --heads github x/experience` is empty), so publishing
@@ -314,14 +318,17 @@ this creates a new branch:
 git -C ~/vexo-connect-x-lanes/experience push -u github x/experience
 ```
 
-Then verify the remote actually holds what this document describes — the local
-SHA and the remote SHA must both read `6764af3` (or later, if more W5 commits
-land on the branch first):
+Then verify the remote actually holds it. These two must print the same SHA —
+naming a literal here would be wrong the moment another commit lands, so
+compare them rather than trusting either alone:
 
 ```
 git -C ~/vexo-connect-x-lanes/experience rev-parse HEAD
 git -C ~/vexo-connect-x-lanes/experience ls-remote --heads github x/experience
 ```
+
+Whatever that SHA is, `git log --oneline` must still show `6764af3` in its
+history — that is the commit these results were measured on.
 
 `main` is not a target and was not advanced. Coordination with W1 on merge
 order is still open — §5.
