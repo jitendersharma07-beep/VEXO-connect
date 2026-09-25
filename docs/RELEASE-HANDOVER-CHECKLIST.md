@@ -103,6 +103,58 @@ second was clean.
 cloud-readiness tree. It is **not** RC-verified — none of it ran on the lab or
 against `114ffc9`, and the two candidates are still unreconciled.
 
+### Row 10 continued — 2026-09-25T02:15Z, at `17058b9`
+
+Suite is now **790/790 in 30 files**, up from 785/29. The extra file is a fix,
+not a feature.
+
+- **An account-existence oracle was found in the recovery route and closed
+  (`17058b9`).** `POST /auth/forgot-password` answered an unregistered address
+  `200` *before attempting any send*, but let an SMTP failure for a registered
+  address escape as a `500`. So the address non-disclosure recorded as PASS
+  above was **conditional on the mail provider being healthy** — and it broke
+  precisely during a misconfiguration or an outage, which is both the state the
+  estate is in right now and the state it will pass through when the owner
+  first configures a provider. Anyone could read account membership off the
+  status code. All delivery failures now answer identically and the operator is
+  told through the log; `ChallengeThrottled` still surfaces deliberately.
+  `accountRecoveryOutage.test.js` holds it against a real `ECONNREFUSED` rather
+  than a mock, with positive controls that the send was genuinely attempted and
+  that the registered path reached it. Reverting the fix turns 3 of its 5 tests
+  red — verified, not assumed.
+- **All three remaining blockers now have prepared, reviewed procedures** —
+  `evidence/02-public-access-changeset-PROPOSED.md`,
+  `evidence/04b-mail-provider-owner-procedure.md`,
+  `evidence/07b-recovery-owner-procedure.md`. Each is NOT APPLIED and names the
+  one owner input it needs. Two traps worth pulling up into this ledger: the
+  staging TLS cert must be a **separate** `certbot certonly` and never an
+  `--expand` of the production cert (which covers only `atcworkspace.com` and
+  `www`, no wildcard, and which production HTTPS depends on); and
+  `/home/atc-noc/atc-pos/.env` is currently mode **664**, so it must be
+  `chmod 600` *before* an `SMTP_PASSWORD` is written into it.
+- **CR-3 is more serious than "a finding".** The backup **secret** key
+  `0F05CA51AEC13029` is in the `atc-noc` keyring — on the backup host, which is
+  where `docs/BACKUP-RESTORE.md` explicitly says it must not be ("not this
+  server"). The off-host archives exist to survive losing atc-noc; whoever
+  reaches atc-noc gets both the key and, via the shipping SSH key, write access
+  to the off-host copies. Until the key is held somewhere else, "can the owner
+  recover if this box dies?" is **no**, independently of whether the decryption
+  test passes. Nothing was moved — key material is the owner's to relocate.
+- **The till harness stays NOT RUN on this host,** and no compatible host
+  exists. `deploy/e2e-isolated.sh:19` refuses on `atc-noc` because production
+  POS genuinely runs here; the only other reachable machines are vexo-lab
+  (excluded by the brief), a reassigned laptop, and the owner's workstation.
+  The guard was not bypassed and the script was not edited. Section 6's
+  money-path evidence continues to rest on its earlier run against `1c7e8e6`.
+
+**Scope note, because a green suite invites over-reading.** Everything in row 10
+is about *cloud readiness*: public reachability, real mail, recoverable
+backups, and the accounts paths around them. It is **not** evidence that
+inventory, payments, provider integrations or hardware are complete — physical
+printing in particular stays NOT TESTED until observed paper output exists, and
+payment work remains on sandbox/manual methods. Production activation stays
+subject to the established deployment approval.
+
 ## VC-101 evidence — with provenance
 
 - **HTTP behaviour, RC-verified on the lab**: Window 1's harness, written
