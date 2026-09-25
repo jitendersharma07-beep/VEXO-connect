@@ -63,6 +63,23 @@
 // A run that cannot get the lock FAILS with the holder named. It must never
 // proceed anyway: proceeding is exactly the corruption above, reported as a
 // test failure somewhere unrelated.
+//
+// The same is true of losing the lock MID-run, but only one of the two ways
+// that can happen is a corruption, and the difference is the whole point of the
+// heartbeat:
+//   - ANOTHER run holds the key. It has already truncated these tables, so
+//     every assertion after that moment describes a database changing
+//     underneath it. Loud, and the run must not exit 0.
+//   - NOBODY holds the key. A session lock dies with its session, so this is
+//     this process's own connection having been replaced. Nothing was
+//     corrupted; serialization is simply gone until the key is taken again, so
+//     the heartbeat takes it again.
+// Until 2026-09-25 the check was `pid = pg_backend_pid()`, which is false in
+// BOTH cases and so could only ever report the worse one. It cost a green
+// 923-test run that was discarded on the strength of the warning while an
+// independent pg_stat_activity sampler was proving no second run existed. A
+// warning that cries wolf is worse than none: the next reader learns to ignore
+// it, and then a real theft passes for noise.
 
 import { PrismaClient } from '@prisma/client';
 
@@ -82,13 +99,19 @@ const PROGRESS_MS = 15_000;
 // 330 s fully idle, lock still in pg_locks and the backend still alive, so there
 // is no reap to outrun today. The heartbeat stays as insurance against that
 // being a pool-version detail, and earns its keep as the liveness assertion
-// below.
-const HEARTBEAT_MS = 30_000;
+// below. Tunable only so the controls that exercise the two branches below do
+// not have to wait 30 s per tick — nothing in a run should set it.
+const HEARTBEAT_MS = Number(process.env.VCX_TEST_DB_HEARTBEAT_MS ?? 30_000);
 
 const IDENTITY = `vcx-test-lock:${process.pid}`;
 
 let client = null;
 let heartbeat = null;
+// Set the moment a foreign holder is seen, and read in teardown: vitest has
+// already printed the results by then, so failing there is what keeps a run
+// whose fixtures were wiped from being reported as green.
+let stolenBy = null;
+let affinityNoted = false;
 
 const note = (msg) => process.stderr.write(`[test-db-lock] ${msg}\n`);
 
@@ -102,33 +125,118 @@ const lockClient = (url) => {
   return new PrismaClient({ datasources: { db: { url: u.toString() } } });
 };
 
-const held = async () => {
-  // classid/objid are the high and low halves of the bigint key; LOCK_KEY is
-  // below 2^32, so its high half is 0.
-  const [row] = await client.$queryRaw`
-    SELECT count(*)::int AS n
-      FROM pg_locks
-     WHERE locktype = 'advisory'
-       AND classid = 0
-       AND objid = ${LOCK_KEY}
-       AND pid = pg_backend_pid()
-       AND granted`;
-  return row.n > 0;
-};
-
-const holder = async () => {
-  const [row] = await client.$queryRaw`
-    SELECT a.pid,
-           a.application_name AS app,
-           date_trunc('second', now() - a.backend_start)::text AS age
+// Who holds the key on THIS database, and is it us.
+//
+// The database filter is load-bearing, not tidiness: pg_locks is CLUSTER-wide.
+// Advisory locks are scoped to a database, but the view is not — verified
+// 2026-09-25, a query from vcx_payint_test listed four other lanes holding this
+// same key on vcx_slotfresh_test, vcx_providers_test, vcx_floorplan_test and
+// vcx_inventory_test. All lanes share one server and differ only by database,
+// so without the filter every run on this box would see "somebody else holds
+// it" and report a theft that never happened. It is also why the waiting and
+// timeout messages can name the wrong lane's run without it.
+//
+// classid/objid are the high and low halves of the bigint key; LOCK_KEY is
+// below 2^32, so its high half is 0. LEFT JOIN because the identity is a
+// convenience and the lock row is the evidence: a backend that vanishes between
+// the two reads must still count as a holder, not disappear into "unheld".
+const holders = async () =>
+  client.$queryRaw`
+    SELECT l.pid::int AS pid,
+           (l.pid = pg_backend_pid()) AS mine,
+           coalesce(a.application_name, '') AS app,
+           coalesce(date_trunc('second', now() - a.backend_start)::text, 'unknown') AS age
       FROM pg_locks l
-      JOIN pg_stat_activity a ON a.pid = l.pid
+      LEFT JOIN pg_stat_activity a ON a.pid = l.pid
      WHERE l.locktype = 'advisory'
        AND l.classid = 0
        AND l.objid = ${LOCK_KEY}
        AND l.granted
-     LIMIT 1`;
-  return row ?? null;
+       AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+
+// Ours by IDENTITY, not just by backend pid. The distinction is the whole
+// defect: the 09-24 foundation false alarm had an independent poller watching
+// ONE holder pid hold this key continuously from its 90 s tick through 166 s
+// while the heartbeat was reporting the lock lost — so the lock had not moved,
+// the heartbeat's own query had, onto a connection that was not the one holding
+// it. Reading that as a theft would now FAIL the run: a worse bug than the
+// warning it replaced. application_name is set on the locking session before it
+// contends, so the identity travels with the lock and says "this process".
+const isOurs = (r) => r.mine || r.app === IDENTITY;
+
+const holder = async () => (await holders()).find((r) => !isOurs(r)) ?? null;
+
+// Other runs connected to this database, holding the key or not. globalSetup
+// sets application_name BEFORE it contends, so a competitor is visible here
+// whether or not it ever wins the lock — which is what lets the reconnect
+// message below say something evidence-based about the gap instead of assuming
+// the coast was clear.
+const peerRuns = async () => {
+  const [row] = await client.$queryRaw`
+    SELECT count(*)::int AS n
+      FROM pg_stat_activity
+     WHERE datname = current_database()
+       AND application_name LIKE 'vcx-test-lock:%'
+       AND application_name <> ${IDENTITY}`;
+  return row.n;
+};
+
+const reportTheft = (who) => {
+  stolenBy = who ?? { pid: 0, app: '', age: 'unknown' };
+  // First sentence kept byte-identical to the message this file has always
+  // printed: it is what the lane notes and handovers quote.
+  note(
+    'LOST the lock mid-run — results are not trustworthy, re-run alone' +
+      (who
+        ? ` — taken by ${who.app || '(unnamed)'}, backend pid ${who.pid}, connected ${who.age} ago`
+        : ' — the thief released it before it could be named')
+  );
+};
+
+// One heartbeat tick. Silent while the lock is ours, which is every tick of a
+// normal run.
+const checkLock = async () => {
+  const rows = await holders();
+  const ours = rows.filter(isOurs);
+  if (ours.length) {
+    // Held by this process, just not on the connection that asked. Nothing is
+    // wrong and nothing to do — a re-acquire would fail anyway, since the
+    // session holding it is one of ours. Said once, because this is the shape
+    // that used to be reported as a lost lock.
+    if (!ours.some((r) => r.mine) && !affinityNoted) {
+      affinityNoted = true;
+      note(`still held, on backend pid ${ours[0].pid} rather than this connection — serialization intact`);
+    }
+    return;
+  }
+
+  // Someone else has it. Nothing to take back — they are mid-truncate, and a
+  // blocking acquire here would just wait for the run that has already ruined
+  // this one.
+  const foreign = rows.find((r) => !isOurs(r));
+  if (foreign) return reportTheft(foreign);
+
+  // Unheld. try, never a blocking acquire: this runs on a timer inside a live
+  // suite, and it must not be able to stall one.
+  const [{ ok }] = await client.$queryRaw`SELECT pg_try_advisory_lock(CAST(${LOCK_KEY} AS bigint)) AS ok`;
+  if (!ok) return reportTheft(await holder());
+
+  // A replacement session starts with no application_name, and this one has to
+  // stay named: that name is how a peer — and the samplers used to audit this
+  // very warning — tell a participant from any other connection.
+  await client.$executeRawUnsafe(`SET application_name = '${IDENTITY}'`);
+  // Taking the key back after a theft is still worth doing — it keeps a third
+  // participant out of the rest of the run — but it is not an all-clear, and a
+  // log that reads like one is how the earlier false alarm did its damage.
+  if (stolenBy) return note('took the key back, but this run is already invalid — see above');
+
+  const peers = await peerRuns();
+  note(
+    'reconnected — the lock\'s connection was replaced, no other run held the key, re-acquired' +
+      (peers
+        ? `. ${peers} other test run(s) are on this database though, so the gap was contended: re-run alone before trusting a red result`
+        : '')
+  );
 };
 
 export async function setup() {
@@ -187,15 +295,8 @@ export async function setup() {
   );
 
   // Re-asserts that the lock is still ours, and keeps the session non-idle.
-  // Losing it mid-run would mean another run is already wiping underneath this
-  // one, which makes every later result meaningless — worth saying out loud
-  // rather than leaving to surface as an unrelated red assertion.
   heartbeat = setInterval(() => {
-    held()
-      .then((still) => {
-        if (!still) note('LOST the lock mid-run — results are not trustworthy, re-run alone');
-      })
-      .catch(() => {});
+    checkLock().catch(() => {});
   }, HEARTBEAT_MS);
   heartbeat.unref();
 
@@ -218,13 +319,34 @@ export async function setup() {
 export async function teardown() {
   if (heartbeat) clearInterval(heartbeat);
   heartbeat = null;
-  if (!client) return;
-  // Releasing explicitly keeps the handover observable; dropping the connection
-  // would release it anyway, which is why a killed run cannot wedge the lane.
-  try {
-    await client.$queryRaw`SELECT pg_advisory_unlock(CAST(${LOCK_KEY} AS bigint))`;
-  } finally {
-    await client.$disconnect();
-    client = null;
+  if (client) {
+    // Releasing explicitly keeps the handover observable; dropping the connection
+    // would release it anyway, which is why a killed run cannot wedge the lane.
+    // Swallowed because of that: if the session is already gone the unlock
+    // errors, and the disconnect below has released the lock regardless — it
+    // must not become the run's verdict, least of all masking the throw below.
+    try {
+      await client.$queryRaw`SELECT pg_advisory_unlock(CAST(${LOCK_KEY} AS bigint))`;
+    } catch {
+      /* already released with its session */
+    } finally {
+      await client.$disconnect();
+      client = null;
+    }
+  }
+
+  // Every result above was measured against a database another run was
+  // truncating, so passing them off as passes is the one outcome that must not
+  // happen. Throwing here is the only lever this file has left by teardown, and
+  // it exits non-zero.
+  if (stolenBy) {
+    const who = stolenBy.app || `(unnamed) backend pid ${stolenBy.pid}`;
+    stolenBy = null;
+    throw new Error(
+      `the test database lock was taken by ${who} while this run was using it.\n` +
+        '  Whatever is printed above is not a result: that run empties these tables on\n' +
+        '  acquire, so fixtures vanished mid-suite. Re-run alone — and if the suites are\n' +
+        '  green then, nothing here was broken.'
+    );
   }
 }
