@@ -285,35 +285,22 @@ export default function ReportView() {
                   </div>
                 ))}
               </div>
-              {report.meta.soldQuantities?.length ? (
-                <div className="mt-4 overflow-x-auto">
-                  <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-                    Menu quantities sold — measured
-                  </h3>
-                  <table className="w-full text-sm" data-testid="sold-quantities">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-400">
-                        <th className="px-3 py-2">Item</th>
-                        <th className="px-3 py-2 text-right">Sold</th>
-                        <th className="px-3 py-2 text-right">Net sales</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.meta.soldQuantities.map((r) => (
-                        <tr key={r.name} className="border-b border-slate-100 last:border-0">
-                          <td className="px-3 py-2 font-semibold text-pos-ink">{r.name}</td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtInt(r.qty)}</td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtMoney(r.netSales)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
             </div>
           ) : null}
 
-          <BasisNote basis={report.basis} caveats={report.caveats} notes={report.notes} />
+          <BasisNote
+            basis={report.basis}
+            caveats={report.caveats}
+            // The coverage note reached the screen only as the empty table's
+            // message, so it vanished the moment a report had rows to show —
+            // which is exactly when consumption needs it, since its rows fill two
+            // columns and leave four deliberately blank. Shown here only when the
+            // table is not showing it, so it appears once and always.
+            notes={[
+              ...(report.notes ?? []),
+              ...(report.coverage?.note && report.rows?.length ? [report.coverage.note] : []),
+            ]}
+          />
         </div>
       ) : null}
     </div>

@@ -1021,6 +1021,7 @@ export const buildConsumption = async (ctx) => {
   const soldColumns = [
     col('name', 'Item', 'text'),
     col('qty', 'Sold', 'integer'),
+    col('netSales', 'Net sales', 'money'),
     col('expected', 'Expected usage', 'qty'),
     col('physical', 'Physical depletion', 'qty'),
     col('wastage', 'Recorded wastage', 'qty'),
@@ -1028,13 +1029,33 @@ export const buildConsumption = async (ctx) => {
   ];
 
   const mix = await buildProductMix({ ...ctx, query: { groupBy: 'product' } });
+
+  // The measured figure belongs in `rows`, not in `meta`. Every export renders
+  // `rows`, so while these sat in meta.soldQuantities the coverage note below
+  // promised "shown below" and then the CSV, XLSX and PDF had nothing below it —
+  // a file that read as "nothing was sold" while the screen showed 380
+  // cheesecakes. The four absent figures are `null` and not `0`, which the three
+  // renderers all write as an empty cell: the distinction this whole report
+  // exists to preserve.
+  const soldRows = mix.rows.map((r) => ({
+    name: r.name,
+    qty: r.qty,
+    netSales: r.netSales,
+    expected: null,
+    physical: null,
+    wastage: null,
+    unexplained: null,
+  }));
   return envelope({
     key: 'consumption',
     label: 'Ingredient consumption and variance',
     period,
     scope,
     columns: soldColumns,
-    rows: [],
+    rows: soldRows,
+    // No totals. Summing "Sold" across a cheesecake and a cold brew would be a
+    // count of unlike things, and the four columns that could be totalled
+    // honestly are the ones this deployment cannot measure.
     totals: null,
     coverage: {
       ingredients: 0,
@@ -1055,8 +1076,8 @@ export const buildConsumption = async (ctx) => {
     meta: {
       state: capability?.state ?? 'UNAVAILABLE',
       missingInputs: missing,
-      // (1) of the five figures is measurable today, so it is the one that ships.
-      soldQuantities: mix.rows.map((r) => ({ name: r.name, qty: r.qty, netSales: r.netSales })),
+      // Which of the five the reader is looking at, and which they are not. The
+      // quantities themselves are in `rows`; this says what they mean.
       figures: [
         { key: 'sold', label: 'Menu quantities sold', measured: true },
         { key: 'expected', label: 'Expected ingredient usage from recipes', measured: false },

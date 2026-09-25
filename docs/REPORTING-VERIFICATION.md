@@ -25,10 +25,12 @@ live" are different claims and only the first one is being made.
 | Lane commit | `969e2af` — the reporting work |
 | Merge commit | `6fdd2f9` — `main` (accounts lane, 22 commits) merged in |
 | Base before merge | `1c7e8e6` |
-| Evidence commit | this document, `frontend/qa/screens/reporting/` (30 screenshots + `results.json`), a fix to two checks in `scripts/reporting-verify.mjs`, and a one-line wording fix in `capability.js` |
+| Evidence commit | `b0b1e17` — this document, `frontend/qa/screens/reporting/` (30 screenshots + `results.json`), a fix to two checks in `scripts/reporting-verify.mjs`, and a one-line wording fix in `capability.js` |
+| Naming commit | `6322482` — one paragraph, adding the hash above |
+| Fix commit | defect 21: `builders.js`, `ReportView.jsx`, two harnesses, this document, regenerated screenshots |
 
-**Dirty state when the figures were taken:** `6fdd2f9` plus four paths, and it
-matters which of them is product code:
+**Dirty state when the first set of figures was taken:** `6fdd2f9` plus four
+paths, and it matters which of them is product code:
 
 | Path | Kind |
 |---|---|
@@ -46,12 +48,22 @@ figure here describes code that is no longer in the tree.
 Every figure in §6 was measured after the merge, not on the pre-merge lane
 commit.
 
-**Those four paths are now committed as `b0b1e17`**, so the tree every figure
-below was measured on is a commit that can be checked out rather than a
-description of somebody's working directory — `git show --stat b0b1e17` lists
-exactly the four. The only change made after `b0b1e17` is this paragraph, which
-names it: a document cannot contain the hash of the commit that introduces it,
-so the sequence is two commits and this is the second.
+**Those four paths were committed as `b0b1e17`**, so the tree those figures were
+measured on is a commit that can be checked out rather than a description of
+somebody's working directory — `git show --stat b0b1e17` lists exactly the four.
+A document cannot contain the hash of the commit that introduces it, so `6322482`
+is one paragraph doing nothing but naming `b0b1e17`.
+
+**Then the closing demonstration found defect 21** (§5), in the branch that had
+already been pushed, and the tree moved a third time. That commit changes product
+code — `builders.js` and `ReportView.jsx` — so the figures affected by it were
+re-measured rather than carried over: the unit gate, the verifier, the browser
+walkthrough, the build, the consumption row in §6's latency table and 21 of the
+30 screenshots. §4 lists the evidence and §6 the figures. Its own hash is not
+printed here, because the recursion has to stop somewhere and one naming commit is
+enough to establish the convention: **the newest commit on `x/reporting` is the
+one this document describes**, and `git log --oneline -4 x/reporting` reads the
+sequence back.
 
 ### Files
 
@@ -225,6 +237,7 @@ levels come apart.** The engine is implemented and unit-tested; the report is
 | The unit conversion it rests on | **Implemented and tested.** `units.js`, and incompatible units are refused, not summed |
 | The `consumption` report on *this* build | **`UNAVAILABLE`** — *"Recipes and stock movements are not part of this deployment."* It has a builder; the models it needs belong to another lane |
 | The consumption **screen** | **Verified in the browser.** It lists the five figures as five separate things, labels the four it cannot measure *not measured*, renders **no zero variance**, and still shows the one quantity it does have — 6 rows of measured menu quantities |
+| The consumption **export** | **Verified by fetching the file.** The same 6 rows, and the four unmeasured columns are empty cells rather than zeros in CSV, XLSX and PDF alike. This was defect 21; see §5 |
 
 So: the arithmetic is proved by test, the screen's honesty is proved by
 screenshot, and the end-to-end figure is **not** proved on this deployment
@@ -312,7 +325,9 @@ actions, so nothing is offered that the API would refuse.
 ## 4. Evidence
 
 All four gates were run on `6fdd2f9` against the isolated databases named in
-§7. None of them touched a shared or production database.
+§7, and re-run after each change made since — the figures in this section are
+the merge-commit run, and **§6's gate table is the final one**. None of them
+touched a shared or production database.
 
 ### Backend unit and API tests
 
@@ -409,7 +424,7 @@ not a measurement.
 
 ## 5. Defects found and fixed
 
-Twenty. Each was found by reading the code or by a check that failed, and
+Twenty-one. Each was found by reading the code or by a check that failed, and
 each is fixed in this branch.
 
 **Authorisation and correctness**
@@ -499,6 +514,32 @@ each is fixed in this branch.
     Re-phrased so the label is a subject and not a noun: *"Kitchen and service
     delays: the data is recorded, but this version does not build the report from
     it."*
+21. **Every consumption export was an empty table under a note promising rows.**
+    The report's coverage note says *"Menu quantities sold are shown below
+    because they are measured"* — and on the screen they were, but the six
+    measured rows lived in `meta.soldQuantities` while **every export renders
+    `rows`**, which the builder set to `[]`. So the CSV, XLSX and PDF were a
+    header line and nothing else: an owner exporting consumption got a file whose
+    own note pointed at rows that were not in it, which reads as *nothing was
+    sold* — while the screen beside it showed 380 cheesecakes. The same empty
+    table went out with every scheduled delivery, since `schedule.js` calls the
+    same renderer. It is the failure this whole report family exists to prevent,
+    arriving through the back door: not a fabricated zero, but an absence that
+    reads as one.
+
+    `export.js` opens by claiming *"there is one set of numbers and three
+    renderings of it"*, and that invariant is only true while the screen renders
+    `rows` — so the fix is to make it true rather than to special-case the
+    exporter. `rows` now carries the measured quantities with `null` — not `0` —
+    in the four columns this deployment cannot measure; all three renderers write
+    a null as an empty cell, and the screen renders the same `rows` through the
+    same table every other report uses. The bespoke three-column table it used to
+    draw is gone, so there is one table and one source for it.
+
+    Found by fetching the file at the end of the work, when the document was
+    already written and the branch already pushed. Checks E10b and E10c now
+    compare the export against the screen, which is the comparison nobody had
+    been making.
 
 ### Defects in this lane's own evidence
 
@@ -514,6 +555,17 @@ Worth recording separately, because a false PASS is worse than a failure.
 - **Two vacuous passes.** "No group exceeded the fold cap" passes loudest when
   there is no data at all. Replaced with a skip that says so, plus a heading
   count that always runs.
+- **A third vacuous pass, and this one was hiding a live defect.** Browser check
+  3.3, *"the menu quantities that ARE measured are shown on screen"*, compared
+  the rows it counted against
+  `consApi.body?.sold?.length ?? consApi.body?.soldQuantities?.length ?? soldRows`.
+  Neither field has ever existed — the payload carried `meta.soldQuantities` —
+  so both `??` arms fell through to `soldRows`, and the check compared the number
+  with itself. It passed every run without once looking at the API, and it is the
+  reason defect 21 above survived a green walkthrough: the check that would have
+  caught the screen and the data disagreeing was, in the end, only asking the
+  screen whether it agreed with itself. It now compares against `rows` with no
+  fallback, so a missing field fails rather than passes.
 - **A regex that passed on the wrong screen.** `/permission|access/i` also
   matches the navigation's "Users & Access", so the permission-denied check
   would have passed on a page that rendered nothing. Now it asserts the exact
@@ -585,8 +637,8 @@ serialisation, not just the query.
 | `sales` | 5 | 84 ms |
 | `collections` | 6 | 84 ms |
 | `salesByPeriod` | 30 | 79 ms |
+| `consumption` | 6 | 79 ms † |
 | `discounts` | 5 | 77 ms |
-| `consumption` | 0 | 75 ms |
 | `productMix` | 6 | 66 ms |
 | `tax` | 1 | 37 ms |
 | `cash` | 71 | 34 ms |
@@ -597,9 +649,31 @@ serialisation, not just the query.
 Slowest report **115 ms** against a 2 s budget. Consolidated dashboard over the
 whole financial year, five stores: **105 ms** against a 3 s budget.
 
-`consumption` costs 75 ms to return nothing, which is not waste: it resolves the
-caller's scope and the deployment's capability before it can say so, and saying
-so honestly is the feature.
+† Eleven of those rows were measured before defect 21 was found, and the twelfth
+stopped being true when it was fixed: `consumption` used to return **0 rows in
+75 ms**, and the sentence that stood here praised it for costing 75 ms to return
+nothing. It now returns the six measured menu rows. Its row is re-measured, but
+by a different method — **79 ms median over the four `consumption` requests the
+verifier and the browser walkthrough made against the fixed tree**, slowest
+87 ms, read out of the API's own request log rather than from a fresh benchmark.
+
+The controlled re-run this table deserves was attempted and could not be made:
+the probe needs to authenticate, the demo stack deliberately never stores the
+password it was seeded with, and all four ways of obtaining a session without
+printing a secret were refused by this session's command classifier. Rather than
+leave a figure that the fix had made false, or restate a differently-measured one
+in the same column as though the methods matched, the row carries a dagger. The
+log medians for the reports that did not change agree with the benchmarked
+figures to within a few tens of milliseconds — `dashboard` 105 ms against 105 ms,
+`locationComparison` 134 against 115, `sales` 55 against 84 — across mixed
+presets, which is agreement about the order of magnitude and nothing finer.
+
+79 ms and 75 ms are two different measurements of two different trees, so the
+4 ms between them is not the cost of the fix and should not be read as one.
+What the figure does say is that `consumption` is still in the same band as the
+reports either side of it: the product-mix query it now runs was already being
+run for `productMix` at 66–78 ms, and the four strands it does *not* measure cost
+nothing to report as unmeasured. Saying so honestly is the feature.
 
 Grouping is the axis that grows, so it was measured separately across the full
 financial year:
@@ -629,22 +703,26 @@ within ±10 ms, so nothing here is sitting on a knife edge.
 
 ### Gate totals
 
-Every row was run on the tree this commit contains, after the `capability.js`
-wording fix, not before it.
+Every row was run on the final tree, after defect 21 was fixed, not before it.
 
 | Gate | Result |
 |---|---|
-| `scripts/reporting-test.sh` | 35 files, **1054 passed, 0 failed**, 240.56 s |
-| `scripts/reporting-verify.mjs` | **102 passed, 0 failed**, 1 note |
+| `scripts/reporting-test.sh` | 35 files, **1054 passed, 0 failed**, 213.81 s |
+| `scripts/reporting-verify.mjs` | **104 passed, 0 failed**, 1 note |
 | `qa/reporting-browser-qa.mjs` | **64 passed, 0 failed, 2 skipped**, 30 screenshots |
-| `npx vite build` | clean, 4.38 s |
+| `npx vite build` | clean, 4.62 s, 1692 modules |
 | `scripts/reporting-db.sh status` | 24 migrations, schema up to date, no pending |
 
-The unit gate was run twice on the merged tree for a reason worth recording:
-1054/1054 in 248.86 s **before** the `capability.js` change and 1054/1054 in
-240.56 s **after** it. A single green run after a late edit proves the edit did
-not break anything; two matching runs either side of it also show that the count
-did not move, which is the claim a reader actually wants.
+The unit gate was run three times on the merged tree, and the sequence is worth
+recording: 1054/1054 in 248.86 s before the `capability.js` wording change,
+1054/1054 in 240.56 s after it, 1054/1054 in 213.81 s after the defect 21 fix. A
+single green run following a late edit proves the edit did not break anything;
+three matching counts either side of two edits also show the total never moved,
+which is the claim a reader actually wants. The verifier's total *did* move, from
+102 to 104, and that is the opposite kind of news: the two new checks are E10b
+and E10c, which assert that the consumption export carries the same rows as the
+screen and that its four unmeasured columns are empty rather than `0`. They exist
+because nothing asserted either thing, which is how defect 21 shipped.
 
 ---
 

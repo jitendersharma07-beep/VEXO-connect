@@ -573,12 +573,39 @@ const catalog = (await get(users.owner, '/reporting/catalog')).body;
   check('E8 the five consumption figures are listed separately, with only the measured one claimed',
     f.length === 5 && measured.length === 1 && measured[0] === 'sold',
     `measured: ${measured.join(', ')} | not measured: ${not.join(', ')}`);
+  // Not "there are no rows". The rows carry the one measured figure, and the
+  // claim is about the other four: absent, and absent is `null`, because 0 would
+  // say the shelves were counted and agreed with the recipes.
+  const unmeasured = ['expected', 'physical', 'wastage', 'unexplained'];
+  const zeroed = r.body.rows.flatMap((row) =>
+    unmeasured.filter((k) => row[k] === 0 || row[k] === '0').map((k) => `${row.name}.${k}`));
+  const nulled = r.body.rows.every((row) => unmeasured.every((k) => row[k] === null));
   check('E9 consumption reports no variance at all rather than a zero variance',
-    r.body.rows.length === 0 && Boolean(r.body.coverage?.note) && (r.body.caveats ?? []).some((c) => /zero variance/i.test(c)),
-    `${r.body.rows.length} variance rows; note present: ${Boolean(r.body.coverage?.note)}`);
+    zeroed.length === 0 && nulled && Boolean(r.body.coverage?.note)
+      && (r.body.caveats ?? []).some((c) => /zero variance/i.test(c)),
+    zeroed.length ? `zero-valued: ${zeroed.join(', ')}` :
+      `${r.body.rows.length} rows, 4 unmeasured columns null in all of them`);
   check('E10 the menu quantities that ARE measured are shown',
-    (r.body.meta?.soldQuantities ?? []).length > 0,
-    `${(r.body.meta?.soldQuantities ?? []).length} items sold`);
+    r.body.rows.length > 0 && r.body.rows.every((row) => Number(row.qty) > 0),
+    `${r.body.rows.length} items sold`);
+  // The check whose absence let a defect ship: the coverage note says the menu
+  // quantities are "shown below", and for every export that sentence is only true
+  // if they are in `rows`. While they sat in meta.soldQuantities the screen showed
+  // 6 items and the CSV showed a bare header — a file that read as "nothing sold".
+  const csv = await get(users.owner, '/reporting/reports/consumption/export', { preset: 'THIS_MONTH', format: 'csv' });
+  const cells = csvCells(String(csv.body));
+  const head = r.body.columns[0].label;
+  const hi = cells.findIndex((row) => row[0] === head);
+  const dataRows = hi === -1 ? [] : cells.slice(hi + 1).filter((row) => row.some((c) => String(c).trim()));
+  check('E10b the export carries the same measured rows the screen shows',
+    hi !== -1 && dataRows.length === r.body.rows.length,
+    `${r.body.rows.length} rows on screen, ${dataRows.length} under "${head}" in the CSV`);
+  // And the blanks are blank. A CSV cell holding 0 under "Unexplained" is the
+  // fabricated reconciliation this report refuses to print.
+  const csvZero = dataRows.filter((row) => row.slice(3).some((c) => String(c).trim() === '0'));
+  check('E10c the four unmeasured columns are empty in the export, not zero',
+    csvZero.length === 0,
+    csvZero.length ? `${csvZero.length} rows carry a 0` : 'every unmeasured cell is empty');
 }
 {
   // §5: "Do not label food margin as net profit when required expenses such as

@@ -363,12 +363,19 @@ try {
     !/unexplained\s*variance\s*:?\s*0\b/i.test(consText) && /not measured|not recorded|no count|not part of this deployment/i.test(consText),
     'no zero variance rendered');
 
-  const soldTable = await owner.$('[data-testid="sold-quantities"]');
+  // Counted off the same table every other report renders, because that is the
+  // one the exports are built from. The previous form read a bespoke table and
+  // compared its length against `body.sold ?? body.soldQuantities ?? soldRows` —
+  // neither field existed, so it fell through to comparing soldRows with itself
+  // and passed without ever looking. A vacuous check is how the screen and the
+  // CSV came to disagree while this said 3.3 PASS.
+  const soldTable = await owner.$('[data-testid="report-table"]');
   const soldRows = soldTable ? await owner.evaluate((el) => el.querySelectorAll('tbody tr').length, soldTable) : 0;
   const consApi = await api(ownerToken, '/reporting/reports/consumption', { preset: 'THIS_MONTH' });
+  const apiRows = consApi.body?.rows?.length ?? -1;
   check('3.3 the menu quantities that ARE measured are shown on screen',
-    soldRows > 0 && soldRows === (consApi.body?.sold?.length ?? consApi.body?.soldQuantities?.length ?? soldRows),
-    `${soldRows} item rows`);
+    soldRows > 0 && apiRows > 0 && soldRows === apiRows,
+    `${soldRows} rows on screen, ${apiRows} from the API`);
 
   check('3.4 the consumption screen does not call a food margin a profit',
     !/net\s*profit/i.test(consText), 'no "net profit" on screen');
