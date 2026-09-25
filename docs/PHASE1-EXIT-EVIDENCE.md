@@ -6,11 +6,20 @@ shell was classifier-blocked); results reported verbatim by the owner.
 
 ## Base
 
-- Foundation work committed: `x/foundation` @ `4f2a91c` (on top of `38856d3`),
-  ~50 files: migrations `20260924100000/100100/100200`, routes
+- Foundation work (on top of `38856d3`), ~50 files: migrations
+  `20260924100000/100100/100200`, routes
   legal-entities/gst-registrations/brands/regions/terminals/devices/users/
   permissions, middleware, lib (identity/invoice/permissions/audit), tests,
   drafted frontend org pages.
+- **SHA correction (W1 session `77a07c43`, 2026-09-24 ~11:58Z):** the
+  `4f2a91c` previously recorded here **never existed** — a compaction error
+  in session `ed6ffece` invented it. At gate time (07:16Z) the tested bytes
+  were UNCOMMITTED in the foundation worktree. They are preserved as
+  **`bddbe82`** (`x/w2-frontend` read-only snapshot; fingerprint
+  `769ada6f…` matched the live tree at 07:21Z) and are contained in
+  `cfa22e9` (`x/foundation` 08:43Z, mixed with early VC-102 work); the
+  foundation lane's verified state is `baa2456` (suite 479/479). Read
+  `bddbe82` as the byte pin and `cfa22e9` as foundation-lane containment.
 
 ## Exit-gate results (spec Phase-1 gate: "Migration rehearsal; cross-tenant/
 store negatives; clean pinned base")
@@ -21,7 +30,7 @@ store negatives; clean pinned base")
 | Shadow-DB schema diff (`vcxl migsql`) | CLEAN | output: `-- This is an empty migration.` — Prisma schema and migration chain agree |
 | Fresh-install rehearsal (empty DB, full migrate) | PASS | all 16 migrations applied end-to-end |
 | Populated-baseline rehearsal (v1.0-shaped data, then migrate) | PASS | backfill counts equal for Branch.publicId, InvoiceCounter.seriesPrefix, Payment.branchId — no row left unbackfilled |
-| Clean pinned base | PASS | `4f2a91c` published in WINDOW-2-HANDOFF.md / WINDOW-3-HANDOFF.md |
+| Clean pinned base | PASS (SHA corrected) | real pin = `bddbe82` (verified snapshot); the SHA published in the handoffs until 2026-09-24 ~11:58Z (`4f2a91c`) was wrong — see SHA correction above |
 
 ## Explicitly NOT covered
 

@@ -4,8 +4,13 @@ Issued by Window 1 (integration coordinator, session `ed6ffece`), 2026-09-24.
 
 ## Base
 
-**Agreed development base: `x/foundation` @ `4f2a91c`** (Phase-1 foundation
-committed 2026-09-24; backend suite passed). Nothing in Phase 1 changes
+**Agreed development base — CORRECTED (W1, 2026-09-24 ~11:58Z):
+`x/foundation` @ `baa2456`** (suite 479/479 owner-verified; lane tip
+`6b2cdf5` + in-flight test-infra work). The `4f2a91c` published earlier
+never existed — prior-session compaction error; the Phase-1 bytes are
+pinned at `bddbe82` (`x/w2-frontend` snapshot) and contained in `cfa22e9`.
+
+Nothing in Phase 1 changes
 the print path (`buildReceipt`, Receipt print CSS) — your baseline for print
 evidence remains the deployed v1.0.1 behaviour (KOT 1 page / receipt 1 page,
 verified 8/8 on 2026-09-23; do NOT re-run the prod checks — permanent

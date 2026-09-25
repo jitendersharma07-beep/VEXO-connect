@@ -4,9 +4,16 @@ Issued by Window 1 (integration coordinator, session `ed6ffece`), 2026-09-24.
 
 ## Agreed development base — READ THIS FIRST
 
-- **Agreed development base: `x/foundation` @ `4f2a91c`** (Phase-1 foundation
-  work, committed 2026-09-24 on top of `38856d3`). Branch your work off this
-  SHA; hand back as a branch, never a patch.
+- **CORRECTION (W1, 2026-09-24 ~11:58Z): the previously published base SHA
+  `4f2a91c` does not exist anywhere in this repo** — a prior-session
+  compaction error invented it. The Phase-1 foundation bytes are really
+  preserved as **`bddbe82`** (`x/w2-frontend`, your own read-only snapshot,
+  fingerprint-verified against the live tree 07:21Z) and are contained in
+  `cfa22e9` (`x/foundation` 08:43Z, mixed with early VC-102).
+- **Agreed development base today: `x/foundation` @ `baa2456`** (full suite
+  479/479 owner-verified). The lane tip is `6b2cdf5` (tx-budget +
+  storage-busy mapping) with further test-infra work in flight — do not
+  branch off the moving tip. Hand back as a branch, never a patch.
 - `EVIDENCE-STALE-DOC-LINES.md` and `frontend/dist` in the foundation lane are
   deliberately NOT in the commit (handoff note + build output).
 
@@ -19,7 +26,9 @@ Backend suite PASSED 2026-09-24 (owner-run `vcxl test` against
 - Populated-baseline rehearsal: passed — backfill counts all equal
   (Branch.publicId, InvoiceCounter.seriesPrefix, Payment.branchId).
 
-**Phase-1 exit gate: PASSED.** Base `x/foundation` @ `4f2a91c` is confirmed.
+**Phase-1 exit gate: PASSED.** Pinned Phase-1 bytes: `bddbe82`
+(`x/w2-frontend` snapshot, fingerprint-verified 07:21Z) — see the base
+correction above; the `4f2a91c` formerly printed here was wrong.
 
 ## Dev stack (isolated, local — never the lab, never prod)
 
