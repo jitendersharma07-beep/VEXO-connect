@@ -330,10 +330,18 @@ databases from earlier sessions, inside the off-limits 24 GB of volumes.
    `7565dff8`.
 4. **B1, B2, B4** — supply the specification (or declare it lost), the client data pack, and
    the three backup-custody items.
-5. **The staging lane's 17 commits** — may they be published to `main`, and who drives the
-   5-conflict merge? Offered in the PEER-NOTE, no answer yet. The merge is also the natural
-   moment to correct `globalSetup.js`'s stale `vcx_foundation_test` comment, which is already
-   in the conflict set.
+5. **The staging lane's commits** — may they be published to `main`? **The "who drives it"
+   half is now settled between sessions and needs nothing from the owner:** the staging
+   session answered at 04:20Z that nobody drives it today, that publishing is the owner's
+   call and they have not asked for it either, and that if the owner does ask, `w2-close` is
+   the right place and this session is the right driver. So the only open half is the owner's
+   yes or no. Two facts that belong with that decision:
+   - their remote tip is still `3fbc35a`, and **three unpushed commits are interleaved by
+     author** — `97457ee` (theirs), `856e179` (the printer session's), `fdaccdf` (theirs).
+     There is no ordering in which one session pushes only its own work, so whoever pushes
+     releases someone else's commit. They have declined to, on a public repo, and said so;
+   - the merge is the natural moment to correct `globalSetup.js`'s stale `vcx_foundation_test`
+     comment, which is already in the five-conflict set.
 
 **Cheapest next action by anyone, in order:**
 
@@ -342,3 +350,15 @@ databases from earlier sessions, inside the off-limits 24 GB of volumes.
 2. `lvextend` + `resize2fs` (owner, root).
 3. The merge answer, which unblocks publishing five security and correctness fixes that
    currently exist only on a loopback-only staging stack.
+4. Two one-liners, both held only because a session lacks a permission, neither urgent:
+   - `git push github x/w2-integration-close:main` — verified here as a clean fast-forward
+     `ea04c07..9f0716f` gaining exactly the two commits in this file, and refused by this
+     session's command classifier for the third time on the `:main` target form while the
+     bare branch push went through. Nothing is wrong with the command; the owner ran the
+     identical line by hand two hours earlier and it worked;
+   - `bash vcxcr edge` in the staging lane — the staging session found that the running edge
+     bind-mounts a hand-placed copy of `staging-edge.conf` rather than the repo's, and their
+     own assertion script had been checking a file nginx never opens. The two are
+     byte-identical today and the live run is 13/13, so this is residue, not a fault. It
+     needs a container recreate, which their session is blocked from doing: seconds of
+     loopback downtime, no data involvement.
