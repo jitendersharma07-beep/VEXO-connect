@@ -35,7 +35,7 @@ kept separate and never merged:
 
 | Tier | What it means | Where it stands |
 | --- | --- | --- |
-| **1 — Automated / simulator** | Covered by the test suite in this repository, run on this host, against simulated providers and devices. Proves our logic; proves nothing about anyone else's wire format or hardware. | **923 tests, all passing** on the tested SHA `d49b7b6`. §6 |
+| **1 — Automated / simulator** | Covered by the test suite in this repository, run on this host, against simulated providers and devices. Proves our logic; proves nothing about anyone else's wire format or hardware. | **923 tests, all passing** on the tested SHA `17d3bbd`. §6 |
 | **2 — Provider sandbox, reads** | Real Razorpay **test** account, over the network, GET only. Proves the provider's wire format really is what we assumed. | **9 checks, all passing.** §6 |
 | **3 — Provider sandbox, writes** | Real Razorpay **test** account, creating real orders. Proves the provider *accepts* what we send, not merely that our stub echoes it. | **16 checks, all passing.** §6 |
 | **4 — Physical device** | A physical card terminal, printer or cash drawer did the thing. | **Nothing in this document claims this.** §8, §9 |
@@ -292,47 +292,52 @@ that is `drawer.open.manual`.
 
 ### Tier 1 — the combined regression gate
 
-The whole suite on **`d49b7b6`**, the tested SHA, on this host, against
-`vcx_payint_test`, on 2026-09-25. Run twice on that same commit:
+The gate of record is the whole suite on **`17d3bbd`**, the tested SHA, on this
+host, against `vcx_payint_test`, on 2026-09-25:
 
 ```
-run 1                            run 2
-Test Files  32 passed (32)       Test Files  32 passed (32)
-     Tests  923 passed (923)          Tests  923 passed (923)
-  Duration  210.35s                 Duration  195.55s
+Test Files  32 passed (32)
+     Tests  923 passed (923)
+  Duration  186.33s
 ```
 
-**923 passed, 0 failed, 0 skipped**, both times. That is this lane's 761 plus
-the accounts lane's files, with nothing lost on either side: 32 files and the
-per-file counts sum to exactly 923. Nothing is skipped — vitest prints a
-separate `skipped` tally when anything is, and neither run has one. The only
-occurrence of the word in either log is inside a *passing* test's name,
-`globalLimiter skipped (NODE_ENV=test at load)`.
+**923 passed, 0 failed, 0 skipped.** That is this lane's 761 plus the accounts
+lane's files, with nothing lost on either side: 32 files and the per-file counts
+sum to exactly 923. Nothing is skipped — vitest prints a separate `skipped`
+tally whenever anything is, and there is none. The only occurrence of the word
+in the log is inside a *passing* test's name, `globalLimiter skipped
+(NODE_ENV=test at load)`.
 
-The gate had already passed on the merge commit `54a55f3`, before the tier-3
-probes and this document's corrections were committed. It was re-run on
-`d49b7b6` rather than carried forward, so that the SHA recorded here is the SHA
-actually tested and not its parent.
+The gate was re-run at each SHA rather than carried forward from the last one
+that passed, so the number recorded is never inherited from a parent:
 
-An earlier run reported the same 923 but printed `[test-db-lock] LOST the lock
-mid-run — results are not trustworthy, re-run alone` partway through, so it was
-**discarded rather than reported**. The runs above hold the advisory lock for
-their whole duration, and that is not taken on trust in either direction:
+| SHA | Result | Duration |
+| --- | --- | --- |
+| `54a55f3` the merge | 32 files, 923 passed | 201.49s |
+| `d49b7b6` | 32 files, 923 passed | 210.35s |
+| `d49b7b6` again | 32 files, 923 passed | 195.55s |
+| **`17d3bbd` the tested SHA** | **32 files, 923 passed** | **186.33s** |
 
-- run 2's complete output was captured to a file, and the only `[test-db-lock]`
-  lines in it are `acquired as vcx-test-lock:2147196` and `emptied 61 tables`.
-  There is no loss note anywhere in it — absence at the tail would have proved
-  nothing, because the heartbeat prints mid-run.
-- `pg_stat_activity` was sampled every two seconds across both runs (341 and
-  343 samples). The only `vcx-test-lock:*` identity on the database in each was
-  that run's own — `2124111`, then `2147196`, the latter matching the
-  `acquired as` line exactly. A competing run registers that name *before* it
-  takes the lock, so a second participant would have appeared in the samples
-  whether or not it won the lock.
+**Why any of that is trusted.** An earlier run reported the same 923 but printed
+`[test-db-lock] LOST the lock mid-run — results are not trustworthy, re-run
+alone` partway through, so it was **discarded rather than reported** — a run
+whose own harness disowns it is not evidence, whatever its counts say. The runs
+above are not trusted merely for the absence of that line either:
+
+- the complete output of each is kept, not just its tail. The heartbeat that
+  prints the warning fires *mid-run*, so a clean tail proves nothing and the
+  whole log has to be searched. In `17d3bbd`'s log the only `[test-db-lock]`
+  lines are `acquired as vcx-test-lock:2193283` and `emptied 61 tables`.
+- `pg_stat_activity` was sampled every two seconds throughout each run (315 to
+  343 samples). The only `vcx-test-lock:*` identity on the database was that
+  run's own, and it matches the `acquired as` line exactly — `2193283` here.
+  This is the load-bearing part: `globalSetup.js` sets `application_name`
+  **before** it contends for the lock, so a competing run would appear in these
+  samples whether or not it ever won, and none did.
 
 The cause of the discarded run's report was not established and is recorded in
-§8 as a tooling item. What matters here is that the gate of record is one whose
-own harness did not disown it.
+§8 as a tooling item, because the honest reading is that the heartbeat cannot
+currently tell a stolen lock from its own connection having been replaced.
 
 The 105 tests this lane added are:
 
@@ -725,12 +730,17 @@ drawer and hold a card. Each line is a yes/no with a witness.
 | Merge commit | `54a55f3` — "Merge x/payments into main: tenders that say what confirmed them, and a drawer that admits what it does not know" |
 | Integration branch | `x/payments-integration` |
 | Verification commit | `d49b7b6` — "Verify the payment integration against the real provider, and correct what the sandbox disproved" |
-| **Tested SHA** | **`d49b7b6`** — 32 files, 923 tests, 0 failed, 0 skipped, run twice (§6) |
+| Re-proof commit | `17d3bbd` — "Re-prove the sandbox tiers on the delivered tree, and record the fifth lag sample" |
+| **Tested SHA** | **`17d3bbd`** — 32 files, 923 tests, 0 failed, 0 skipped (§6) |
 
-The tested SHA is `d49b7b6`. The commit after it changes only the three lines of
-this table and the tier-1 paragraphs in §6 that name the SHA — no source, no
-schema, no test. It could not be tested before it existed, and re-testing to
-record a third SHA would only move the problem along by one commit.
+**`17d3bbd` is the tested SHA, and it is the last commit that changes anything
+executable.** The commit after it edits only the lines that name the SHA — this
+table's last two rows, the tier-1 block in §6 and the tier-1 row in §1. No
+source, no schema, no migration, no test. A document cannot state its own
+commit's hash, so one such commit is unavoidable; testing again to record a
+further SHA would only move the same gap along by one. What is avoidable is
+recording a SHA that was never tested, and that has not been done here — the
+gate was re-run at every commit that touched code, as the table in §6 shows.
 
 Two conflicts, both additive, resolved by keeping both sides: `config/env.js`,
 where the accounts lane's SMTP block and this lane's payment-secret and
