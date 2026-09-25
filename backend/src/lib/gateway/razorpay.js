@@ -220,8 +220,9 @@ const paiseFrom = (value) => (Number.isSafeInteger(value) && value >= 0 ? value 
 //
 // MEASURED, and it changes what this is worth: the receipt query is a lagging
 // index. An order fetched by id answers at once, but the same order does not
-// appear under ?receipt= for a while — 7.7 s, 16.0 s, 30.0 s and 32.8 s on four
-// samples against the sandbox, with no ceiling established. This function runs
+// appear under ?receipt= for a while — 7.7 s, 16.0 s, 30.0 s, 30.8 s and 32.8 s
+// on five samples against the sandbox, with no ceiling established. Four of the
+// five are over 15 s. This function runs
 // immediately after the POST it is recovering from, so it will usually return
 // null and createSession will rethrow the original error.
 //

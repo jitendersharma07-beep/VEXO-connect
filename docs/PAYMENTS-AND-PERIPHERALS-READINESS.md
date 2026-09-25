@@ -369,8 +369,9 @@ apart* is the pair that shows the sensor path is real rather than always-true.
 
 ### Tier 2 — provider sandbox, reads
 
-Against the real Razorpay test account, re-run from the merged tree on
-2026-09-25: **9 checks passed, 0 failed.** GET only.
+Against the real Razorpay test account, re-run on 2026-09-25 from a clean tree
+at the delivered commit — not from the tree as it stood mid-work — so the code
+probed is the code shipped: **9 checks passed, 0 failed.** GET only.
 `scripts/razorpay-sandbox-read-probe.mjs`.
 
 Its load-bearing control: `verifyCredentials` is asked with a deliberately wrong
@@ -382,9 +383,19 @@ check alone.
 ### Tier 3 — provider sandbox, writes
 
 New in this integration, and the tier the delivery had listed as unproven.
-Against the real Razorpay test account on 2026-09-25: **16 checks passed, 0
-failed.** `scripts/razorpay-sandbox-write-probe.mjs`. Three unpaid orders of
-₹1.00 are created per run; nothing is captured or refunded.
+Against the real Razorpay test account on 2026-09-25, and likewise re-run from a
+clean tree at the delivered commit: **16 checks passed, 0 failed.**
+`scripts/razorpay-sandbox-write-probe.mjs`. Three unpaid orders of ₹1.00 are
+created per run; nothing is captured or refunded.
+
+Razorpay's own API is never stubbed here. The adapter under test is reached
+through a loopback pass-through put in front of `api.razorpay.com` by pointing
+`POS_GATEWAY_API_BASE` at it, which is what allows a create's *answer* to be
+withheld without withholding the create — the exact condition
+`findOrderByReceipt` exists for, and one no amount of mocking could have staged
+honestly. Each phase's preconditions are arranged by calls that go **direct to
+Razorpay, bypassing both the proxy and the adapter**, so setting a phase up can
+never be mistaken for the phase passing.
 
 What it establishes that the stubs could not:
 
@@ -408,9 +419,24 @@ provider really refused and false when the provider never answered.
 **A defect this tier found, which no stub could have.** Razorpay's
 `GET /v1/orders?receipt=` is a *lagging* index. Fetch-by-id answers immediately,
 but the same order does not appear under its own receipt for **7.7 s, 16.0 s,
-30.0 s and 32.8 s** across four samples, with no ceiling established.
-`findOrderByReceipt` runs immediately after the failed POST it is recovering
-from, so in practice it returns nothing and the original error is rethrown.
+30.0 s, 30.8 s and 32.8 s** across five samples, with no ceiling established —
+four of the five over 15 s. `findOrderByReceipt` runs immediately after the
+failed POST it is recovering from, so in practice it returns nothing and the
+original error is rethrown.
+
+The first reading of this was wrong, and the way it was wrong is worth recording.
+An earlier version of the write probe queried the receipt index straight after
+creating, and reported four confident defects: that Razorpay does not store the
+receipt, that recovery fails twice over, and that the ambiguous two-order case
+could not even be set up. All four were artefacts of asking too early. The
+discriminator was a separate read-only probe
+(`scripts/razorpay-receipt-filter-probe.mjs`) that takes an order from an
+*unfiltered* list — so it certainly exists and is certainly old enough to be
+indexed — and asks for it by its own receipt; a zero there could not have been a
+delay, and it was not zero. The probe was then restructured to wait for
+visibility before exercising any adapter logic, **without weakening a single
+assertion**: the waits are the provider's latency, not slack in the test, and
+the latency is reported above as a finding in its own right.
 
 No retry loop was added, and that is a deliberate choice rather than an omission:
 waiting an unbounded index out would hold a cashier at the till at the one moment
