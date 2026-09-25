@@ -21,6 +21,8 @@ import PhoneOrderNew from './pages/PhoneOrderNew.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import FloorDesigner from './pages/FloorDesigner.jsx';
+import FloorStatus from './pages/FloorStatus.jsx';
+import Captain from './pages/Captain.jsx';
 import SalesReport from './pages/SalesReport.jsx';
 import MenuProfitability from './pages/MenuProfitability.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
@@ -195,6 +197,25 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <FloorDesigner />
+                  </RequireRoles>
+                }
+              />
+              {/* Reading the floor is not editing it. GET /floors and
+                  /floors/:id/layout are open to every role inside the tenant,
+                  so the operational view is too — a captain or cashier needs
+                  to see which table is waiting far more often than a manager
+                  needs to move one. */}
+              <Route path="floor-status" element={<FloorStatus />} />
+              {/* The handheld. CASHIER and up are admitted as well as CAPTAIN
+                  because a manager covering the floor carries the same device;
+                  the screen offers no money control to any of them. */}
+              <Route
+                path="captain"
+                element={
+                  <RequireRoles
+                    roles={['CAPTAIN', 'CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER']}
+                  >
+                    <Captain />
                   </RequireRoles>
                 }
               />

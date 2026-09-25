@@ -125,8 +125,19 @@ export const isLicenseError = (err) => apiErrorCode(err).startsWith('POS_LICENSE
 
 // --- roles (§5 role table) ---------------------------------------------------
 export const isAtc = (user) => user?.role === 'POS_SUPER_ADMIN';
+// "May work the till", which includes taking money. Deliberately NOT widened to
+// CAPTAIN: every screen behind this one offers a bill, a discount or a payment.
 export const canSell = (user) =>
   ['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER'].includes(user?.role);
+// A captain takes orders and never touches money, so the handheld is offered to
+// this role and the till is not. Note that the server does NOT yet agree that a
+// captain may open an order: the gate on POST /orders is `operate`
+// (api/routes/orders.js:86) = requireRole('CUSTOMER_OWNER','BRANCH_MANAGER',
+// 'CASHIER'), so the route answers 403. That divergence is
+// WINDOW-5-BACKEND-REQUEST.md §1 and is W3's call — widening a server gate for a
+// role W5 does not own, on an authorization path W5 does not own, is not W5's to
+// make. The server stays the authority either way.
+export const isCaptain = (user) => user?.role === 'CAPTAIN';
 export const isManagerUp = (user) =>
   ['BRANCH_MANAGER', 'CUSTOMER_OWNER'].includes(user?.role);
 export const canWriteCatalog = (user) =>

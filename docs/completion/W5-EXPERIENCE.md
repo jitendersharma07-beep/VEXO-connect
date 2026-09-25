@@ -1,0 +1,288 @@
+# W5 — Experience: floor, QR, Captain, reporting
+
+Status as of **2026-09-25**. Everything below is either a measured result with
+the log that produced it, or an explicitly named gap. Where a claim could not be
+tested, it says so rather than being left to a green suite to imply.
+
+---
+
+## 1. What was tested, and what the tests actually ran against
+
+Bundle text and a successful compile are not evidence, so nothing here rests on
+either. Every browser harness ends its scenarios by reading the **database**.
+
+| | |
+|---|---|
+| Source | lane `~/vexo-connect-x-lanes/experience`, branch `x/experience`, base `77242fe` |
+| Frontend served | Vite dev server on `127.0.0.1:5661`, driven in real Chromium (`chromium-1117`) |
+| Production build | 1714 modules, `assets/index-DOkGz9XT.js` 2,033.53 kB (gzip 364.72 kB), `assets/index-BfkoGCjR.css` 48.32 kB — clean |
+| API | lane's own on `127.0.0.1:5561` |
+| Database | `vcx_experience` on `127.0.0.1:5440` — the lane's private DB, never `atc_pos*`, never another lane's |
+
+### Results
+
+| Suite | Result | Log |
+|---|---|---|
+| Backend baseline (`vcxe test`) | **1652 / 1655** at `77242fe` | `evidence/baseline-77242fe.log` |
+| W5's own backend suite (`captainWorkflow.test.js`) | **29 / 29** | `evidence/captain-acceptance-PASS.log` |
+| QR / card / PDF over HTTP (`qr-evidence.sh`) | **22 / 22** | `evidence/qr-evidence-20260925.log` |
+| Staff browser acceptance (`browser-acceptance.mjs`) | **36 / 36** | `evidence/browser-acceptance-20260925.log` |
+| Guest phone journey (`guest-phone-acceptance.mjs`) | **36 / 36** | `evidence/guest-phone-acceptance-20260925.log` |
+| Reporting / HQ / display (`reporting-acceptance.mjs`) | **36 / 36** | `evidence/reporting-acceptance-20260925.log` |
+
+Evidence root: `~/vcx-experience-local/evidence/`. Screenshots in
+`evidence/shots/` — 22 of them, named per scenario.
+
+The three baseline failures are classified in `WINDOW-5-BACKEND-REQUEST.md`:
+two are load artefacts that pass in isolation (proven, with logs), one is a real
+pre-existing defect in `reportingExceptions.test.js` that belongs to W4. None is
+attributable to W5.
+
+**The harnesses live outside the worktree on purpose.** `vcxe setup` asserts
+`frontend/package.json` and its lockfile are byte-identical to the dev clone's,
+so a test dependency committed into the lane would invalidate the dependency
+reuse the whole lane stands on. Playwright is resolved from the npx cache with
+an explicit `executablePath`; nothing downloads a browser.
+
+---
+
+## 2. Deliverable 1 — floor, tables, QR
+
+**Done and proven.**
+
+- A card resolves to its own tenant, store and table; an unknown token 404s
+  without disclosing what exists.
+- **Scanning alone writes nothing.** Asserted twice over — once over HTTP, once
+  in the browser with two consecutive scans — against visit, order and
+  submission counts, and against the table still reading `FREE` to staff.
+- The printable sheet is a real PDF (`application/pdf`, `%PDF` magic, 73,744 B,
+  2 page objects). Single-card PNG renders.
+- **Rotation does not corrupt history.** The old card is `REVOKED` and stops
+  resolving; the order it took still points at the old card row and is still
+  readable; at most one live card per table.
+- **States carry words, not only colour.** `Served` appears as text. `Ready` is
+  deliberately *not* a table state — a plate on the pass is not a plate on the
+  table — and its absence is asserted. A settled table says *"clear table"*
+  rather than reading as free.
+
+One production defect was found this way and fixed: the Captain table header
+kept the state it had when the tile was tapped, so it could read **"Free" over
+food already with the kitchen**. Board polling is suspended while a table is
+open, so the snapshot never refreshed. Fixed in `Captain.jsx` by making the
+row re-read part of the shared post-write path rather than something each
+handler had to remember. Regression-asserted in `browser-acceptance.mjs` §G.
+
+### Nothing here computes a state
+
+`tableStateOf()` in `backend/src/lib/qr/tableState.js` is the only thing allowed
+to derive a table's state. `frontend/src/lib/tableState.js` mirrors it for
+**display only** and says so in its first line. The Captain screen fetches the
+server's answer after every write instead of recomputing one, specifically so a
+second rival answer cannot exist.
+
+---
+
+## 3. Deliverable 2 — Captain
+
+**Shipped and proven, with one gate that is not W5's to open.**
+
+`frontend/src/pages/Captain.jsx` (792 lines) and `FloorStatus.jsx` (423 lines),
+registered in `App.jsx` and the sidebar. No alternate billing or authentication
+logic: the screen calls the same `/api/orders` routes the till does, and holds
+no money control at all — asserted, along with the copy that tells the user
+where a bill *is* raised.
+
+Proven in the browser: an order opened, a draft line's quantity changed, a KOT
+sent with exactly one KOT existing afterwards; a guest basket accepted from the
+handheld cutting exactly one more; unauthorized actions refused **with the
+business records asserted unchanged**, not merely a status code read.
+
+### The CAPTAIN gate — recorded, not taken
+
+A captain's own baseline grants `order.create`, but `POST /api/orders` is gated
+by `operate` (`backend/src/api/routes/orders.js:86`) =
+`requireRole('CUSTOMER_OWNER','BRANCH_MANAGER','CASHIER')`. The route answers
+**403** to a real captain token — verified live, not inferred from the role
+table. Same omission on `tableQr.js`.
+
+This is exactly the "resolved permissions, not merely the role's baseline"
+check, and it found a real discrepancy. **W5 did not change it.** Widening a
+shared authorization path for a role W5 does not own is W3's call. Recorded as
+`WINDOW-5-BACKEND-REQUEST.md` §1 and §2 with the live evidence.
+
+The client comment at `frontend/src/lib/pos.js` states the divergence in place
+so the next reader is not misled into thinking the two lists agree.
+
+`order.item.void` is granted to two roles and reachable by neither — §3.
+Recorded; **not silently changed**.
+
+---
+
+## 4. Deliverable 2 — Kiosk: BLOCKED, and why no page was shipped
+
+**No kiosk page exists, deliberately.** A kiosk needs an unauthenticated,
+table-free, one-party-at-a-time write path and the product has none:
+
+1. `app.js:294-295` — `/guest/qr` is *"the only unauthenticated write surface in
+   the product"*, and its credential is the token printed on a card. Every other
+   router is behind `requirePosAuth` (`orders.js:84`).
+2. `openOrJoinVisit` (`lib/qr/visits.js:118`) throws `POS_QR_JOIN_CODE_REQUIRED`
+   at `visits.js:151` for the second party at a table. Correct for a table,
+   wrong for a terminal that serves strangers back-to-back — they would be
+   locked out or share a bill.
+3. `QrSubmission.tableId` and `visitId` are both non-null, so the staff queue is
+   structurally table-bound.
+
+**The shortcut was available and was rejected.** Routing kiosk orders through a
+dedicated "Kiosk 1" `DiningTable` row would satisfy both non-null columns and
+would have put a working-looking page in this build. It would also make the
+floor plan lie — that row escalates through `SEATED` → `IN_KITCHEN` like a real
+table — which is the precise failure deliverable 1 forbids and which §2 above
+spent this sprint fixing.
+
+Shipping a kiosk screen that cannot order was equally not an option: *"Do not
+label a disconnected UI as offline order support."*
+
+Recorded as `WINDOW-5-BACKEND-REQUEST.md` §8, including the smallest shape that
+would reuse rather than duplicate the order service. **Ownership is named as the
+open question rather than assumed** — the surface is unauthenticated and touches
+`visits.js` and `QrSubmission`, neither of which W5 owns.
+
+---
+
+## 5. Deliverable 3 — reporting, HQ, displays
+
+**Done and proven**, in `reporting-acceptance.mjs` (36/36).
+
+Every figure read off a rendered page is compared against SQL run straight at
+the database. A page that calls a real API and renders something *else* passes a
+network check and fails this one. `docs/VC104-UI-DELIVERY.md` and
+`VC105-UI-DELIVERY.md` already claim 72/72 and 48/48; this harness exists to
+re-test those claims rather than trust them.
+
+- HQ dashboard figures tie to SQL, using **the report's own window boundaries**
+  (`period.startUtc/endUtc`) — recomputing the window would have verified a
+  second, differently-wrong number.
+- Report Centre: unbuildable reports render genuinely `disabled`, dimmed, with
+  a state badge and the server's own `note`. Asserted via `isDisabled()`, not
+  by reading a class name.
+- Customer display: the pairing code is single-use, the session is a bound JWT,
+  and the display **cannot write to the till**. `GET /api/display/state` returns
+  a *view* (`IDLE` / `ACTIVE` / `THANKYOU`) and never an order id; the pointer
+  self-clears after `THANKYOU` and on fresh pairing. Totals tie to the DB.
+
+**No canned data and no fake assistant.** Asserted directly: no screen in this
+build offers an "ask" or assistant affordance at all. The AI-provider
+integration is absent, and rather than shipping a surface that answers from
+canned text, nothing pretends to be an assistant. VC-107 remains a separate
+later phase, so the honest presentation of "pending" belongs to that phase's
+UI, not to a placeholder added here.
+
+---
+
+## 6. Deliverable 1 of the directives — uncertain submission outcomes
+
+The unconditional *"nothing has been queued, and the kitchen has not seen this"*
+is **gone**. A timeout can happen after the server commits, and that message
+asserted otherwise.
+
+The replacement splits the case in two, and both halves are browser-proven with
+KOT counts read from the database:
+
+- **§G — the write is lost but a read gets through.** The screen does not stop
+  at "unknown": it reconciles with a `GET`, which cannot cut a second ticket,
+  then shows what the server actually holds. Exactly **one** KOT. Nothing is
+  offered to resend, because there is nothing left to ask about.
+- **§G2 — the reconcile read fails too.** *Now* the screen says the confirmation
+  failed, marks what it shows as possibly out of date, and offers to ask the
+  server again. Still exactly **one** KOT.
+
+**No ambiguous mutation is ever retried automatically.** The send control is
+disabled while the outcome is unknown — and because a disabled button is only a
+promise until someone presses it, the harness force-clicks it and asserts the
+KOT count is still 1. It also asserts the control *looks* dead (computed
+opacity < 1), not merely behaves dead.
+
+Idempotency on the guest path already exists (`idempotencyKey` + `requestHash`
+over the normalised line list). The staff routes have none; the exact contract
+needed is recorded as `WINDOW-5-BACKEND-REQUEST.md` §4 for W3, and the client
+works correctly without it today by reconciling rather than retrying.
+
+---
+
+## 7. The gap that is NOT closed
+
+**A real phone has never loaded a card.**
+
+`POS_QR_BASE_URL` in this lane is `http://127.0.0.1:5661`. That loopback origin
+is what gets printed into every card and every PDF, and no handset can reach it.
+
+`guest-phone-acceptance.mjs` therefore runs at a 390×844 viewport with touch and
+a real iPhone user-agent, and **asserts the limitation out loud** rather than
+letting a green run imply a customer journey:
+
+```
+PASS  and that origin is loopback, so no handset can reach it (loopback)
+note  printed origin is http://127.0.0.1:5661 —
+      everything below is a 390px VIEWPORT run, not a handset run.
+```
+
+That assertion is written to fail if someone later points the lane at a real
+origin, so the note has to be rewritten deliberately rather than quietly
+becoming false.
+
+What the viewport run *does* prove: scanning writes nothing; the menu is
+readable before ordering with copy saying nothing is ordered yet; starting opens
+exactly one visit; a sent basket is described honestly as **"Waiting for
+staff" / "Nothing has been sent to the kitchen yet"** with zero KOTs to back any
+other claim; a second phone is gated and cannot read the first party's order; a
+wrong join code is refused and opens no visit; the right one joins the *same*
+bill on *one* visit; and only after staff accept does the line become "With the
+kitchen" — the flag tracking the KOT, not this phone having pressed Send.
+Totals tie to the database. No horizontal scroll at 390px.
+
+**Closing it needs an approved, reachable base URL.** That is a public-exposure
+change, which is outside W5's ownership. It is the one genuine external input
+this workstream is waiting on.
+
+---
+
+## 8. Owned source in this delivery
+
+| File | |
+|---|---|
+| `frontend/src/pages/Captain.jsx` | new, 792 lines |
+| `frontend/src/pages/FloorStatus.jsx` | new, 423 lines |
+| `frontend/src/lib/tableState.js` | new, 118 lines — display mirror only |
+| `backend/tests/captainWorkflow.test.js` | new, 790 lines, 29/29 |
+| `WINDOW-5-BACKEND-REQUEST.md` | new, 509 lines, §§1-8 |
+| `frontend/src/App.jsx` | routes `floor-status`, `captain` |
+| `frontend/src/components/Layout.jsx` | sidebar entries incl. the CAPTAIN group |
+| `frontend/src/lib/pos.js` | `isCaptain`, and the gate divergence recorded in place |
+
+Shared-route registration was W5's to make and no other window's page
+registrations were touched.
+
+Harnesses (outside the worktree, by design):
+`~/vcx-experience-local/{qr-evidence.sh, browser-acceptance.mjs,
+guest-phone-acceptance.mjs, reporting-acceptance.mjs, browser-fixture.mjs,
+captain-reach.sh}`.
+
+---
+
+## 9. Remaining dependencies
+
+| # | Needs | Owner | Blocks |
+|---|---|---|---|
+| §1/§2 | CAPTAIN admitted to `operate` in `orders.js` and the `tableQr.js` gate | W3 | a captain doing the job the role is named for |
+| §3 | `order.item.void` granted to two roles, reachable by neither | W3 | nothing in W5; recorded, not changed |
+| §4 | Idempotency keys on `POST /orders`, `/:id/items`, `/:id/kot` | W3 | nothing today — client reconciles instead |
+| §6 | `reportingExceptions.test.js` NEAR_EXPIRY — real, pre-existing | W4 | one baseline failure |
+| §7 | A paid table reads `FREE` on any floor run without guest scans | visits owner (`zen-bhabha`) | `PAID` ≠ `FREE` being visible in practice |
+| §8 | A kiosk ordering surface — ownership itself is the open question | unresolved | the entire kiosk deliverable |
+| §5 | W1 to publish `CONTROL.md` | W1 | coordination |
+| — | An approved reachable `POS_QR_BASE_URL` | outside W5 | a real handset customer journey |
+
+**Nothing in W5's own scope is waiting on W5.** Every item above is either
+another window's file or an external input, and each was recorded with the
+route-level evidence rather than edited across an ownership line.

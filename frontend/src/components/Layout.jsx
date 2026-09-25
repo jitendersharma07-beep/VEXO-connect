@@ -11,6 +11,7 @@ import {
   CalendarClock,
   ChefHat,
   ClipboardCheck,
+  ConciergeBell,
   CookingPot,
   KeyRound,
   Landmark,
@@ -26,6 +27,7 @@ import {
   PackagePlus,
   PhoneCall,
   Plug,
+  Radar,
   ReceiptText,
   ScrollText,
   Send,
@@ -44,7 +46,7 @@ import {
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
 import { usePermissions } from '../lib/permissions.jsx';
-import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope, isManagerUp } from '../lib/pos.js';
+import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope, isCaptain, isManagerUp } from '../lib/pos.js';
 import { canUseInventory } from '../lib/inventory.js';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
@@ -168,6 +170,7 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
               <NavItem to="/orders" icon={ReceiptText} label="Orders" />
               <NavItem to="/catalog" icon={Package} label="Catalog" />
               <NavItem to="/tables" icon={Armchair} label="Tables" />
+              <NavItem to="/floor-status" icon={Radar} label="Floor status" />
               <NavItem to="/floor-designer" icon={LayoutGrid} label="Floor plan" />
               <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
               <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
@@ -190,12 +193,28 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
         </>
       ) : (
         <>
+          {/* A captain fell through every branch below and reached a sidebar
+              with nothing but Dashboard on it — the role shipped with a label
+              ("Takes orders and sends them to the kitchen") and no way to do
+              either. This is that group. Cashiers and managers get the handheld
+              from Point of Sale instead, so it is not repeated for them. */}
+          {isCaptain(user) ? (
+            <>
+              <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                Floor
+              </div>
+              <NavItem to="/captain" icon={ConciergeBell} label="Tables" />
+              <NavItem to="/floor-status" icon={Radar} label="Floor status" />
+              <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+            </>
+          ) : null}
           {canSell(user) ? (
             <>
               <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
                 Point of Sale
               </div>
               <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
+              <NavItem to="/captain" icon={ConciergeBell} label="Captain handheld" />
               <NavItem to="/orders" icon={ReceiptText} label="Orders" />
               {/* VC-104: managers and owners only — the same role set the
                   server's rolesFor('phone.*') admits. Cashiers get no link;
@@ -204,6 +223,11 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
                 <NavItem to="/phone-orders" icon={PhoneCall} label="Phone orders" />
               ) : null}
               {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
+              {/* Ungated on purpose, unlike the two around it: reading the
+                  floor is what a cashier does all shift, and the server opens
+                  GET /floors to every role in the tenant. Editing it stays
+                  behind canWriteTables. */}
+              <NavItem to="/floor-status" icon={Radar} label="Floor status" />
               {canWriteTables(user) ? (
                 <NavItem to="/floor-designer" icon={LayoutGrid} label="Floor plan" />
               ) : null}
