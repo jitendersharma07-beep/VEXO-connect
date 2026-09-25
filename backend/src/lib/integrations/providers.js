@@ -18,6 +18,7 @@
 // half-known contract must fail loudly at build time, not silently at the till.
 
 import { z } from 'zod';
+import { classifyLanHost } from './lanHost.js';
 
 // --- capability vocabulary ---------------------------------------------------
 
@@ -47,36 +48,58 @@ const nonEmpty = (label, max = 200) =>
 // is the only one with a host field — and the only one that needs this guard.
 // A hostname here that resolves off-LAN is how "do not expose Tally to the
 // internet" gets violated from the settings screen rather than from a firewall.
+//
+// The rule lives in lanHost.js, not here, because the same question is asked
+// again with DNS immediately before each call. An earlier version of this field
+// only rejected an `http://` prefix, which let `8.8.8.8` and `134744072` save
+// cleanly — see that file for why the second of those is the interesting one.
 const lanHost = z
   .string()
   .trim()
   .min(1)
   .max(255)
-  .refine((v) => !/^https?:\/\//i.test(v), 'enter a host or IP, not a URL');
+  .superRefine((v, ctx) => {
+    const verdict = classifyLanHost(v);
+    if (!verdict.ok) ctx.addIssue({ code: z.ZodIssueCode.custom, message: verdict.reason });
+  });
 
 // --- SWIGGY ------------------------------------------------------------------
 
-// Swiggy publishes NO merchant/POS API documentation. developers.swiggy.com
-// exists, renders no API content unauthenticated ("API categories will appear
-// here once they are configured"), and gates login behind a single-tenant
-// Microsoft Entra org directory — i.e. access is granted through a commercial
-// partnership, not a developer signup.
+// CORRECTED 2026-09-25. An earlier version of this comment said "there is no
+// correct Swiggy adapter to write", which reads as "Swiggy cannot be integrated".
+// That conflated two different things, and the stronger one is not true.
 //
-// Consequence, stated plainly: there is no correct Swiggy adapter to write. The
-// connector below records a mapping and refuses every call. Writing plausible
-// endpoints would produce a build that passes its own tests and fails on the
-// first real order, which is the exact failure this lane is meant to prevent.
+// Swiggy DOES run a third-party order-management API for POS vendors. It is
+// attested by a former Swiggy API product manager's published account of building
+// that platform — order-management endpoints for third-party POS providers, with
+// API documentation, staging test accounts and technical support, plus a cloud
+// menu API — and corroborated by the existence of a login-gated first-party
+// developer portal and by middleware vendors that document Swiggy as an upstream
+// channel. The blocker is COMMERCIAL ACCESS, not technical impossibility.
+//
+// What remains true is that NO endpoint, base URL, auth scheme or payload is
+// publicly published. So the capabilities below stay UNSPECIFIED — the honest
+// statement is "the contract exists and we have not been given it", not "the
+// contract does not exist". Writing plausible endpoints from that would produce a
+// build that passes its own tests and fails on the first real order.
+//
+// One trap worth recording: several high-ranking pages describing a "Swiggy POS
+// API" are AI-generated and assert specifics (OAuth 2.1/PKCE, Square/Toast
+// support) that no first-party source states. Nothing from those was used here.
 const swiggy = {
   key: 'SWIGGY',
   label: 'Swiggy',
   kind: 'AGGREGATOR',
   docs: {
-    status: 'NONE_PUBLIC',
+    // Not NONE_PUBLIC: that said nothing about whether an API exists. This says
+    // the API exists and its specification is behind a partner agreement.
+    status: 'PARTNER_GATED_ENTIRELY',
     portal: 'https://developers.swiggy.com/',
-    checkedOn: '2026-09-24',
-    note: 'Portal exposes no API content without a Swiggy-issued org login (Microsoft Entra, single tenant). No endpoint, auth scheme or payload is publicly specified.',
+    checkedOn: '2026-09-25',
+    note: 'A first-party developer portal exists and is wholly login-gated (Microsoft OAuth; "Password login is disabled", "contact your administrator to request access"). /docs returns 404 unauthenticated. No endpoint, auth scheme or payload is publicly specified. Swiggy\'s only OPEN developer programme, Builders Club, is consumer ordering agents — not merchant POS — and is not a route to this.',
   },
-  // Every capability is UNSPECIFIED on purpose. This is not a to-do list.
+  // UNSPECIFIED means "we have no wire contract", which is true of every line.
+  // It does NOT mean Swiggy lacks the feature — see existence below.
   capabilities: {
     menuPush: CONTRACT.UNSPECIFIED,
     itemAvailability: CONTRACT.UNSPECIFIED,
@@ -86,12 +109,26 @@ const swiggy = {
     settlement: CONTRACT.UNSPECIFIED,
     webhookSignature: CONTRACT.UNSPECIFIED,
   },
+  // The distinction the capability vocabulary alone cannot carry: how good the
+  // evidence is that the provider has the feature at all, separately from
+  // whether we have been told how to call it.
+  existence: {
+    verdict: 'ATTESTED_NOT_PUBLISHED',
+    detail:
+      'A Swiggy third-party order-management API for POS vendors is attested by a former Swiggy API product manager\'s account of building it (order APIs, cloud menu API, staging accounts, partner support) and corroborated by middleware vendors documenting Swiggy as an upstream channel. Not first-party documentation, and dated — treat as strong evidence the route exists, not as a specification.',
+  },
   blockedReason:
-    'Swiggy publishes no merchant/POS API documentation. Integration requires a Swiggy partnership account on developers.swiggy.com, or connection through a middleware provider that already holds one.',
+    'Swiggy\'s POS API is real but its specification is behind a partner agreement. This is an access dependency, not a technical limit. Integration requires either a Swiggy POS partnership (developers.swiggy.com access) or a middleware provider that already holds one.',
   // Recorded so the owner can compare routes rather than re-discover them.
+  // Attestation quality is stated per route on purpose: "a vendor's marketing page
+  // says they support Swiggy" and "the vendor publishes a readable POS contract"
+  // are different grades of evidence and lead to different amounts of rework.
   alternatives: [
-    'Swiggy POS partnership (developers.swiggy.com org login) — obtained via partner-with-us.swiggy.com and a commercial conversation.',
-    'Middleware aggregator that publishes its own POS contract and holds the Swiggy relationship (e.g. UrbanPiper). Changes the integration target from Swiggy to the middleware, and adds a third-party commercial dependency.',
+    'DIRECT: Swiggy POS partnership (developers.swiggy.com access) via a commercial conversation. Gives the real contract; no public application form for POS vendors was found, so the route in is a named Swiggy contact.',
+    'MIDDLEWARE, strongest evidence: UrbanPiper. Publishes its own POS integration contract PUBLICLY (readable without login) and names Swiggy as an upstream channel, so our adapter target becomes UrbanPiper and is buildable before any Swiggy relationship exists. Independently corroborated by Odoo, an unrelated ERP vendor, documenting POS -> UrbanPiper -> Swiggy. Adds a third-party commercial dependency and a per-outlet manual mapping step Swiggy performs offline.',
+    'MIDDLEWARE, vendor-marketing evidence only: LimeTray, Restroworks, QueueBuster. Claim Swiggy support on their own pages; no public POS contract was verified.',
+    'NOT AN API ROUTE: Petpooja embeds the Swiggy Partner Portal in an iframe rather than integrating over an API. Useful to a restaurant, useless as an integration target — it gives our POS no order data.',
+    'RULED OUT: Deliverect does not list Swiggy among its delivery channels.',
   ],
   // No fields, because there is nothing to ask for. The settings screen renders
   // whatever is declared here, so an empty list is how "we do not know what
@@ -123,6 +160,8 @@ const ZOMATO_PATHS = Object.freeze({
   menuAdd: '/online-ordering/v3/menu/add',
   menuGet: '/online-ordering/v3/menu/get',
   itemStock: '/online-ordering/v3/menu/item/stock',
+  outletStatusUpdate: '/online-ordering/v1/restaurant_delivery_status/update',
+  outletStatusGet: '/online-ordering/v1/restaurant_delivery_status/get',
   orderConfirm: '/online-ordering/v1/order/confirm',
   orderReject: '/online-ordering/v1/order/reject',
   orderReady: '/online-ordering/v1/order/ready',
@@ -141,8 +180,8 @@ const zomato = {
   docs: {
     status: 'PARTNER_GATED_SCHEMA',
     portal: 'https://www.zomato.com/developer/integration/',
-    checkedOn: '2026-09-24',
-    note: 'Guides, endpoint paths and the critical-feature list are public (docs updated 2026-05-26). The API reference — request/response bodies, headers, error codes — requires an organisation login.',
+    checkedOn: '2026-09-25',
+    note: 'Guides, endpoint paths, the critical-feature list AND the documented behaviour of menu/stock/outlet management are public and readable without a login (docs updated 2026-05-26). Only the field-level API reference — request/response bodies, header names, error codes, base URL — requires an organisation login; those pages are client-rendered and returned an empty DOM to a headless fetch. Every path recorded here is quoted verbatim from a public page; none was reconstructed.',
   },
   paths: ZOMATO_PATHS,
   capabilities: {
@@ -152,20 +191,50 @@ const zomato = {
     // recorded discrepancy, not a dropped order.
     orderReceive: CONTRACT.PATH_ONLY,
     orderStatusPush: CONTRACT.PATH_ONLY,
+    // RECHECKED 2026-09-25 against Zomato's own public POS docs. Menu management
+    // is fully offered and its BEHAVIOUR is publicly documented; only the field
+    // schema is gated. PATH_ONLY therefore stays, but see menuSemantics below —
+    // the documented behaviour carries two traps that decide whether a menu push
+    // is safe, and they are not schema details.
     menuPush: CONTRACT.PATH_ONLY,
+    priceUpdate: CONTRACT.PATH_ONLY,
     itemAvailability: CONTRACT.PATH_ONLY,
+    outletOnlineOffline: CONTRACT.PATH_ONLY,
     cancellation: CONTRACT.PATH_ONLY,
-    // Zomato's public documentation contains no settlement or payout report
-    // API, and no refunds API — cancellation is handled as merchant-agreed
-    // cancellation plus complaints. Recorded as NOT_OFFERED rather than left
-    // blank so nobody builds a payout reconciliation against an API that the
-    // published surface does not contain.
+    // RECHECKED 2026-09-25 and CONFIRMED. Zomato's entire public docs surface
+    // (51 pages) contains no settlement, payout, finance or reconciliation page,
+    // and its docs bundle contains no such string. Settlement is a partner
+    // DASHBOARD DOWNLOAD (xls/pdf/txt), not an API. Recorded as NOT_OFFERED so
+    // nobody builds a payout reconciliation against an API that does not exist;
+    // the labelled statement-import path is the only honest route. Whether a
+    // non-public settlement API exists for very large partners is unknown.
     settlement: CONTRACT.NOT_OFFERED,
     refunds: CONTRACT.NOT_OFFERED,
     // No HMAC scheme is published. A configured shared-secret header is what
     // the prerequisites describe, so that is what we verify.
     webhookSignature: CONTRACT.PATH_ONLY,
   },
+  // Publicly documented BEHAVIOUR of the menu endpoints, recorded because each
+  // line is a way to destroy a live menu while making successful API calls. This
+  // is the part a schema would not have told us.
+  menuSemantics: {
+    fullSnapshotUpsert:
+      'A menu push is a full-snapshot upsert: per Zomato, "only the entities sent in the menu api call would be retained". An omitted item is a DELETED item. A partial push is therefore a destructive operation, and any menu sync we build must send the complete menu or not send at all.',
+    stockFlagIgnoredOnExisting:
+      'The inStock flag in a menu push is honoured only for NEW entities; for existing ones Zomato states it "would get ignored". Toggling availability on an existing item must use the item-stock endpoint. A build that sets inStock on a menu push and reports success would silently fail to take anything off sale.',
+    autoTurnOnWindow:
+      'The item-stock endpoint takes an auto-turn-on time of 2hours / 4hours / nextBusinessDay / custom / indefinite, custom capped at 7 days. Relevant because "out of stock" is time-boxed by the provider, not permanent.',
+    outletOfflineIsBidirectional:
+      'Zomato can take an outlet offline on its own initiative (rider stress, high rejection rate) and notifies via an outlet-serviceability webhook. So our stored view of "we are online" is not authoritative and must be reconciled from that callback.',
+  },
+  // NOT_IMPLEMENTED_HERE, stated separately from the capability grade so the two
+  // are never read as the same thing. Zomato offers these; this lane has not
+  // built them. That is our gap, not the provider's.
+  notImplementedHere: [
+    'Menu push / price update: not implemented. Requires the gated field schema AND a resolution of the full-snapshot risk above before a first send.',
+    'Item availability (stock) toggle: not implemented.',
+    'Outlet online/offline control and the serviceability callback: not implemented.',
+  ],
   blockedReason:
     'Request/response schemas require a Zomato organisation login. Go-live additionally requires a signed agreement and Zomato POC configuration; Zomato states an eligibility bar of 50+ onboarded restaurants OR 10,000+ monthly orders, plus 100% parity with their critical feature list, <10 min support TAT and load-test reports.',
   activation: [
@@ -502,6 +571,13 @@ export const providerSummary = (key) => {
     docs: def.docs,
     capabilities: def.capabilities,
     operable: isOperable(key),
+    // Carried to the portal because the capability grade alone became misleading
+    // the moment it was corrected. "menuPush: PATH_ONLY" is a true statement
+    // about Zomato and says nothing about us, so an operator reading it would
+    // reasonably expect a menu to sync. This is the line that says we have not
+    // built it. Null where there is nothing to admit, so the screen shows no
+    // empty box.
+    notImplementedHere: def.notImplementedHere || null,
     blockedReason: def.blockedReason,
     activation: def.activation || null,
     alternatives: def.alternatives || null,

@@ -14,12 +14,20 @@
 //    queue entry that will eventually be pruned. So every success and every
 //    permanent failure updates both.
 //
-// 2. An unanswered call is not a failure. A timeout means the provider may have
-//    applied our request; retrying is correct precisely BECAUSE the receiving
-//    end is keyed (AggregatorOrder, LoyaltyOperation and AccountingPosting all
-//    carry a unique constraint on a key we choose), so a second delivery
-//    collides instead of duplicating. UNKNOWN is therefore retried, and the
-//    domain row is left saying "we do not know yet" rather than promoted.
+// 2. An unanswered call is not a failure, and it is not a success either. A
+//    timeout means the provider MAY have applied our request, so UNKNOWN is
+//    retried and the domain row is left saying "we do not know yet" rather than
+//    promoted.
+//
+//    What makes the retry safe is a key THE PROVIDER enforces. Reelo's
+//    idempotency key is one; our own unique indexes are not. AccountingPosting's
+//    unique index stops a second posting ROW being created, but a retry reuses
+//    that row, so it does nothing whatsoever about sending the same voucher to
+//    Tally twice — and Tally accepts the repeat. An earlier version of this
+//    comment listed that index as though it were idempotency, which was wrong and
+//    would have been read as a licence to retry Tally blindly. Tally's lost
+//    acknowledgement is handled in adapters/tally.js, which looks the voucher up
+//    before anything is resent; nothing here may assume delivery is exactly-once.
 //
 // 3. Nothing here decides a status by inspecting its own intentions. CONNECTED
 //    is written only after a call returned; deriveStatus in index.js is the only
@@ -65,18 +73,23 @@ const markPostingSent = async (job, result) => {
   if (!postingId) return;
   const ack = result?.detail ?? {};
   // ACKNOWLEDGED means Tally counted a voucher created, which is the strongest
-  // statement its import response makes. It does NOT return a master id — see
-  // adapters/tally.js, which says so rather than inventing one — so
-  // externalMasterId stays null and the invoice number in the voucher's own
-  // REFERENCE is what ties the two sides together. A 200 whose counters we could
-  // not read stays SENT, because "accepted" and "created one voucher" are
-  // different claims and only one of them is evidence.
+  // statement its import response makes. A 200 whose counters we could not read
+  // stays SENT, because "accepted" and "created one voucher" are different claims
+  // and only one of them is evidence.
+  //
+  // An import response carries no master id, so externalMasterId is usually null
+  // and the invoice number in the voucher's own REFERENCE is what ties the two
+  // sides together. The exception is a delivery recovered from a lost
+  // acknowledgement: that outcome comes from reading the Day Book, which does
+  // sometimes carry Tally's own handle for the voucher. Written when it is there,
+  // left null when it is not — never invented.
   const created = Number(ack.created ?? 0) > 0;
   await prisma.accountingPosting.updateMany({
     where: { id: postingId, companyId: job.companyId },
     data: {
       status: created ? 'ACKNOWLEDGED' : 'SENT',
       acknowledgedAt: created ? new Date() : undefined,
+      externalMasterId: result?.externalRef ?? undefined,
       lastError: null,
     },
   });

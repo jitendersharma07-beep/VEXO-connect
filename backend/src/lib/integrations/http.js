@@ -62,9 +62,17 @@ export const providerFetch = async (url, { method = 'POST', headers = {}, body =
     // No status, so no decision was observed. Deliberately UNKNOWN and never
     // RETRYABLE-by-default: the caller decides whether its receiving end is
     // safe to retry, because only the caller knows if it is keyed.
+    //
+    // `cause` is read as well as `code`, and it is the one that usually carries
+    // it: Node's fetch does not surface a socket error directly, it throws
+    // `TypeError: fetch failed` and hangs the real errno off `cause`. Reading
+    // only `code` returned null for every connection failure — and the
+    // difference between ECONNREFUSED and a timeout is the difference between
+    // "we never reached them" and "they may have acted on it", which is the
+    // whole question a caller inspects this for.
     throw new ProviderCallError(`provider did not answer: ${err?.name || 'network error'}`, {
       kind: 'UNKNOWN',
-      code: err?.code ?? null,
+      code: err?.code ?? err?.cause?.code ?? null,
     });
   }
 

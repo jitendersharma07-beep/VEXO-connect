@@ -8,16 +8,28 @@
 //
 // 1. TALLY HAS NO AUTHENTICATION. The documented request format contains no
 //    credential field of any kind. Anything that can reach port 9000 can write
-//    vouchers into the client's books. That is why `assertPrivateHost` below
-//    refuses a public address outright: the honest way to honour "do not expose
-//    Tally's local service to the public internet" is to make the settings
-//    screen incapable of pointing at one.
+//    vouchers into the client's books. So the settings screen is made incapable
+//    of pointing at a public host, AND the host is resolved and re-checked
+//    immediately before every call — see lanHost.js for why the first of those
+//    alone is not enough.
 //
 // 2. TALLY HAS NO IDEMPOTENCY. Its documentation publishes no duplicate-detection
 //    mechanism for imports; send the same sales voucher twice and the client has
-//    two sales. Duplicate suppression is therefore entirely ours, and it lives in
-//    the unique index on AccountingPosting(connectionId, sourceType, sourceId,
-//    docType) — before the call, not after it.
+//    two sales.
+//
+//    The unique index on AccountingPosting(connectionId, sourceType, sourceId,
+//    docType) stops us creating a second POSTING. It cannot stop a second SEND of
+//    the one posting, because a retry uses the same row — so it does nothing at
+//    all about the case that matters: Tally accepts the import and the answer is
+//    lost on the way back. Read as idempotency, that index is a false comfort.
+//
+//    What this adapter relies on instead is that the voucher carries an identity
+//    we control and can look up. VOUCHERNUMBER is VEXO's own invoice number (see
+//    accounting.js), which is stable across every retry because it comes from the
+//    order, not from the attempt. So when a send fails without an answer, the
+//    adapter ASKS TALLY whether the voucher is there before anything resends —
+//    confirmVoucher() below. Present: the voucher exists, record it and stop.
+//    Absent: we say so and stop anyway, because Tally's absence is not proof.
 //
 // 3. MASTERS MUST ALREADY EXIST, BY EXACT NAME. Tally's guidance is to ensure
 //    dependent ledgers and groups are present before importing. So a posting
@@ -31,34 +43,7 @@
 // overwrite a POS order.
 
 import { ProviderCallError, providerFetch } from '../http.js';
-
-// --- host safety -------------------------------------------------------------
-
-// RFC1918 plus loopback and link-local. Written out rather than resolved through
-// DNS on purpose: this is a syntactic gate on what an operator may type, and it
-// is checked again at call time so a config written before this guard existed
-// still cannot reach the internet.
-const PRIVATE_V4 =
-  /^(?:10\.(?:\d{1,3}\.){2}\d{1,3}|192\.168\.(?:\d{1,3})\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.(?:\d{1,3})\.\d{1,3}|127\.(?:\d{1,3}\.){2}\d{1,3}|169\.254\.(?:\d{1,3})\.\d{1,3})$/;
-
-export const isPrivateHost = (host) => {
-  const h = String(host || '').trim().toLowerCase();
-  if (!h) return false;
-  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.internal')) return true;
-  if (h === '::1') return true;
-  if (PRIVATE_V4.test(h)) return true;
-  // A bare hostname with no dots is a LAN name (a Windows machine name, which is
-  // exactly how Tally PCs are usually addressed). A dotted public name is not.
-  return /^[a-z0-9][a-z0-9-]*$/.test(h);
-};
-
-export const assertPrivateHost = (host) => {
-  if (isPrivateHost(host)) return;
-  throw new ProviderCallError(
-    `Tally host "${host}" is not a private/LAN address. TallyPrime has no authentication, so it must never be reached across the public internet.`,
-    { kind: 'TERMINAL' },
-  );
-};
+import { LanHostError, assertLanDestination } from '../lanHost.js';
 
 // --- XML ---------------------------------------------------------------------
 
@@ -81,7 +66,7 @@ const tag = (name, value) => `<${name}>${esc(value)}</${name}>`;
 // date they already computed with istDateOf(), and this only reformats it.
 export const tallyDate = (isoDate) => String(isoDate).slice(0, 10).replace(/-/g, '');
 
-const envelope = ({ companyName, requestType = 'Import', type = 'Data', id = 'Vouchers', body }) => `<ENVELOPE>
+const envelope = ({ companyName, requestType = 'Import', type = 'Data', id = 'Vouchers', body, variables = {} }) => `<ENVELOPE>
 <HEADER>
 <VERSION>1</VERSION>
 <TALLYREQUEST>${esc(requestType)}</TALLYREQUEST>
@@ -92,6 +77,7 @@ const envelope = ({ companyName, requestType = 'Import', type = 'Data', id = 'Vo
 <DESC>
 <STATICVARIABLES>
 <SVCURRENTCOMPANY>${esc(companyName)}</SVCURRENTCOMPANY>
+${Object.entries(variables).map(([k, v]) => tag(k, v)).join('\n')}
 </STATICVARIABLES>
 </DESC>
 ${body}
@@ -236,7 +222,14 @@ export const parseImportResponse = (raw) => {
     const m = raw.match(new RegExp(`<${name}>\\s*(-?\\d+)\\s*</${name}>`, 'i'));
     return m ? Number(m[1]) : null;
   };
-  const errorText = raw.match(/<(?:LINEERROR|ERRORS?)>([\s\S]*?)<\//i)?.[1]?.trim() || null;
+  // LINEERROR is where Tally puts a readable import failure; ERROR is the
+  // envelope-level variant. ERRORS is a COUNT and must not be read as a message:
+  // matching it was a real defect, because a SUCCESSFUL import response contains
+  // <ERRORS>0</ERRORS>, which made `ok` false for every voucher Tally accepted.
+  // Hence the `>` anchored immediately after ERROR, and the digits guard for any
+  // Tally variant that reports a count in a singular tag.
+  const errorMatch = raw.match(/<(?:LINEERROR|ERROR)>([\s\S]*?)<\//i)?.[1]?.trim() || null;
+  const errorText = errorMatch && !/^\d+$/.test(errorMatch) ? errorMatch : null;
   const created = num('CREATED');
   const altered = num('ALTERED');
   const errors = num('ERRORS');
@@ -255,15 +248,89 @@ export const parseImportResponse = (raw) => {
   };
 };
 
-// --- adapter -----------------------------------------------------------------
+// --- looking a voucher up again ----------------------------------------------
 
-const urlFor = (credential) => {
-  assertPrivateHost(credential.host);
-  return `http://${credential.host}:${credential.port || 9000}`;
+// Was this voucher written? Asked of the Day Book, which is a collection type
+// verified to be valid against this client's TallyPrime — that matters, because
+// an unrecognised collection type does not return an error, it WEDGES Tally's
+// HTTP server until somebody clears it at the console. Guessing a report name
+// here would take the client's accounting offline.
+//
+// SVFROMDATE/SVTODATE are sent, and the answer is filtered by voucher number
+// anyway. Not belt-and-braces: the Bills collection on this Tally ignores both
+// date variables and answers "as of now" regardless, so a narrowed request is
+// not something this code is entitled to assume it got.
+const dayBookRequest = ({ companyName, date }) =>
+  envelope({
+    companyName,
+    requestType: 'Export',
+    type: 'Collection',
+    id: 'Day Book',
+    variables: { SVFROMDATE: tallyDate(date), SVTODATE: tallyDate(date) },
+    body: '',
+  });
+
+// Split on voucher boundaries before matching, so a voucher number is only ever
+// read together with the voucher it belongs to. A flat regex over the whole
+// document would happily pair our number with another voucher's master id.
+//
+// Safe against <VOUCHERNUMBER> and <VOUCHERTYPENAME>: the separator requires
+// whitespace or '>' immediately after "VOUCHER", which neither of those has.
+export const findVoucherInExport = (raw, voucherNumber) => {
+  const target = String(voucherNumber ?? '').trim();
+  if (!target) return { found: false, masterId: null, voucherTypeName: null };
+  const vouchers = String(raw ?? '').split(/<VOUCHER[\s>]/i).slice(1);
+  for (const v of vouchers) {
+    const number = v.match(/<VOUCHERNUMBER>([\s\S]*?)<\/VOUCHERNUMBER>/i)?.[1]?.trim();
+    if (number !== target) continue;
+    return {
+      found: true,
+      // Opportunistic. Tally's own id for the voucher is worth keeping when the
+      // export carries one, and null is the honest answer when it does not —
+      // this adapter does not manufacture an identifier to fill a column.
+      masterId:
+        v.match(/<MASTERID>([\s\S]*?)<\/MASTERID>/i)?.[1]?.trim() ||
+        v.match(/^[^>]*\bREMOTEID="([^"]+)"/i)?.[1]?.trim() ||
+        null,
+      voucherTypeName: v.match(/<VOUCHERTYPENAME>([\s\S]*?)<\/VOUCHERTYPENAME>/i)?.[1]?.trim() ?? null,
+    };
+  }
+  return { found: false, masterId: null, voucherTypeName: null };
 };
 
-const send = async (credential, xml) => {
-  const result = await providerFetch(urlFor(credential), {
+// Connection failures where the request demonstrably never arrived. The socket
+// was refused or the host was unreachable, so Tally read no bytes and cannot
+// have imported anything — a plain retry is safe and needs no lookup. Every
+// OTHER failure is treated as "Tally may have applied it", including a timeout
+// and a 5xx, because in both of those our request was delivered.
+const NEVER_ARRIVED = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN']);
+
+// --- adapter -----------------------------------------------------------------
+
+// Resolves the configured host, refuses unless EVERY answer is a private
+// address, and then dials the VERIFIED ADDRESS rather than the name.
+//
+// That last part is the load-bearing detail. Handing the name to fetch would
+// make fetch resolve it a second time, and a second resolution can return a
+// different answer than the one we just approved — which reopens the exact
+// window this check closes. Dialling the address we verified leaves no gap
+// between the decision and the connection. Tally is a raw XML-over-HTTP service
+// with no name-based virtual hosting, so addressing it by IP is equivalent.
+const urlFor = async (credential, { resolver } = {}) => {
+  let verified;
+  try {
+    verified = await assertLanDestination(credential.host, resolver ? { resolver } : {});
+  } catch (err) {
+    if (err instanceof LanHostError) throw new ProviderCallError(err.message, { kind: 'TERMINAL' });
+    throw err;
+  }
+  const target = verified.addresses[0];
+  const host = target.includes(':') ? `[${target.replace(/^\[|\]$/g, '')}]` : target;
+  return `http://${host}:${credential.port || 9000}`;
+};
+
+const send = async (credential, xml, opts) => {
+  const result = await providerFetch(await urlFor(credential, opts), {
     method: 'POST',
     headers: { 'Content-Type': 'text/xml;charset=utf-8' },
     body: xml,
@@ -272,11 +339,94 @@ const send = async (credential, xml) => {
   return parseImportResponse(result.raw);
 };
 
+// The lost acknowledgement. Tally imported the voucher and the answer never
+// reached us — a timeout, a reset, a proxy 502 — and the queue's instinct is to
+// retry. For a Tally voucher that instinct puts a second sale in the client's
+// books, because nothing on Tally's side rejects the repeat.
+//
+// So: look before retrying. Three outcomes, and only one of them lets the delivery
+// be called done.
+//
+//   found     -> the voucher is in the books. Report success, and DO NOT resend.
+//                The only thing that went wrong was the answer.
+//   not found -> refuse in a way the queue will not retry, and say so plainly.
+//                Absence in an export is weaker evidence than presence: the Day
+//                Book may have answered for a period we did not ask for, the
+//                voucher may sit under a type the report excludes. Resending on
+//                that would be gambling the client's revenue figure on a report's
+//                filter, so a person decides. The error queue has a retry control
+//                for exactly this, and pressing it is a decision with a name on it.
+//   cannot ask -> Tally is not answering reads either, so we have learnt nothing.
+//                Fall through to the original error and let the backoff run: a
+//                Tally that is unreachable now will be asked again later, which is
+//                better than declaring an outcome we cannot see.
+//
+// Returns a success object, throws a TERMINAL, or returns null meaning "no verdict,
+// use the original error".
+const recoverLostAck = async (err, { kind, payload, credential, config, opts }) => {
+  if (!(err instanceof ProviderCallError)) return null;
+  // Tally answered and refused; nothing was applied and nothing needs looking up.
+  if (err.providerRefused) return null;
+  if (NEVER_ARRIVED.has(err.code)) return null;
+
+  // A ledger master is matched by NAME inside Tally, so importing the same one
+  // twice converges instead of duplicating. There is no voucher to look up and no
+  // harm in the retry, which is why this is the one kind left on the old path.
+  if (kind === 'TALLY_LEDGER_MASTER') return null;
+
+  const voucherNumber = payload?.voucherNumber;
+  if (!voucherNumber) return null;
+
+  let raw;
+  try {
+    const answer = await providerFetch(await urlFor(credential, opts), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/xml;charset=utf-8' },
+      body: dayBookRequest({ companyName: config.companyName, date: payload.date }),
+      parse: 'xml',
+    });
+    raw = answer.raw;
+  } catch {
+    return null;
+  }
+
+  const hit = findVoucherInExport(raw, voucherNumber);
+  if (hit.found) {
+    return {
+      externalRef: hit.masterId,
+      detail: {
+        // Shaped like an import response because that is what the worker reads to
+        // decide ACKNOWLEDGED, and this is the same fact arrived at differently:
+        // the voucher exists in the client's books.
+        status: 1,
+        created: 1,
+        altered: 0,
+        errors: 0,
+        exceptions: 0,
+        errorText: null,
+        ok: true,
+        recoveredFromLostAcknowledgement: true,
+        confirmedBy: 'Day Book export',
+        voucherNumber: String(voucherNumber),
+        voucherTypeName: hit.voucherTypeName,
+        originalError: err.message,
+      },
+    };
+  }
+
+  throw new ProviderCallError(
+    `TallyPrime did not answer this import (${err.message}), and voucher ${voucherNumber} was not found in the Day Book for ${tallyDate(payload.date)}. ` +
+      'It has NOT been sent again, because an export that does not list a voucher is not proof the voucher is absent, and a second attempt would risk a duplicate sale. ' +
+      'Check this voucher in Tally and use Retry if it is genuinely missing.',
+    { kind: 'TERMINAL', code: err.code, body: JSON.stringify({ lostAcknowledgement: true, voucherNumber: String(voucherNumber) }) },
+  );
+};
+
 export const adapter = {
   key: 'TALLY',
   operable: true,
 
-  async checkConnection({ credential, config }) {
+  async checkConnection({ credential, config, resolver }) {
     // Export (Get) of the company's own name: the smallest request that proves
     // all three prerequisites at once — Tally is running, the HTTP server is
     // enabled, and a company is loaded with the name the operator configured.
@@ -289,7 +439,7 @@ export const adapter = {
         id: 'List of Companies',
         body: '',
       });
-      const result = await providerFetch(urlFor(credential), {
+      const result = await providerFetch(await urlFor(credential, { resolver }), {
         method: 'POST',
         headers: { 'Content-Type': 'text/xml;charset=utf-8' },
         body: xml,
@@ -326,7 +476,7 @@ export const adapter = {
     });
   },
 
-  async perform({ kind, payload, credential, config }) {
+  async perform({ kind, payload, credential, config, resolver }) {
     const messages = {
       TALLY_SALES: () => buildSalesVoucher({ voucherTypeName: config.salesVoucherType, ...payload }),
       TALLY_CREDIT_NOTE: () => buildCreditNote({ voucherTypeName: config.creditNoteVoucherType, ...payload }),
@@ -339,7 +489,17 @@ export const adapter = {
     }
     const reportName = kind === 'TALLY_LEDGER_MASTER' ? 'All Masters' : 'Vouchers';
     const xml = importData({ companyName: config.companyName, reportName, messages: [build()] });
-    const result = await send(credential, xml);
+    const opts = resolver ? { resolver } : undefined;
+
+    let result;
+    try {
+      result = await send(credential, xml, opts);
+    } catch (err) {
+      const recovered = await recoverLostAck(err, { kind, payload, credential, config, opts });
+      if (recovered) return recovered;
+      throw err;
+    }
+
     if (!result.ok) {
       // A Tally import that reports errors HAS answered, so this is TERMINAL,
       // not UNKNOWN: retrying an XML Tally has already rejected produces the
