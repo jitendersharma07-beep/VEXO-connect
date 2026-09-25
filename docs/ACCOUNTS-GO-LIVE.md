@@ -10,7 +10,18 @@ configuration, and nothing else here works until it is done — deliberately.
 
 ---
 
-## 1. Configure the sender (the only outstanding owner input)
+## 1. Configure the sender (outstanding owner input)
+
+> Two things are outstanding, not one: the mailbox **credential** below, and
+> **confirmation of the recipient**. `support@vexoconnect.com` is used throughout
+> this document because an earlier report named it — which is not the same as the
+> owner confirming it exists and that they can open it. Searched for and not
+> found: any independent record of that confirmation. Treat it as a placeholder
+> until the owner says otherwise.
+>
+> The domain's MX is real, but an MX proves a domain accepts mail, not that a
+> particular mailbox exists or that anyone reads it. There is no probe that
+> settles this from here, which is why it is on the owner's list.
 
 The product refuses to invent a way around a missing mailbox. With `SMTP_HOST`
 unset, `mailEnabled` is false and every path that must reach a person refuses
