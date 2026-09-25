@@ -38,10 +38,40 @@ export const gatewayNotConfigured = () =>
     'Online payment is not enabled on this deployment. Record the payment manually.',
   );
 
+// The card-terminal equivalent, and a SEPARATE message on purpose. An online
+// checkout integration does not drive a card reader, so "online payment is
+// enabled" must never read as "the terminal will work" — a cashier told the
+// wrong one of these stands there pressing a button on a device nothing is
+// talking to.
+export const terminalNotConfigured = () =>
+  new AppError(
+    501,
+    'POS_TERMINAL_NOT_CONFIGURED',
+    'No card terminal connector is enabled on this deployment. Take the card payment on the terminal itself and record it.',
+  );
+
+// A connector that is registered but cannot run: its vendor SDK or integration
+// credentials have not been supplied. Distinct from "not configured" because
+// the operator's next move is different — this one names a dependency somebody
+// can go and obtain, and says so in the message.
+export const terminalConnectorUnavailable = (connector, dependency) =>
+  new AppError(
+    501,
+    'POS_TERMINAL_CONNECTOR_UNAVAILABLE',
+    `The ${connector} terminal connector cannot run on this deployment: ${dependency}`,
+  );
+
 // 502, not 500: nothing here is broken. The provider is a separate system that
 // did not answer, and the cashier's next move is to take the money another way
 // rather than to report a bug.
 export const badGateway = (message) => new AppError(502, 'POS_GATEWAY_UNAVAILABLE', message);
+
+// The terminal answered nothing, or answered something this connector cannot
+// read. NEVER used for a decline: a refusal is an answer and settles the
+// attempt FAILED, while this leaves it open and unresolved, which is the whole
+// difference between "the card was declined" and "nobody knows".
+export const terminalUnavailable = (message) =>
+  new AppError(502, 'POS_TERMINAL_UNAVAILABLE', message);
 
 // 503, not 500: the write was abandoned by the storage layer, not broken by it.
 // Prisma reports two transient conditions this way — P2028, the interactive

@@ -97,6 +97,20 @@ export const ACTIONS = Object.freeze([
   A('dayclose.read', 'Selling', 'View day closes', 'STORE'),
   A('dayclose.perform', 'Selling', 'Close the day', 'STORE'),
 
+  // Payments — LANE payments. Configuring which merchant account a store's
+  // money settles into is a separate authority from taking the money: a
+  // cashier collects, a manager reads the configuration, and only the tenant's
+  // own administration may point the settlements somewhere else.
+  A('payment.account.read', 'Payments', 'View merchant accounts', 'COMPANY'),
+  A('payment.account.write', 'Payments', 'Configure merchant accounts', 'COMPANY'),
+
+  // Drawer — LANE payments. Opening the till WITH a sale is part of taking
+  // cash and belongs to whoever may record a payment; opening it WITHOUT one
+  // is the interesting case and gets its own key, off by default for a
+  // cashier. That is the whole reason there are two.
+  A('drawer.open', 'Payments', 'Open the cash drawer with a cash sale or refund', 'STORE'),
+  A('drawer.open.manual', 'Payments', 'Open the cash drawer without a sale', 'STORE'),
+
   // Promotions — VC-102. Four separate checks by design (spec §2): editing a
   // campaign, publishing it, applying a published offer at the till, and
   // approving a manual exception are different authorities. The fourth —
@@ -166,7 +180,12 @@ const ALL = ACTION_KEYS.filter((k) => actionMeta(k).scope !== 'PLATFORM');
 // promo.apply is till work: the offer itself was authorised when the owner
 // published it, so applying it needs no discount authority — the cashier still
 // cannot create, edit or publish one.
-const SELL = ['order.read', 'order.create', 'order.bill', 'kot.read', 'payment.record', 'table.read', 'catalog.read', 'promo.apply'];
+// drawer.open rides with payment.record on purpose: a cashier taking notes has
+// to be able to open the till to put them in, and a permission model that says
+// otherwise is one the store works around by wedging the drawer open. What a
+// cashier does NOT get is drawer.open.manual — opening the till with no sale
+// behind it is the movement worth authorising separately.
+const SELL = ['order.read', 'order.create', 'order.bill', 'kot.read', 'payment.record', 'drawer.open', 'table.read', 'catalog.read', 'promo.apply'];
 
 const ROLE_ACTIONS = Object.freeze({
   // The platform role. Every action including the platform-only ones; what it
@@ -196,6 +215,10 @@ const ROLE_ACTIONS = Object.freeze({
     'report.schedule.read', 'report.schedule.write', 'report.exception.read',
     'user.read', 'permission.read', 'support.grant.read',
     'terminal.read', 'device.read', 'promo.read',
+    // Reads the merchant configuration, because reconciling settlements means
+    // knowing which account they landed in. Cannot change it, and still
+    // cannot open a till.
+    'payment.account.read',
   ]),
 
   // The stores of one region. Store-level authority over them, no company
@@ -213,6 +236,7 @@ const ROLE_ACTIONS = Object.freeze({
     'report.dashboard.read', 'report.payments.read', 'report.inventory.read', 'report.settings.read',
     'report.exception.read', 'report.exception.resolve',
     'user.read', 'terminal.read', 'terminal.write', 'device.read', 'device.enrol', 'device.activate', 'device.revoke',
+    'payment.account.read', 'drawer.open', 'drawer.open.manual',
   ]),
 
   // One store (or the stores explicitly assigned). The spec's Store Manager.
@@ -228,6 +252,7 @@ const ROLE_ACTIONS = Object.freeze({
     'report.dashboard.read', 'report.payments.read', 'report.inventory.read', 'report.settings.read',
     'report.exception.read', 'report.exception.resolve',
     'user.read', 'terminal.read', 'device.read',
+    'payment.account.read', 'drawer.open', 'drawer.open.manual',
   ]),
 
   // Takes money. Cannot void an order, cannot refund, cannot close the day,

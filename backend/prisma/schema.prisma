@@ -103,17 +103,17 @@ model Company {
   recipes            Recipe[]
 
   // LANE foundation
-  legalEntities     LegalEntity[]
-  gstRegistrations  GstRegistration[]
-  brands            Brand[]
-  regions           Region[]
-  terminals         Terminal[]
-  devices           Device[]
-  permissionRules   PermissionRule[]
-  supportGrants     SupportAccessGrant[]
-  promotions        Promotion[]
-  customers         Customer[]
-  phoneOrders       PhoneOrder[]
+  legalEntities    LegalEntity[]
+  gstRegistrations GstRegistration[]
+  brands           Brand[]
+  regions          Region[]
+  terminals        Terminal[]
+  devices          Device[]
+  permissionRules  PermissionRule[]
+  supportGrants    SupportAccessGrant[]
+  promotions       Promotion[]
+  customers        Customer[]
+  phoneOrders      PhoneOrder[]
 
   // LANE reporting — one contiguous block so two lanes editing this model at
   // once resolve by keeping both additions rather than by picking a winner.
@@ -124,6 +124,10 @@ model Company {
 
   // LANE accounts
   invitations UserInvitation[]
+
+  // LANE payments
+  paymentAccounts PaymentProviderAccount[]
+  deviceCommands  DeviceCommand[]
 }
 
 model Branch {
@@ -192,17 +196,21 @@ model Branch {
   kitchenStations  KitchenStation[]
 
   // LANE foundation
-  terminals       Terminal[]
-  devices         Device[]
-  brandLinks      BranchBrand[]
-  permissionRules PermissionRule[]
-  userAssignments UserStoreAssignment[]
-  promotionLinks  PromotionStore[]
+  terminals           Terminal[]
+  devices             Device[]
+  brandLinks          BranchBrand[]
+  permissionRules     PermissionRule[]
+  userAssignments     UserStoreAssignment[]
+  promotionLinks      PromotionStore[]
   serviceAreas        BranchServiceArea[]
   hours               BranchHours[]
   prepCapacity        BranchPrepCapacity?
-  phoneOrdersRouted   PhoneOrder[]        @relation("PhoneOrderRouted")
-  phoneOrdersAccepted PhoneOrder[]        @relation("PhoneOrderAccepted")
+  phoneOrdersRouted   PhoneOrder[]          @relation("PhoneOrderRouted")
+  phoneOrdersAccepted PhoneOrder[]          @relation("PhoneOrderAccepted")
+
+  // LANE payments
+  paymentAccounts PaymentProviderAccount[]
+  deviceCommands  DeviceCommand[]
 
   // LANE inventory
   inventoryLocations InventoryLocation[]
@@ -299,18 +307,18 @@ model PosUser {
   storeAssignments   UserStoreAssignment[] @relation("StoreAssignmentUser")
   storeAssignmentsBy UserStoreAssignment[] @relation("StoreAssignmentCreatedBy")
 
-  permissionRules    PermissionRule[]     @relation("PermissionRuleSubject")
-  permissionRulesSet PermissionRule[]     @relation("PermissionRuleUpdatedBy")
-  devicesEnrolled    Device[]             @relation("DeviceEnrolledBy")
-  devicesRevoked     Device[]             @relation("DeviceRevokedBy")
-  supportGrants      SupportAccessGrant[] @relation("SupportGrantOperator")
-  supportGrantsGiven SupportAccessGrant[] @relation("SupportGrantGrantedBy")
-  promotionsCreated  Promotion[]           @relation("PromotionCreatedBy")
-  promotionsApplied  PromotionRedemption[] @relation("PromotionAppliedBy")
-  customersCreated    Customer[]   @relation("CustomerCreatedBy")
-  phoneOrdersOperated PhoneOrder[] @relation("PhoneOrderOperator")
-  phoneOrdersAccepted PhoneOrder[] @relation("PhoneOrderAcceptedBy")
-  phoneOrdersRejected PhoneOrder[] @relation("PhoneOrderRejectedBy")
+  permissionRules     PermissionRule[]      @relation("PermissionRuleSubject")
+  permissionRulesSet  PermissionRule[]      @relation("PermissionRuleUpdatedBy")
+  devicesEnrolled     Device[]              @relation("DeviceEnrolledBy")
+  devicesRevoked      Device[]              @relation("DeviceRevokedBy")
+  supportGrants       SupportAccessGrant[]  @relation("SupportGrantOperator")
+  supportGrantsGiven  SupportAccessGrant[]  @relation("SupportGrantGrantedBy")
+  promotionsCreated   Promotion[]           @relation("PromotionCreatedBy")
+  promotionsApplied   PromotionRedemption[] @relation("PromotionAppliedBy")
+  customersCreated    Customer[]            @relation("CustomerCreatedBy")
+  phoneOrdersOperated PhoneOrder[]          @relation("PhoneOrderOperator")
+  phoneOrdersAccepted PhoneOrder[]          @relation("PhoneOrderAcceptedBy")
+  phoneOrdersRejected PhoneOrder[]          @relation("PhoneOrderRejectedBy")
 
   // Referenced by PermissionRule and UserStoreAssignment so a tenant's rule or
   // assignment can only name a principal of that same tenant.
@@ -517,21 +525,63 @@ enum DiscountType {
   PERCENT
 }
 
+// The INSTRUMENT the customer paid with, and nothing else. It says what was
+// handed over, never who confirmed it or how — see PaymentEntrySource for
+// that. CARD covers dip, swipe and tap, because the instrument is the same
+// card; whether the tap was contactless is a property of the terminal read,
+// not of the money.
 enum PaymentMethod {
   CASH
   CARD
   UPI
+  WALLET
+  NETBANKING
   OTHER
 }
 
-// MANUAL = hand-recorded by staff, never presented as gateway-verified.
-// GATEWAY = settled by the provider and confirmed by a signature-verified
-// webhook. Nothing else may ever write GATEWAY.
+// MANUAL   = hand-recorded by staff, never presented as gateway-verified.
+// GATEWAY  = settled by the provider and confirmed by a signature-verified
+//            webhook, or by the provider's own API answering a status query.
+//            Nothing else may ever write GATEWAY.
+// TERMINAL = approved on a card terminal in the store, for a request this
+//            server started and can name. Separate from GATEWAY because the
+//            money follows a different path — an acquirer settles it to the
+//            merchant's bank, there is no hosted checkout and no webhook — and
+//            because a day close reads it as card takings, not online sales.
+//
+// The channel is paired with PaymentEntrySource by a database CHECK, so the
+// two can never drift into saying different things about one row.
 enum PaymentChannel {
   MANUAL
   GATEWAY
+  TERMINAL
 }
 
+// WHO said this money arrived — the dimension that keeps a cashier's typed
+// "customer paid by card" apart from a payment the provider itself confirmed.
+// Both can sit on a row with method=CARD; only one of them is evidence.
+//
+// MANUAL_ENTRY        a member of staff typed it. The POS has no independent
+//                     knowledge that any money moved.
+// PROVIDER_CONFIRMED  a signature-verified provider webhook said so.
+// TERMINAL_CONFIRMED  a card terminal adapter returned an APPROVED result for
+//                     a request this server started and can name.
+// RECONCILED          the provider's own API was ASKED after the fact and
+//                     reported the charge as captured (the pull half of the
+//                     webhook's push).
+enum PaymentEntrySource {
+  MANUAL_ENTRY
+  PROVIDER_CONFIRMED
+  TERMINAL_CONFIRMED
+  RECONCILED
+}
+
+// UNCERTAIN is the state this whole subsystem exists for. It means the attempt
+// reached the provider or the terminal and the outcome could not be
+// established — a timeout, a torn-down connection, a device that stopped
+// answering mid-transaction. The customer may have been charged. It is NEVER
+// auto-retried and NEVER converted into a manual payment: a human asks the
+// provider, or reads the terminal's own record, and settles it from evidence.
 enum PaymentIntentStatus {
   CREATED
   PENDING
@@ -539,6 +589,20 @@ enum PaymentIntentStatus {
   FAILED
   EXPIRED
   CANCELLED
+  UNCERTAIN
+}
+
+// How the money was to be collected, which decides which adapter surface an
+// attempt uses and what the customer physically does.
+//
+// CHECKOUT_LINK  a hosted page or payment link the customer opens (online).
+// TERMINAL       a card terminal in the store: dip, swipe or tap. Contactless
+//                is a terminal read, not a separate flow.
+// UPI_COLLECT    a collect request pushed to the customer's UPI app.
+enum PaymentFlow {
+  CHECKOUT_LINK
+  TERMINAL
+  UPI_COLLECT
 }
 
 // A manual refund is SUCCEEDED on creation — the cash is already out of the
@@ -653,15 +717,15 @@ model ModifierGroup {
 }
 
 model ModifierOption {
-  id      String        @id @default(cuid())
-  groupId String
-  group   ModifierGroup @relation(fields: [groupId], references: [id])
-  name    String
+  id        String        @id @default(cuid())
+  groupId   String
+  group     ModifierGroup @relation(fields: [groupId], references: [id])
+  name      String
   // Per-unit price added on top of the variant/base price. Zero is allowed.
-  price   Decimal       @db.Decimal(10, 2)
-  status  CatalogStatus @default(ACTIVE)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  price     Decimal       @db.Decimal(10, 2)
+  status    CatalogStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
 
   @@unique([groupId, name])
   @@index([groupId])
@@ -832,43 +896,62 @@ model Kot {
   seq       Int
   createdAt DateTime @default(now())
 
-  items OrderItem[]
+  items        OrderItem[]
   kitchenItems KitchenItem[]
 
   @@unique([orderId, seq])
 }
 
 model Payment {
-  id           String         @id @default(cuid())
-  orderId      String
+  id             String                  @id @default(cuid())
+  orderId        String
   // Carried on the payment, not looked up through the order, because it is the
   // column the terminal and device references below are checked against. A
   // payment therefore cannot be attributed to a till or a device belonging to
   // a store other than the one that issued the bill. Backfilled from the order
   // for every payment written before this column existed.
-  branchId     String
-  order        Order          @relation(fields: [orderId, branchId], references: [id, branchId])
-  method       PaymentMethod
-  channel      PaymentChannel @default(MANUAL)
+  branchId       String
+  order          Order                   @relation(fields: [orderId, branchId], references: [id, branchId])
+  method         PaymentMethod
+  channel        PaymentChannel          @default(MANUAL)
+  // The three dimensions `channel` alone used to conflate. A row saying
+  // "CARD, MANUAL" answered neither "which provider?" nor "who says so?", and
+  // the second question is the one that decides whether the shop has been
+  // paid.
+  //
+  // entrySource: who established that the money arrived. Defaulted to
+  // MANUAL_ENTRY so every row written before this column existed keeps the
+  // weakest honest claim; the migration then promotes the GATEWAY ones, which
+  // are the only rows with independent evidence behind them.
+  entrySource    PaymentEntrySource      @default(MANUAL_ENTRY)
+  // Which provider settled it — null for cash and for anything staff typed.
+  // Held on the payment and not read through the intent, because a terminal
+  // payment has a provider and no checkout intent at all.
+  provider       String?
+  // Which merchant account took the money. The column that makes "did this
+  // settle into the right customer's account?" answerable from the ledger
+  // alone. Null for manual and for the single-account env configuration.
+  accountId      String?
+  account        PaymentProviderAccount? @relation(fields: [accountId], references: [id], onDelete: Restrict)
   // amount = applied to the order (≤ remaining due). For cash, tendered is
   // what the customer handed over; change = tendered − amount, never stored.
-  amount       Decimal        @db.Decimal(10, 2)
-  tendered     Decimal?       @db.Decimal(10, 2)
-  note         String?
+  amount         Decimal                 @db.Decimal(10, 2)
+  tendered       Decimal?                @db.Decimal(10, 2)
+  note           String?
   // Null for GATEWAY: the provider settled it, no member of staff received
   // anything. Recording the cashier here would misattribute the money.
-  receivedById String?
-  receivedBy   PosUser?       @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  receivedById   String?
+  receivedBy     PosUser?                @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
   // Unique, so one intent can never settle twice however often the provider
   // redelivers. This is the last line of defence behind webhook idempotency.
-  intentId     String?        @unique
-  intent       PaymentIntent? @relation(fields: [intentId], references: [id])
+  intentId       String?                 @unique
+  intent         PaymentIntent?          @relation(fields: [intentId], references: [id])
   // The provider's id for the CHARGE, which is not its id for the attempt.
   // A Razorpay refund posts to /payments/<this>/refund, while the attempt is
   // an order_… held on PaymentIntent.providerRef — so without this column a
   // gateway payment cannot be refunded at all. Null for MANUAL, and for any
   // provider that names the attempt and the charge with one id.
-  providerRef  String?        @unique
+  providerRef    String?                 @unique
   // Makes a RETRIED manual payment return the first one instead of collecting
   // the bill twice — the same job PaymentIntent.idempotencyKey does for the
   // gateway, which the manual path never had.
@@ -891,7 +974,7 @@ model Payment {
   // a cloned device — cannot suppress a real payment on a different bill.
   idempotencyKey String?
 
-  createdAt    DateTime       @default(now())
+  createdAt DateTime @default(now())
 
   // LANE foundation — which till and device took the money. A cash variance is
   // only answerable if the drawer it came out of is on the row.
@@ -906,30 +989,62 @@ model Payment {
   @@index([createdAt])
   @@index([terminalId])
   @@index([deviceId])
+  @@index([accountId])
 }
 
 // One attempt to collect an order's due amount through a provider. Order-linked
 // so reconciliation can always put "what we asked for" beside "what arrived".
 model PaymentIntent {
-  id             String              @id @default(cuid())
-  orderId        String
-  order          Order               @relation(fields: [orderId], references: [id])
-  provider       String
+  id                String                  @id @default(cuid())
+  orderId           String
+  order             Order                   @relation(fields: [orderId], references: [id])
+  // Copied from the order at creation, never taken from the request. A
+  // provider reference arrives on a webhook carrying no tenant of its own, so
+  // "which company does pay_XYZ belong to?" is answerable only because these
+  // columns were written here from the order that asked for the money.
+  // Backfilled from the order for every attempt opened before they existed.
+  companyId         String?
+  branchId          String?
+  // WHICH till and device asked. A terminal attempt is bound to one physical
+  // reader; without this a store with two readers cannot say which one is
+  // holding a customer's card.
+  terminalId        String?
+  deviceId          String?
+  // How it was to be collected. Defaulted to CHECKOUT_LINK because that is the
+  // only flow that existed when these rows were written.
+  flow              PaymentFlow             @default(CHECKOUT_LINK)
+  // The merchant account the attempt was opened on. Held so a webhook can be
+  // checked against the account that actually started the attempt, rather than
+  // against whatever configuration happens to be loaded now.
+  accountId         String?
+  account           PaymentProviderAccount? @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  provider          String
   // The provider's own id for the attempt; null until the provider answers.
   // Postgres treats NULLs as distinct, so many un-answered intents coexist.
-  providerRef    String?
-  amount         Decimal             @db.Decimal(10, 2)
-  currency       String              @default("INR")
-  status         PaymentIntentStatus @default(CREATED)
+  providerRef       String?
+  amount            Decimal                 @db.Decimal(10, 2)
+  currency          String                  @default("INR")
+  status            PaymentIntentStatus     @default(CREATED)
   // Sent to the provider, so a retried create returns the first attempt
   // instead of opening a second one the customer could also pay.
-  idempotencyKey String              @unique
-  failureReason  String?
-  createdById    String
-  createdBy      PosUser             @relation("PaymentIntentCreatedBy", fields: [createdById], references: [id])
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-  closedAt       DateTime?
+  idempotencyKey    String                  @unique
+  failureReason     String?
+  // The provider's or terminal's own code for the refusal — DECLINED,
+  // CARD_EXPIRED, INSUFFICIENT_FUNDS. Kept beside the human sentence because
+  // the cashier needs the sentence and reconciliation needs the code.
+  failureCode       String?
+  // Status-enquiry bookkeeping. An attempt whose outcome is unknown gets ASKED
+  // about; counting the asks is how a stuck attempt becomes visible instead of
+  // being polled forever in silence. Neither column may ever move money — only
+  // applyGatewayEvent does that.
+  lastStatusCheckAt DateTime?
+  statusCheckCount  Int                     @default(0)
+  cancelledAt       DateTime?
+  createdById       String
+  createdBy         PosUser                 @relation("PaymentIntentCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  closedAt          DateTime?
 
   payment       Payment?
   webhookEvents GatewayWebhookEvent[]
@@ -938,6 +1053,8 @@ model PaymentIntent {
   @@unique([provider, providerRef])
   @@index([orderId])
   @@index([status])
+  @@index([companyId, status])
+  @@index([accountId])
 }
 
 // Which code path wrote the row. WEBHOOK is a delivery that arrived at
@@ -1038,11 +1155,11 @@ model Refund {
 // One row per branch per financial year; bill transactions increment
 // lastNumber atomically, so concurrent bills can never share a number.
 model InvoiceCounter {
-  id         String @id @default(cuid())
-  branchId   String
-  branch     Branch @relation(fields: [branchId], references: [id])
-  fyLabel    String
-  lastNumber Int    @default(0)
+  id           String @id @default(cuid())
+  branchId     String
+  branch       Branch @relation(fields: [branchId], references: [id])
+  fyLabel      String
+  lastNumber   Int    @default(0)
   // The series this year's bills are issued under, frozen when the year's
   // first bill is issued. Read back for every later bill in the same series,
   // so editing Branch.code or Branch.invoicePrefix mid-year cannot relabel a
@@ -2758,9 +2875,9 @@ model InventorySchedulerState {
 // a group running two companies under one VEXO login is the ordinary case, not
 // the exotic one.
 model LegalEntity {
-  id        String  @id @default(cuid())
+  id        String        @id @default(cuid())
   companyId String
-  company   Company @relation(fields: [companyId], references: [id])
+  company   Company       @relation(fields: [companyId], references: [id])
   // Exactly as it appears on the certificate of incorporation, because this is
   // the string a tax invoice has to carry. The brand customers recognise lives
   // in `Brand`, and the two are usually different.
@@ -2795,13 +2912,13 @@ model LegalEntity {
 // store maps to exactly one — that mapping is what decides the GSTIN, the
 // place of supply and the invoice series a bill is issued under.
 model GstRegistration {
-  id            String      @id @default(cuid())
+  id            String        @id @default(cuid())
   companyId     String
-  company       Company     @relation(fields: [companyId], references: [id])
+  company       Company       @relation(fields: [companyId], references: [id])
   legalEntityId String
   // Composite: the entity must be one of THIS tenant's. A single-column
   // reference would happily accept another customer's legal entity id.
-  legalEntity   LegalEntity @relation(fields: [legalEntityId, companyId], references: [id, companyId], onDelete: Restrict)
+  legalEntity   LegalEntity   @relation(fields: [legalEntityId, companyId], references: [id, companyId], onDelete: Restrict)
   gstin         String
   // The trade name on THIS registration. It can differ from the entity's, which
   // is why it is not read off LegalEntity.
@@ -2916,17 +3033,17 @@ enum TerminalStatus {
 // whole life — a terminal that could move between stores would make the day's
 // cash belong to two places at once.
 model Terminal {
-  id        String @id @default(cuid())
+  id        String         @id @default(cuid())
   // Denormalised from the branch on purpose, and written by the server from the
   // branch it resolved — never from the request. Device authentication has to
   // establish the tenant on every single call, and it must not need a join to
   // do it.
   companyId String
-  company   Company @relation(fields: [companyId], references: [id])
+  company   Company        @relation(fields: [companyId], references: [id])
   branchId  String
   // Composite: the denormalised companyId above is only trustworthy if the
   // database checks it against the branch. This is that check.
-  branch    Branch  @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  branch    Branch         @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
   code      String
   name      String
   status    TerminalStatus @default(ACTIVE)
@@ -2959,6 +3076,11 @@ enum DeviceType {
   KDS
   CUSTOMER_DISPLAY
   HANDHELD
+  // A card terminal the store operates. It is a Device like any other so its
+  // credential, store scope and revocation work exactly the same way — the
+  // reader that takes a customer's card is not a special case exempt from
+  // tenancy.
+  PAYMENT_TERMINAL
   OTHER
 }
 
@@ -3111,43 +3233,55 @@ enum PrintAgentStatus {
 // and at most one terminal, and that scope is checked server-side on every
 // request — a token that leaks is a token for one counter, not for a tenant.
 model Device {
-  id String @id @default(cuid())
+  id           String       @id @default(cuid())
   // Quoted in support tickets and printed on the device's own settings screen.
   // Minted once, never editable.
-  publicId String @unique
+  publicId     String       @unique
   // See Terminal.companyId — same reason, same rule: server-written.
-  companyId   String
-  company     Company   @relation(fields: [companyId], references: [id])
-  branchId    String
-  branch      Branch    @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
-  terminalId  String?
+  companyId    String
+  company      Company      @relation(fields: [companyId], references: [id])
+  branchId     String
+  branch       Branch       @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  terminalId   String?
   // (terminalId, branchId), not terminalId alone: a device's credential is
   // scoped to one store, and pointing it at a till in a different store would
   // make that scope a fiction.
-  terminal    Terminal? @relation(fields: [terminalId, branchId], references: [id, branchId], onDelete: Restrict)
-  name        String
-  type        DeviceType   @default(COUNTER)
-  status      DeviceStatus @default(PENDING)
+  terminal     Terminal?    @relation(fields: [terminalId, branchId], references: [id, branchId], onDelete: Restrict)
+  name         String
+  type         DeviceType   @default(COUNTER)
+  status       DeviceStatus @default(PENDING)
+  // The vendor's own id for a card reader — the string a terminal connector
+  // addresses the physical device by, printed on the device or issued with it.
+  // Null on every device that is not a reader, and on readers whose vendor
+  // connector does not exist yet, which today is all of them.
+  //
+  // It is here rather than in configuration because a shop with two readers has
+  // to be able to say WHICH one is holding a customer's card, and a deployment-
+  // wide setting cannot. Unique per store: two devices claiming one reader would
+  // make that question unanswerable again. Postgres treats NULLs as distinct, so
+  // any number of non-reader devices coexist.
+  readerRef    String?
   // Only the hash. The token itself is shown once, at activation, and is not
   // recoverable afterwards — the same contract as a staff temporary password.
   // Revoking clears this column, because status alone would leave a working
   // credential in the wild.
-  tokenHash   String?   @unique
-  lastSeenAt  DateTime?
-  lastSeenIp  String?
-  activatedAt DateTime?
-  revokedAt   DateTime?
-  revokedById String?
-  revokedBy   PosUser?  @relation("DeviceRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  tokenHash    String?      @unique
+  lastSeenAt   DateTime?
+  lastSeenIp   String?
+  activatedAt  DateTime?
+  revokedAt    DateTime?
+  revokedById  String?
+  revokedBy    PosUser?     @relation("DeviceRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
   enrolledById String?
-  enrolledBy   PosUser? @relation("DeviceEnrolledBy", fields: [enrolledById], references: [id], onDelete: Restrict)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  enrolledBy   PosUser?     @relation("DeviceEnrolledBy", fields: [enrolledById], references: [id], onDelete: Restrict)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   orders   Order[]
   payments Payment[]
 
   @@unique([id, branchId])
+  @@unique([branchId, readerRef])
   @@index([companyId])
   @@index([branchId])
   @@index([terminalId])
@@ -3180,25 +3314,25 @@ enum PermissionEffect {
 // route refuses to store such an ALLOW in the first place, so nobody is left
 // looking at a rule that says ALLOW while the server says no.
 model PermissionRule {
-  id        String          @id @default(cuid())
-  companyId String
-  company   Company         @relation(fields: [companyId], references: [id])
-  level     PermissionLevel
-  branchId  String?
-  branch    Branch?         @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
-  userId    String?
-  user      PosUser?        @relation("PermissionRuleSubject", fields: [userId, companyId], references: [id, companyId], onDelete: Restrict)
+  id          String           @id @default(cuid())
+  companyId   String
+  company     Company          @relation(fields: [companyId], references: [id])
+  level       PermissionLevel
+  branchId    String?
+  branch      Branch?          @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  userId      String?
+  user        PosUser?         @relation("PermissionRuleSubject", fields: [userId, companyId], references: [id, companyId], onDelete: Restrict)
   // Same trick as DiscountPolicy.scopeKey: Postgres counts NULLs as distinct,
   // so a nullable (branchId, userId) pair cannot stop a hundred duplicate
   // "company default" rows. "company" | "branch:<id>" | "user:<id>".
-  scopeKey  String
-  action    String
-  effect    PermissionEffect
+  scopeKey    String
+  action      String
+  effect      PermissionEffect
   note        String?
   updatedById String?
-  updatedBy   PosUser? @relation("PermissionRuleUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  updatedBy   PosUser?         @relation("PermissionRuleUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
 
   @@unique([companyId, scopeKey, action])
   @@index([companyId, level])
@@ -3252,9 +3386,9 @@ model UserStoreAssignment {
 // so without this table "ATC looked at my data" has no record and no consent.
 // Every grant, use and revocation is audited.
 model SupportAccessGrant {
-  id        String  @id @default(cuid())
-  companyId String
-  company   Company @relation(fields: [companyId], references: [id])
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id])
   // The platform operator the grant is for. Named, never a blanket grant to the
   // role: "ATC can see it" is not consent, "this person until Friday" is.
   //
@@ -3263,12 +3397,12 @@ model SupportAccessGrant {
   // an operator's companyId is NULL — so there is no (id, companyId) pair to
   // match. requireTenantPrincipal on the grant routes is what checks the
   // operator is an operator; a composite key here would simply be unsatisfiable.
-  userId    String
-  user      PosUser @relation("SupportGrantOperator", fields: [userId], references: [id], onDelete: Restrict)
+  userId      String
+  user        PosUser   @relation("SupportGrantOperator", fields: [userId], references: [id], onDelete: Restrict)
   reason      String
   grantedById String
-  grantedBy   PosUser  @relation("SupportGrantGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
-  grantedAt   DateTime @default(now())
+  grantedBy   PosUser   @relation("SupportGrantGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+  grantedAt   DateTime  @default(now())
   // Required. A grant with no end is standing access wearing a consent label.
   expiresAt   DateTime
   revokedAt   DateTime?
@@ -3362,8 +3496,8 @@ model Promotion {
 
   // Campaign-wide cap. Enforced by a conditional increment inside the apply
   // transaction, so two concurrent redemptions cannot both take the last slot.
-  totalLimit      Int?
-  redemptionCount Int  @default(0)
+  totalLimit       Int?
+  redemptionCount  Int  @default(0)
   // Per-customer cap. Customers have no account in this phase, so the key is
   // the normalised phone number the till supplies at apply time; a promotion
   // with this set REFUSES an apply that names no customer.
@@ -3528,8 +3662,9 @@ model PrintAgent {
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
-  targets PrintTarget[]
-  jobs    PrintJob[]
+  targets  PrintTarget[]
+  jobs     PrintJob[]
+  commands DeviceCommand[]
 
   @@unique([branchId, name])
   @@index([companyId, branchId])
@@ -3559,10 +3694,37 @@ model PrintTarget {
   cut        Boolean         @default(true)
   drawerKick Boolean         @default(false)
   status     CatalogStatus   @default(ACTIVE)
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
 
-  jobs PrintJob[]
+  // ---- drawer profile (LANE payments) -------------------------------------
+  // The ESC/POS generalised pulse command is `ESC p m t1 t2`: m selects the
+  // connector pin, t1 and t2 are the on and off times in units of 2 ms. Epson's
+  // ESC/POS command reference gives m ∈ {0, 1, 48, 49} and t1, t2 ∈ 0–255, and
+  // the two pins are conventionally wired as drawer 1 (pin 2) and drawer 2
+  // (pin 5). Stored as the pin number a technician reads off the cable, and
+  // converted to m at the agent.
+  //
+  // These are the ONLY drawer parameters that exist. There is no free-text
+  // command column anywhere: a printer that speaks a different dialect needs
+  // an adapter, not a field the operator can type raw bytes into.
+  drawerPin    Int     @default(2)
+  // Milliseconds, validated against the documented 2 ms units (so 0–510) and
+  // clamped further by DRAWER_PROFILE in lib/peripherals/drawer.js to the
+  // range the hardware notes actually cover. A long pulse on a solenoid is how
+  // a drawer coil burns out.
+  drawerOnMs   Int     @default(50)
+  drawerOffMs  Int     @default(200)
+  // Whether this drawer reports its own open/closed state on the printer's
+  // status line (ESC/POS real-time status, drawer-kick pin 3). FALSE everywhere
+  // until a technician confirms the sensor exists and is wired, because it is
+  // the switch that decides whether "the drawer opened" may ever be asserted.
+  // Without it the only honest claim is "the command was acknowledged".
+  drawerSensor Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobs     PrintJob[]
+  commands DeviceCommand[]
 
   @@unique([branchId, name])
   @@index([agentId])
@@ -3678,7 +3840,7 @@ model Customer {
   companyId String
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  name String
+  name  String
   // One caller, one row per tenant. The unique pair below is what makes a
   // repeat caller findable by the number they are ringing from, instead of
   // quietly accumulating a second Anita Rao every time someone mistypes.
@@ -3758,7 +3920,7 @@ model BranchHours {
 
   // 0 = Sunday .. 6 = Saturday, in IST — the business day this product already
   // runs on (istDateOf, UTC+05:30).
-  dayOfWeek Int
+  dayOfWeek    Int
   // Minutes from midnight IST. closesMinute may exceed 1440 for a store that
   // trades past midnight, which is exactly why these are integers and not
   // clock strings: 23:00-02:00 has to be expressible without a second row.
@@ -3805,7 +3967,7 @@ model PhoneOrder {
   addressId  String?
   address    CustomerAddress? @relation(fields: [addressId, companyId], references: [id, companyId], onDelete: Restrict)
 
-  fulfilment PhoneFulfilment
+  fulfilment   PhoneFulfilment
   // Explicit fulfilment time. NULL means as-soon-as-possible. The spec requires
   // a SCHEDULED order to carry one, so the route refuses a scheduled order
   // without it rather than inventing a default the caller never agreed to.
@@ -3850,7 +4012,7 @@ model PhoneOrder {
   operatorName String
   // INTEGRATION(foundation): the terminal the central desk worked from, when
   // that desk is itself enrolled. No FK yet — foundation owns Terminal.
-  terminalId String?
+  terminalId   String?
 
   // QUOTED, not billed. This never reaches Order.total or Order.taxAmount while
   // the treatment below is UNRESOLVED — see the enum comment. recomputeOrder()
@@ -3864,7 +4026,7 @@ model PhoneOrder {
   // Fingerprint of the body this key first succeeded with. A replay carrying a
   // DIFFERENT body is a caller bug, not a retry, and must not be answered with
   // someone else's order.
-  requestHash String
+  requestHash    String
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4374,4 +4536,203 @@ model EmailOutbox {
 
   @@index([status, createdAt])
   @@index([to, createdAt])
+}
+
+// ============================================================================
+// ==== LANE payments ====
+// Merchant accounts, and the command channel that drives a cash drawer.
+// ============================================================================
+
+// Whether this account's keys move real money. A TEST account is a sandbox and
+// may be used anywhere; a LIVE account is refused outside production, because
+// the cost of noticing a mispasted key late is a genuine charge on somebody's
+// card during a dev run.
+enum PaymentAccountMode {
+  TEST
+  LIVE
+}
+
+// One customer's merchant account with one provider.
+//
+// WHY THIS TABLE EXISTS. Before it, credentials lived in one set of process
+// environment variables, which meant every tenant on a deployment shared a
+// single merchant account: every customer's settlements would land in whichever
+// account the box was configured with. That is not a configuration mistake
+// waiting to happen — it is the only behaviour a global variable can have. The
+// account is therefore a row, owned by a company, and resolved from the ORDER
+// being paid rather than from the process.
+//
+// Scope. branchId NULL is the company-wide account; a row with a branchId
+// overrides it for that store, which is how a franchise with per-outlet
+// settlement accounts is configured. Resolution is store-first, then company;
+// see lib/gateway/accounts.js.
+//
+// Secrets. keyId is the publishable half and is stored in clear because it is
+// designed to reach the browser. Everything else is AES-256-GCM ciphertext
+// under POS_PAYMENT_SECRET_KEY and is never returned by any route, never
+// logged, and never serialised into an audit meta — the API answers with
+// `secretSet: true`, which is all an operator needs to see.
+model PaymentProviderAccount {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  // Composite, so the database refuses an account pointed at another
+  // customer's store — the same rule Terminal and Device follow.
+  branchId  String?
+  branch    Branch? @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  provider String
+  label    String
+  mode     PaymentAccountMode @default(TEST)
+
+  // The publishable identifier. Reaches the browser by design.
+  keyId String
+
+  // AES-256-GCM, `v1:<iv b64>:<tag b64>:<ciphertext b64>`. Nullable because an
+  // account can be created for a provider that authenticates by webhook secret
+  // alone, and because rotation clears one half before setting the other.
+  keySecretEnc     String?
+  webhookSecretEnc String?
+
+  // Set by the operator after checking the provider's dashboard, so a
+  // half-configured account cannot start taking payments by accident.
+  active Boolean @default(false)
+
+  // Last time this account's credentials were proven to reach the provider,
+  // and what it answered. A fact about a past check, never a licence: an
+  // account that verified yesterday can be revoked today.
+  lastVerifiedAt DateTime?
+  lastVerifyNote String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  intents  PaymentIntent[]
+  payments Payment[]
+
+  // One account per provider per scope. The company-wide row and a store
+  // override are different rows because branchId differs; two company-wide
+  // rows for one provider would make resolution a coin toss.
+  @@unique([companyId, branchId, provider])
+  @@index([companyId])
+  @@index([branchId])
+}
+
+// What the agent is being asked to do. One value today. New kinds are new enum
+// members with their own validation — never a free-text command field, because
+// a command channel that accepts arbitrary strings is a remote shell.
+enum DeviceCommandKind {
+  DRAWER_OPEN
+}
+
+// QUEUED     waiting for its agent
+// DISPATCHED handed to the agent, lease running, outcome not yet reported
+// CONFIRMED  the agent drove the pin and the connection closed clean. This is
+//            the CEILING unless the target declares a drawer sensor: software
+//            cannot see a drawer move, so CONFIRMED means "the command was
+//            acknowledged", and only sensorConfirmed asserts the drawer opened.
+// FAILED     definitely not delivered — the agent could not reach the printer.
+// UNCERTAIN  the pulse may have reached the hardware and nobody can say. NEVER
+//            re-sent automatically: the honest recovery for a drawer that may
+//            already be open is a person looking at it.
+// EXPIRED    the command outlived its window before any agent took it. A
+//            drawer-open is a request to open a drawer NOW; replaying one an
+//            hour later opens a till in front of whoever is standing there.
+enum DeviceCommandStatus {
+  QUEUED
+  DISPATCHED
+  CONFIRMED
+  FAILED
+  UNCERTAIN
+  EXPIRED
+}
+
+// WHY the drawer was asked to open. Not decoration: the rule that a drawer
+// opens only for money actually moving is enforced by requiring one of the
+// first two to name a committed row, and MANUAL to carry a reason and a
+// permission the cashier role does not have by default.
+enum DeviceCommandCause {
+  CASH_RECEIPT
+  CASH_REFUND
+  MANUAL
+}
+
+// One authenticated, expiring, auditable request to a store device.
+//
+// It is deliberately the PrintJob protocol again rather than a new one: claim
+// with a token, hold a lease, report an outcome, and treat a lease that ran out
+// as UNCERTAIN instead of retrying. That protocol was built because a repeated
+// KOT is a second dish; a repeated drawer kick is a till standing open in a
+// shop, which is the same class of mistake.
+model DeviceCommand {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  branchId  String
+  branch    Branch  @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  // Which agent must run it, and which printer's drawer port it drives. Both
+  // are resolved server-side from the branch, so a command can never be
+  // addressed to another store's hardware by asking for it.
+  agentId  String
+  agent    PrintAgent  @relation(fields: [agentId], references: [id])
+  targetId String
+  target   PrintTarget @relation(fields: [targetId], references: [id])
+
+  // The till the request came from, kept for the same reason Payment carries
+  // it: a drawer variance is only answerable if the till is on the row.
+  terminalId String?
+  deviceId   String?
+
+  kind       DeviceCommandKind
+  status     DeviceCommandStatus @default(QUEUED)
+  cause      DeviceCommandCause
+  // The committed row that authorises this open. A CASH_RECEIPT names a
+  // Payment; a CASH_REFUND names a Refund. Checked to exist, to belong to this
+  // store, and to actually be cash before the command is written.
+  causeRefId String?
+  // Required for MANUAL, and typed by a person — "float top-up", "counted the
+  // till". The audit row is worth nothing without it.
+  reason     String?
+
+  // The validated pulse, frozen at creation from the target's profile. Stored
+  // rather than read live so an operator editing the profile mid-flight cannot
+  // change what an in-flight command does to the hardware.
+  drawerPin   Int
+  drawerOnMs  Int
+  drawerOffMs Int
+
+  // "This request, however many times the till sends it." A double-clicked
+  // Open drawer is one command. Unique per store, like PrintJob.
+  idempotencyKey String
+
+  // A drawer-open is only meaningful for a few seconds. Past this the command
+  // is EXPIRED and no agent may run it, however long it was offline.
+  expiresAt DateTime
+
+  attempts       Int       @default(0)
+  claimToken     String?
+  dispatchedAt   DateTime?
+  leaseExpiresAt DateTime?
+  completedAt    DateTime?
+  lastError      String?
+  lastReport     Json?
+
+  // The agent said it drove the pin. NOT a claim that the drawer moved.
+  ackAt           DateTime?
+  // A supported sensor reported the drawer physically open. Only ever set from
+  // a report whose target has drawerSensor = true; every other path leaves it
+  // false, and the API says "acknowledged", not "opened".
+  sensorConfirmed Boolean   @default(false)
+
+  requestedById String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([branchId, idempotencyKey])
+  @@index([agentId, status, expiresAt])
+  @@index([companyId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([causeRefId])
 }

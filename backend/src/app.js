@@ -25,10 +25,12 @@ import menuProfitabilityRoutes from './api/routes/menuProfitability.js';
 import displayRoutes from './api/routes/display.js';
 import kitchenRoutes from './api/routes/kitchen.js';
 import { printAgentsRouter, printJobsRouter } from './api/routes/printing.js';
+import { drawerRouter, deviceCommandsRouter } from './api/routes/drawer.js';
 import gatewayRoutes from './api/routes/gateway.js';
 // ==== LANE inventory ====
 import inventoryRoutes from './api/routes/inventory/index.js';
 // ==== END LANE inventory ====
+import paymentAccountRoutes from './api/routes/paymentAccounts.js';
 
 // LANE foundation — the organisation, device and permission surface.
 import legalEntityRoutes from './api/routes/legalEntities.js';
@@ -160,7 +162,18 @@ export const createApp = () => {
   // ==== END LANE inventory ====
   api.use('/kitchen', kitchenRoutes);
   api.use('/print-agents', printAgentsRouter);
+  // The drawer channel rides the SAME mount point, so a Store Agent keeps one
+  // base URL and one credential for both queues rather than enrolling twice.
+  // No path collides: every route here is /commands/..., which no print-agent
+  // route matches.
+  api.use('/print-agents', deviceCommandsRouter);
   api.use('/print-jobs', printJobsRouter);
+  api.use('/drawer', drawerRouter);
+  // Mounted unconditionally, unlike /api/gateway above. An operator has to be
+  // able to enter their merchant credentials on a deployment where the gateway
+  // is not yet switched on — otherwise configuring one is a chicken-and-egg
+  // problem that can only be solved by someone with database access.
+  api.use('/payment-accounts', paymentAccountRoutes);
 
   // LANE foundation — mounted after /branches so the store routes keep their
   // place in the table; order is irrelevant to Express here, none of these
