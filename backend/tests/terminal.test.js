@@ -86,6 +86,7 @@ const wipe = async () => {
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
