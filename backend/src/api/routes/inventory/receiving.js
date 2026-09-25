@@ -14,6 +14,7 @@ import { requireUsableLicense } from '../../../middleware/rbac.js';
 import { requireInventoryAction, loadLocationInScope, locationScopeFilter, rolesFor } from '../../../lib/inventory/permissions.js';
 import { postMovementsOnce, LedgerError } from '../../../lib/inventory/ledger.js';
 import { milliToQty, qtyToMilli } from '../../../lib/inventory/units.js';
+import { distributeProportional } from '../../../lib/money.js';
 import { nextDocNumber } from '../../../lib/inventory/docnum.js';
 import { idemKey, loadItem, qtyString, reasonString, toBase } from './shared.js';
 
@@ -365,6 +366,30 @@ router.post(
 
     const landed = (data.landedCosts ?? []).reduce((a, c) => a + BigInt(c.amountPaise), 0n);
 
+    // Landed cost rides on value, so the cheap pallet does not carry the same
+    // freight as the expensive one. The shares must ALSO add up to exactly
+    // what the header charges, and dividing each line independently does not:
+    // 100 paise across three equal lines truncates to 33 + 33 + 33 and loses
+    // one. That paise did not round away harmlessly — it stayed on the receipt
+    // and vanished from the ledger, and since StockMovement is the only truth
+    // about stock value, the ledger was the side that was wrong.
+    //
+    // distributeProportional is the same largest-remainder split the order
+    // engine uses to apportion a discount across lines. It conserves the total
+    // by construction: whatever truncation drops is handed back to the lines
+    // with the largest remainders, ties going to the lowest index, so the
+    // answer is exact and deterministic rather than exact on average.
+    //
+    // Numbers, not BigInt, because that helper is the order engine's and takes
+    // safe integers. Every amount arriving here is already bounded by `paise`
+    // above, and a receipt whose goods total exceeded 2^53 paise — ninety
+    // trillion rupees on one document — would throw from assertInt inside the
+    // transaction and refuse the receipt, rather than write a wrong one.
+    const landedShares = distributeProportional(
+      Number(landed),
+      prepared.map((p) => Number(p.goods)),
+    ).map(BigInt);
+
     let created;
     try {
       created = await prisma.$transaction(async (tx) => {
@@ -398,11 +423,9 @@ router.post(
         }
 
         const movements = [];
-        for (const p of prepared) {
-          // Landed cost rides on value, so the cheap pallet does not carry the
-          // same freight as the expensive one.
+        for (const [idx, p] of prepared.entries()) {
           const lineGoodsCost = p.goods + (taxIsCost ? p.tax : 0n);
-          const share = goodsTotal === 0n ? 0n : (landed * p.goods) / goodsTotal;
+          const share = landedShares[idx];
           const lineValue = lineGoodsCost + share;
 
           let batchId = null;

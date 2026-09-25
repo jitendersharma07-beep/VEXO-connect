@@ -445,6 +445,73 @@ describe('the request lifecycle', () => {
     expect(trail.batch.expiryDate).not.toBeNull();
   });
 
+  it('splits a dispatched value three ways without losing paise', async () => {
+    // The quantity side of this split already conserves exactly — the last
+    // batch takes whatever is left rather than being rounded independently.
+    // The value side did not, and the two live ten lines apart: the same
+    // problem was understood for grams and not applied to money.
+    //
+    // A value that will not divide by three is manufactured with a one-paise
+    // landed cost, then dispatched whole and split into equal thirds.
+    const besan = await makeItem({ name: 'Besan' });
+    ok(
+      await receive({
+        lines: [
+          {
+            itemId: besan.id,
+            qty: '3000',
+            unit: 'g',
+            unitPricePaise: 1,
+            batchCode: 'B1',
+            expiryDate: new Date(Date.now() + 120 * 86400000).toISOString(),
+          },
+        ],
+        landedCosts: [{ kind: 'FREIGHT', amountPaise: 1 }],
+      }),
+      201,
+    );
+
+    const created = ok(await raise({ lines: [{ itemId: besan.id, qty: '3000', unit: 'g' }] }), 201);
+    const id = created.request.id;
+    ok(await decide(id, { [besan.id]: '3000' }));
+    ok(await request(app).post(`${API}/requests/${id}/allocate`).set(auth(tok.owner)).send({}));
+    const d = ok(await request(app).post(`${API}/requests/${id}/dispatch`).set(auth(tok.owner)).send({}), 201);
+
+    ok(
+      await receiveTransfer(d.transfer.id, {
+        [besan.id]: { acceptedQty: '1000', damagedQty: '1000', note: 'A third of it split in the van' },
+      }),
+    );
+
+    const [line] = await prisma.stockTransferLine.findMany({ where: { transferId: d.transfer.id } });
+    const dispatchValue = BigInt(line.dispatchValuePaise ?? 0n);
+
+    // Without this the test could pass by being vacuous: a value that happens
+    // to divide evenly proves nothing about a split that truncates.
+    expect(
+      dispatchValue % 3n,
+      'precondition: the dispatched value must not divide evenly into thirds',
+    ).not.toBe(0n);
+
+    expect(
+      BigInt(line.acceptedValuePaise ?? 0n)
+        + BigInt(line.damagedValuePaise ?? 0n)
+        + BigInt(line.shortageValuePaise ?? 0n),
+      'accepted plus damaged plus shortage is the whole dispatched value',
+    ).toBe(dispatchValue);
+
+    // The ledger is the only truth about stock value, so it is the side that
+    // must not be short. Everything dispatched arrives — the part that was
+    // damaged or missing arrives and is then written off.
+    const arrived = await prisma.stockMovement.findMany({
+      where: { sourceType: 'TRANSFER', sourceId: d.transfer.id, type: 'TRANSFER_IN' },
+    });
+    expect(
+      arrived.reduce((a, m) => a + BigInt(m.valuePaise ?? 0n), 0n),
+      'what the ledger received equals what was dispatched',
+    ).toBe(dispatchValue);
+  });
+
   it('keeps damage, shortage and acceptance as three separate numbers', async () => {
     const created = ok(await raise({ lines: [{ itemId: sugar.id, qty: '5000', unit: 'g' }] }), 201);
     const id = created.request.id;
@@ -811,5 +878,113 @@ describe('the ledger agrees with itself', () => {
   it('refuses a rebuild to anyone but the owner', async () => {
     const res = await request(app).post(`${API}/ledger/rebuild`).set(auth(tok.managerA)).send({});
     expect(res.status).toBe(403);
+  });
+});
+
+describe('landed cost is apportioned without losing paise', () => {
+  // The header stores the whole landed cost; the lines and the ledger store
+  // shares of it. If those two disagree the difference is money that exists on
+  // the document and nowhere on the shelf, and because StockMovement is the
+  // only truth about stock value, the ledger is the side that is wrong.
+  //
+  // Three lines of equal value and a cost of 100 paise is the smallest case
+  // that cannot divide evenly: 100/3 is 33.333…, so any implementation that
+  // truncates each share independently assigns 33+33+33 = 99 and loses one
+  // paise. One paise is the point — it is the smallest detectable amount, so a
+  // test that catches it catches every larger version of the same mistake.
+  const sumBig = (xs) => xs.reduce((a, b) => a + BigInt(b), 0n);
+
+  it('gives the lines exactly the landed cost the header charged', async () => {
+    const item = await makeItem({ name: 'Rice', trackBatches: false, trackExpiry: false });
+    const body = ok(
+      await receive({
+        lines: [
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+        ],
+        landedCosts: [{ kind: 'FREIGHT', description: 'Indivisible by three', amountPaise: 100 }],
+      }),
+      201,
+    );
+
+    const grn = await prisma.goodsReceipt.findUnique({ where: { id: body.goodsReceipt.id } });
+    const lines = await grnLines(grn.id);
+
+    expect(lines).toHaveLength(3);
+    expect(BigInt(grn.landedCostPaise)).toBe(100n);
+    expect(
+      sumBig(lines.map((l) => l.landedCostPaise)),
+      'the shares on the lines must add up to the cost on the header',
+    ).toBe(100n);
+  });
+
+  it('keeps the ledger worth exactly what the receipt says it is', async () => {
+    const item = await makeItem({ name: 'Dal', trackBatches: false, trackExpiry: false });
+    const body = ok(
+      await receive({
+        lines: [
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+        ],
+        landedCosts: [{ kind: 'FREIGHT', amountPaise: 100 }],
+      }),
+      201,
+    );
+
+    const grn = await prisma.goodsReceipt.findUnique({ where: { id: body.goodsReceipt.id } });
+    const movements = await prisma.stockMovement.findMany({
+      where: { sourceType: 'GRN', sourceId: grn.id },
+    });
+
+    expect(movements).toHaveLength(3);
+    expect(
+      sumBig(movements.map((m) => m.valuePaise)),
+      'what the ledger says arrived must equal what the receipt says it was worth',
+    ).toBe(BigInt(grn.stockValuePaise));
+  });
+
+  it('splits an uneven cost by value, not equally, and still adds up', async () => {
+    // Freight rides on value, so a line worth three times another carries three
+    // times the cost. This is the assertion that stops the previous two being
+    // satisfied by simply handing the whole cost to one line.
+    const item = await makeItem({ name: 'Atta', trackBatches: false, trackExpiry: false });
+    const body = ok(
+      await receive({
+        lines: [
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 30000 },
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+        ],
+        landedCosts: [{ kind: 'FREIGHT', amountPaise: 999 }],
+      }),
+      201,
+    );
+
+    const lines = await grnLines(body.goodsReceipt.id);
+    const shares = lines.map((l) => BigInt(l.landedCostPaise));
+
+    expect(sumBig(shares)).toBe(999n);
+    // 999 × 3/4 = 749.25 and 999 × 1/4 = 249.75. The larger remainder belongs
+    // to the second line, so the exact answer is 749 and 250 — not 750/249,
+    // and not 749/249 with a paise dropped on the floor.
+    expect(shares).toEqual([749n, 250n]);
+  });
+
+  it('charges nothing to the lines when there is no landed cost', async () => {
+    // The negative control. Without it the three tests above would still pass
+    // if apportionment were removed and every share hard-coded to the total.
+    const item = await makeItem({ name: 'Salt', trackBatches: false, trackExpiry: false });
+    const body = ok(
+      await receive({ lines: [{ itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 }] }),
+      201,
+    );
+
+    const grn = await prisma.goodsReceipt.findUnique({ where: { id: body.goodsReceipt.id } });
+    const lines = await grnLines(grn.id);
+
+    expect(BigInt(grn.landedCostPaise)).toBe(0n);
+    expect(sumBig(lines.map((l) => l.landedCostPaise))).toBe(0n);
+    expect(BigInt(lines[0].valuePaise), 'value is the goods alone').toBe(BigInt(lines[0].goodsPaise));
   });
 });

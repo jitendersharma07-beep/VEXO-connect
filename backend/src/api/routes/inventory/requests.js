@@ -27,6 +27,7 @@ import { requireInventoryAction, loadLocationInScope, locationScopeFilter } from
 import { postMovementsOnce, lockPosition, LedgerError } from '../../../lib/inventory/ledger.js';
 import { batchPositionsAt, selectFefo, reservedByBatchAt } from '../../../lib/inventory/stock.js';
 import { milliToQty, qtyToMilli } from '../../../lib/inventory/units.js';
+import { distributeProportional } from '../../../lib/money.js';
 import { nextDocNumber } from '../../../lib/inventory/docnum.js';
 import { actorOut, idemKey, qtyOut, qtyString, reasonString, loadItem, resolveActors, toBase } from './shared.js';
 import { dropObsoleteReminders, raiseReminder } from '../../../lib/inventory/reminders.js';
@@ -871,6 +872,29 @@ router.post(
     }
     if (plans.length !== transfer.lines.length) throw badRequest('Every dispatched line has to be accounted for');
 
+    // Value follows quantity: the accepted share of what left carries the
+    // accepted share of what it was worth. The three parts must also add back
+    // up to the dispatched value, and dividing each one independently does not
+    // — 3001 paise into equal thirds truncates to 1000 + 1000 + 1000 and
+    // strands one, which then differs between the line's own columns and the
+    // ledger that is supposed to be the only truth about stock value.
+    //
+    // The quantity side of this same split already conserved exactly, by
+    // letting the last batch take whatever was left rather than rounding it
+    // separately. The value side did not, ten lines away. It does now, using
+    // the order engine's largest-remainder split rather than a second
+    // technique that has to be kept in step with the first.
+    //
+    // The weights are the three parts themselves, which sum to the dispatched
+    // quantity by construction above, so nothing here has to re-derive it.
+    for (const p of plans) {
+      const [accepted, damaged, shortage] = distributeProportional(
+        Number(BigInt(p.line.dispatchValuePaise ?? 0n)),
+        [p.acceptedMilli, p.damagedMilli, p.shortageMilli],
+      ).map(BigInt);
+      p.value = { accepted, damaged, shortage };
+    }
+
     let result;
     try {
       result = await prisma.$transaction(async (tx) => {
@@ -879,10 +903,6 @@ router.post(
 
         for (const p of plans) {
           const dispatchedMilli = qtyToMilli(p.line.dispatchedQty ?? '0');
-          const dispatchValue = BigInt(p.line.dispatchValuePaise ?? 0n);
-          // Value follows quantity: the accepted share of what left carries
-          // the accepted share of what it was worth.
-          const share = (milli) => (dispatchedMilli === 0 ? 0n : (dispatchValue * BigInt(milli)) / BigInt(dispatchedMilli));
 
           // Accepted stock arrives batch by batch, in the proportion it was
           // sent, so the destination inherits the same batches and expiries.
@@ -898,14 +918,22 @@ router.post(
             leftToAccept -= take;
           }
 
-          for (const t of batchTakes) {
+          // The accepted value is then split across those batches the same
+          // way, so what the ledger receives adds up to the accepted value
+          // rather than to slightly less than it.
+          const takeValues = distributeProportional(
+            Number(p.value.accepted),
+            batchTakes.map((t) => t.qtyMilli),
+          ).map(BigInt);
+
+          for (const [k, t] of batchTakes.entries()) {
             movements.push({
               locationId: transfer.toLocationId,
               itemId: p.line.itemId,
               batchId: t.batchId,
               type: 'TRANSFER_IN',
               qtyMilli: t.qtyMilli,
-              valuePaise: share(t.qtyMilli),
+              valuePaise: takeValues[k],
               sourceType: 'TRANSFER',
               sourceId: transfer.id,
               sourceLineId: p.line.id,
@@ -923,11 +951,11 @@ router.post(
             where: { id: p.line.id },
             data: {
               acceptedQty: milliToQty(p.acceptedMilli),
-              acceptedValuePaise: share(p.acceptedMilli),
+              acceptedValuePaise: p.value.accepted,
               damagedQty: milliToQty(p.damagedMilli),
-              damagedValuePaise: share(p.damagedMilli),
+              damagedValuePaise: p.value.damaged,
               shortageQty: milliToQty(p.shortageMilli),
-              shortageValuePaise: share(p.shortageMilli),
+              shortageValuePaise: p.value.shortage,
             },
           });
 
@@ -947,9 +975,9 @@ router.post(
                   outstandingQty: milliToQty(Math.max(approved - accepted, 0)),
                 },
               });
-              for (const [kind, milli] of [
-                ['DAMAGE', p.damagedMilli],
-                ['SHORTAGE', p.shortageMilli],
+              for (const [kind, milli, valuePaise] of [
+                ['DAMAGE', p.damagedMilli, p.value.damaged],
+                ['SHORTAGE', p.shortageMilli, p.value.shortage],
               ]) {
                 if (milli <= 0) continue;
                 const issue = await tx.storeRequestIssue.create({
@@ -959,7 +987,7 @@ router.post(
                     requestLineId: rl.id,
                     kind,
                     qty: milliToQty(milli),
-                    valuePaise: share(milli),
+                    valuePaise,
                     note: p.note,
                     raisedById: req.user.id,
                   },
@@ -985,8 +1013,11 @@ router.post(
             itemId: p.line.itemId,
             type: 'TRANSFER_IN',
             qtyMilli: stranded,
-            valuePaise: (BigInt(p.line.dispatchValuePaise ?? 0n) * BigInt(stranded)) /
-              BigInt(qtyToMilli(p.line.dispatchedQty ?? '0') || 1),
+            // The two parts that never made it, taken from the same split as
+            // the accepted part rather than re-divided here — re-dividing is
+            // how the ledger ended up worth less than the transfer it came
+            // from.
+            valuePaise: p.value.damaged + p.value.shortage,
             sourceType: 'TRANSFER',
             sourceId: transfer.id,
             sourceLineId: p.line.id,
