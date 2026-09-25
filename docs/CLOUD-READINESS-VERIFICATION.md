@@ -19,6 +19,14 @@ an administrator standing next to the machine.
 > deliver through. Everything between here and that section describes the
 > pre-merge build and is kept as written.
 
+> **Update 2026-09-25T02:40Z — six rows reconciled at `bcfa6ed`.** The candidate
+> is now **`bcfa6ed`** (code identical to `17058b9`), suite **815/815 in 32
+> files**. See [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) at
+> the foot of this document. Read it before quoting any row above: one bullet
+> there was **factually wrong**, two rows claimed more coverage than they had,
+> and the commit the brief named (`5550e1b`) is two code-generations stale. The
+> verdict stays **NOT READY** on the same three blockers.
+
 ## The build that was tested
 
 | | |
@@ -41,11 +49,11 @@ lane or worktree was modified.
 | Area | Result | Tested build | Evidence | Remaining action |
 |---|---|---|---|---|
 | HTTPS / public access | **BLOCKED** | `1c7e8e6` | `evidence/02-*` | No approved public staging hostname exists. Exact DNS/proxy/TLS change-set is prepared and **not applied**; owner approves, then re-run. |
-| Real platform admin + customer provisioning | **PASS** (defect CR-1 found and fixed) | `1c7e8e6` | `evidence/03-*` | Ship CR-1. "Enabled modules" per licence is **not implemented** — product decision, not a defect. |
+| Real platform admin + customer provisioning | **PASS** for the *software* — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) items 1 and 3**: this is not a statement that the owner holds an account, and the "enabled modules" note below is wrong | `1c7e8e6` | `evidence/03-*` | Ship CR-1. ~~"Enabled modules" per licence is **not implemented** — product decision, not a defect.~~ → the field always existed and the gate is now implemented; provisioning and UI remain scope gaps. |
 | Email delivery + password reset | **BLOCKED** — ⚠ **superseded, see [After the merge](#after-the-merge--email-recovery-now-works)**: now **PASS** for the software, **BLOCKED** only for real-provider delivery | `1c7e8e6`; superseded by `98c11a2` | `evidence/04-*` | The capability is absent from this build (0 occurrences in the shipped bundle). A complete implementation sits on unmerged lane `x/accounts`. Merge decision is the owner's; then verify with authorized inbox access. |
-| Tenant / store isolation | **PASS** — 58/58 probes | `1c7e8e6` | `evidence/05-*` | None. Inventory scope untestable here because inventory is not in this build. |
-| Billing / payment / inventory / reporting | **PASS for what this build implements** | `1c7e8e6` | `evidence/06-*` | Three sub-checks are **NOT IN THIS BUILD** (recipe/modifier consumption, stock quantity/unit handling, restocking policy) — they live on unmerged lane `x/inventory`. Re-run after merge. |
-| Encrypted backup restore | **PASS** for schedule + restore (16/16); **BLOCKED** for decryption | archive `pos-prod-20260923T211456Z` | `evidence/07-*` | One owner-run command closes the decryption half. Destination-side deletion protection is **NOT VERIFIED**. |
+| Tenant / store isolation | **PASS** — 58/58 probes, all **authenticated** and all pre-merge — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 5**: the merged *unauthenticated* recovery paths were not covered by these, and are now covered separately | `1c7e8e6`; extended at `bcfa6ed` | `evidence/05-*`; `backend/tests/authTenantIsolation.test.js` | Inventory scope untestable here because inventory is not in this build. |
+| Billing / payment / inventory / reporting | **PASS for what this build implements** — re-checked at `bcfa6ed`, still accurate | `1c7e8e6` | `evidence/06-*` | Three sub-checks are **NOT IN THIS BUILD** (recipe/modifier consumption, stock quantity/unit handling, restocking policy) — they live on unmerged lane `x/inventory`, confirmed **not an ancestor** of the candidate. Re-run after merge; see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 4. |
+| Encrypted backup restore | **PASS** for schedule + restore (16/16); **BLOCKED** for decryption — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 6**: the rehearsal round-trip is not evidence about the owner's actual archive, and closing decryption does not close recoverability | archive `pos-prod-20260923T211456Z` | `evidence/07-*` | One owner-run command closes the decryption half. Destination-side deletion protection is **NOT VERIFIED**. Key custody (CR-3) is the larger issue. |
 | Physical printer acceptance | **NOT TESTED** | — | — | Stays NOT TESTED until observed paper output exists. Never claim from emulation. |
 
 Evidence directory: `/home/atc-noc/vcx-cloudready-local/evidence/` on `atc-noc`.
@@ -245,18 +253,24 @@ this repository and outside this task's authority to change.
 | **CR-3** | The backup tooling's own comment states the design control is *"this host cannot do it — that is the point of the key direction"*. The secret key is in fact on this host, on the same machine that takes the dumps and holds the plaintext copies. The passphrase is genuine and doing real work, so this is not an open door — but it is one factor where the design claims two. The fix is custody, not code. |
 | **CR-4** | The backup destination is reached with the operator's general-purpose SSH key, while a dedicated key pair for exactly this job already exists beside it, unused. Consequently anything that can SSH as the operator can also delete the off-site archives — which is why deletion protection reads "not verified *and unlikely*" rather than merely "not verified". |
 | **CR-5** | "The backups are encrypted" is true only of the off-site copy. The retained local archives are plaintext dumps at mode 600. Reasonable — the working copy has to be usable — but stated so the sentence is never read more broadly than it is true. |
+| **CR-6** | *(added `bcfa6ed`)* `placementNames` resolves a branch or region by bare global id with no `companyId` filter. **Not a live leak** — the create path refuses a foreign branch with 404 before that code runs — so it is recorded rather than patched, there being no failing test to justify the change. Defence in depth for whoever edits that function next. |
+| **CR-7** | *(added `bcfa6ed`)* The schema comment on `License.modules` — *"A module absent here is refused at the permission layer, not merely hidden"* — was a **false guarantee**: nothing read the column on any request path. Now true, via `requireAction`. Logged as a finding and not merely a fix, because a comment asserting a control that does not exist is worse than no comment: it reads as a thing already thought about. |
 
 ## Unfinished capabilities — explicitly not counted as passed
 
 - **Email password recovery** — absent from this build (`x/accounts`, unmerged).
 - **Inventory, recipes, modifiers, restocking** — absent from this build
   (`x/inventory`, unmerged).
-- **Per-licence enabled modules** — no such concept exists. The schema carries
-  plan, status, dates, branch limit and add-ons; there is no per-module
-  entitlement field anywhere, and no route sets one. Feature gating exists at
-  the *user* level, which is not interchangeable: a permission decides what an
-  employee may do inside a tenant that already has the feature; it cannot
-  express "this customer did not buy KDS".
+- **Per-licence enabled modules** — ⚠ **this bullet was factually wrong; see
+  [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 3.**
+  ~~no such concept exists … there is no per-module entitlement field anywhere~~
+  — `License.modules` always existed and `licenseHasModule` always read it. What
+  was missing was the *enforcement*, which is now implemented in `requireAction`.
+  What remains unfinished: no route or script can set `modules`, and no screen
+  hides an unlicensed module. The sentence below stands and is why the gate is
+  not folded into `can()`: a permission decides what an employee may do inside a
+  tenant that already has the feature; it cannot express "this customer did not
+  buy KDS".
 - **Physical printing** — browser print only, unobserved on paper.
 
 ## Blockers to owner acceptance
@@ -409,3 +423,307 @@ through this harness needs a host that is not the production host.
 "the feature does not exist" to "the feature exists, is tested end to end, and
 has nothing to send through", which is a materially better position but is not
 the same as closed.
+
+## Reconciliation — 2026-09-25T02:40Z, at `bcfa6ed`
+
+The owner read a 774-test copy of this document and asked for six specific
+corrections. Each is below with what was actually measured. This section
+supersedes the rows and bullets it names and nothing else; the pre-merge
+evidence above is kept as written, because it is still the evidence for what it
+describes.
+
+### The candidate, and why the brief's numbers were stale
+
+The brief named "tested code `5550e1b`, 785/785". That was two code-generations
+behind by the time it was read:
+
+| Commit | What it is | Suite |
+|---|---|---|
+| `5550e1b` | the tree the brief names | 785 / 29 files |
+| `9779d28` | documentation only — code identical to `5550e1b` | — |
+| `17058b9` | **real code change**: `accountRecovery.js` + `accountRecoveryOutage.test.js` | 790 / 30 files |
+| `bcfa6ed` | documentation only — code identical to `17058b9` | — |
+| working tree | `bcfa6ed` + this section's three source files and two test files | **815 / 32 files, exit 0, 207.97s** |
+
+So the candidate is **`bcfa6ed`**, whose *code* is `17058b9`. Quoting `5550e1b`
+would attribute to it an account-existence oracle fix it does not contain.
+
+The 815 is the peer's 790 plus the 14 and 11 added below. It is the control for
+the claim that a new entitlement check now sits on the path of **every**
+permission-gated action and broke nothing: 32 files' worth of existing behaviour
+is unchanged with the gate in place.
+
+### 1. The provisioning software passes. The owner does not yet have access.
+
+These are two claims and the row above ran them together. Separated:
+
+- **The software is tested.** CR-1 made the operator identity configurable
+  (`POS_SEED_ADMIN_EMAIL` / `POS_SEED_ADMIN_NAME`), and
+  `scripts/bootstrap-platform-admin.mjs` is driven as a real subprocess, not
+  mocked. That much is PASS and stays PASS.
+- **No account exists under the owner's confirmed real address.** Nothing in
+  this workstream created one, and it could not have.
+
+The reason it could not is worth stating, because it makes items 1 and 2 one
+blocker rather than two. `bootstrap-platform-admin.mjs` never chooses, prints,
+stores or mails a password — it mints an invitation and the recipient chooses
+their own password on the accept page. So it **refuses with exit 1 when mail is
+not configured**, in its own words: *"A platform administrator who never receives
+the link is not a partial success — it is an account nobody can sign in to."*
+
+That refusal is correct and must not be worked around. Its consequence is that
+**the owner's permanent admin access cannot be created until blocker 2 closes.**
+Row "Real platform admin + customer provisioning — PASS" is true of the
+software; it was never a statement about the owner holding an account.
+
+### 2. Real-inbox delivery stays OPEN.
+
+What was observed is a loopback SMTP sink on this host, plus
+`deploy/accounts-journey.mjs` at 47/47 against a real SMTP conversation — with
+that sink. A sink accepting a message proves the code composed one and handed it
+off. It does not prove any of the things that actually fail in production:
+
+- that a real provider accepts it (SPF / DKIM / DMARC alignment, sender
+  reputation, and the fact that no mail provider is configured anywhere in the
+  estate);
+- that it lands in an inbox rather than a spam folder;
+- that the 8-digit code survives an HTML-mangling client intact.
+
+A provider's "accepted" response is not delivery either — the document already
+says so under blocker 2 and that sentence stands. **This half stays OPEN until
+an actual inbox is observed receiving a code that then works.** Test-mailbox
+success does not close it, and the 47/47 must not be read as if it did.
+
+### 3. Per-licence enabled modules — the record was wrong, and the gate is now real.
+
+Two corrections, one of fact and one of substance.
+
+**The record's claim is false.** "No such concept exists… there is no per-module
+entitlement field anywhere" was wrong when it was written.
+`License.modules String[] @default([])` was already in the schema and
+`licenseHasModule` already read it. What was missing was never the field.
+
+**What was missing was the enforcement**, and the schema's own comment promised
+it: *"A module absent here is refused at the permission layer, not merely
+hidden."* Nothing read `modules` on any request path, so that sentence was a
+false guarantee — the worst kind of gap, because it reads as a control that has
+been thought about.
+
+Now implemented, in three files:
+
+| File | Change |
+|---|---|
+| `src/lib/permissions.js` | `requiredModuleFor(action)` — maps an action key to its module via the existing `EXTENSION_POINTS` prefixes, or `null` for core POS |
+| `src/lib/errors.js` | `moduleNotLicensed(module)` — 403 `POS_MODULE_NOT_LICENSED`, carrying the module in `details` so a screen can name it without parsing prose |
+| `src/middleware/permissions.js` | `requireAction` checks the entitlement **after** the permission and **before** the route body |
+
+Four design decisions worth naming, because each is a place this could have
+been built wrong:
+
+1. **After the permission, not before.** A refusal has to say the true reason.
+   "You do not have permission" and "your subscription does not include this"
+   send the owner to two different people.
+2. **In `requireAction`, not in each module's router.** One gate on the path
+   every action already takes cannot be forgotten by the next lane that mounts a
+   router. Per-router gates can.
+3. **Fails closed on a missing licence.** No licence is not "all modules". The
+   empty default means core POS only, so every licence sold before that column
+   existed keeps working and none silently acquires a module it never paid for.
+4. **The prefix keeps its dot.** On a bare `inventory` a future
+   `inventory_count.x` naming slip would match the wrong module and be gated by
+   an entitlement its author never meant to require.
+
+Coordination with the module lanes is by construction rather than by message:
+`EXTENSION_POINTS` is their declared seam, and the gate is wired **before** any
+of their action keys exist, so the first lane to add keys is enforced on arrival
+instead of whenever somebody remembers. `backend/tests/licenseModuleGate.test.js`
+is 14 tests and includes a deliberate tripwire asserting that **no** action key
+currently maps to a module — it goes red the day a module lane merges, which is
+the signal to delete it and check the licence fixtures.
+
+Six negative controls, each reverted:
+
+| # | Inversion | Result |
+|---|---|---|
+| NC-1 | fail open on a missing licence | the 2 fail-closed tests went red |
+| NC-2 | gate removed | the 4 refusal tests went red |
+| NC-3 | entitlement checked before permission | **green — the test was vacuous** |
+| NC-4 | prefix without its dot | the dot-guard test went red |
+| NC-5 | operator exemption removed | the operator test went red |
+| NC-6 | a real module action key added | the tripwire fired, naming it |
+
+NC-3 is the one worth recording. My own ordering test entitled the module and
+withheld only the permission, so the entitlement check passed in either order
+and the assertion held **against the inverted code**. It was rewritten so both
+checks fail and the order alone decides the answer; the hole is documented in
+the test file so it is not reintroduced. An assertion is not evidence until the
+instrument is shown to register the thing it measures — and here it did not.
+
+**The honest limits, which keep this an open scope gap rather than a closed
+item:**
+
+- **No action keys carry a module prefix today**, so the gate refuses nothing in
+  practice. It is a guarantee made true in advance, not a capability delivered.
+- **Nothing can set `modules`.** `licenseSchema` in
+  `src/api/routes/atc.js:172` accepts plan, dates, branch limit and notes — and
+  no `modules`. No route, script or seed writes the column. Entitling a customer
+  to a module today means editing the licence row by hand.
+- **The gate is backend-only.** No screen hides an unlicensed module, so a
+  customer without one would see controls that answer 403.
+
+Which of those to build is a product decision — which plans include which
+modules — not a defect. It is tracked here as the explicit scope gap the owner
+asked for.
+
+### 4. Inventory is still not integrated.
+
+Measured, not assumed: `git merge-base --is-ancestor x/inventory HEAD` reports
+**not an ancestor**. There is no integrated revision.
+
+So **billing → stock consumption → reports cannot be verified**, and the reason
+is not that the check was skipped: the tree to run it against does not exist.
+Row "Billing / payment / inventory / reporting" stands exactly as written,
+including the three sub-checks marked NOT IN THIS BUILD. Nothing has become
+possible since.
+
+The lane is active, not abandoned — its suite was observed running in its own
+worktree at 02:31Z while this reconciliation was being written. The merge
+remains the owner's decision, and this document should not be read as asking for
+it.
+
+### 5. Isolation — which checks actually cover the merged authentication code.
+
+The record says "Tenant / store isolation — **PASS**, 58/58 probes". Both
+numbers are real. Neither is about the code the merge brought in, for one
+structural reason:
+
+**Every one of the 58 probes was authenticated, and all of them predate the
+merge** (`1c7e8e6`). An authenticated endpoint's isolation rests on the
+`companyId` in the session. An *unauthenticated* endpoint has no session, so its
+isolation rests entirely on what the submitted token or address is bound to —
+a different mechanism, which the 58 could not have tested and did not.
+
+Coverage after checking each suite:
+
+| Path | Covered before? | By what |
+|---|---|---|
+| Invitation accept / lookup | **Yes** | `invitations.test.js` is genuinely two-tenant: a foreign store 404s on create, a foreign invitation is indistinguishable, listing is own-tenant only, and the accepted user's company and every assignment are asserted |
+| Password recovery (request / verify / reset) | **No** | `accountRecovery.test.js` is effectively single-tenant. Its extra companies test *eligibility*, and its "refuses another account's code" pits two users who are **both inside company A** |
+
+The gap is now closed by **`backend/tests/authTenantIsolation.test.js`** — 11
+tests across two active tenants, asserting that a recovery code is bound to one
+account in one tenant, that a reset authorization moves exactly one password,
+that the request endpoint is not a tenant oracle, that one address belongs to at
+most one tenant, and that the invitation and reset token namespaces do not
+cross.
+
+Two assertions in it are deliberately stricter than they look. The other
+tenant's password hash is compared **byte for byte**, because a rehash of the
+same plaintext would pass a login check and still mean the reset had reached
+into the wrong tenant's row. And the three public answers — tenant A, tenant B,
+an unregistered address — are compared as whole bodies, because a leak here is
+a difference, not a message.
+
+Five negative controls, each reverted:
+
+| # | Inversion | What it proved |
+|---|---|---|
+| NC-A | challenge lookup unscoped from the user | **handed out a real, usable reset token for the wrong tenant's account** |
+| NC-B | session revocation made global | the surviving-session assertion caught it |
+| NC-C | account taken from the request body | the ignored-extra-fields tests caught it |
+| NC-D | tenant name added to the public answer | the byte-identical-bodies test caught it |
+| NC-E | eligibility re-check dropped at reset | the suspended-mid-flight test caught it |
+
+One finding raised and **not** fixed: `placementNames` resolves a branch or
+region by bare global id with no `companyId` filter. It is not a live leak — the
+create path refuses a foreign branch with 404 before that code is reached — so
+patching it would be a change with no failing test behind it. Recorded as
+defence in depth, for whoever touches that function next.
+
+### 6. Restore rehearsal is not decryption of the owner's archive.
+
+The record's row runs three separate claims together. Split:
+
+| Claim | Status |
+|---|---|
+| Schedule and restore *mechanism* | **PASS**, 16/16 — proven against a dump this host made |
+| Encryption round-trip with a **rehearsal** key | a different artifact, and not evidence for the line below |
+| Decryption of the **actual owner-encrypted off-site archive** | **NOT DONE** |
+
+The third cannot be attempted here at all: a search of this host for `*.gpg`
+finds **no local ciphertext**. The recipient key
+`2B64FAF2AD2F917F2E2185F60F05CA51AEC13029` is present with its secret half, RSA
+4096, passphrase-protected — which is itself finding CR-3.
+
+And CR-3 has been restated by the backup workstream in a way that changes what
+closing this would mean. The backup secret key lives **on the backup host**,
+where `docs/BACKUP-RESTORE.md` says it must not. So the question the owner
+actually cares about — *can we recover if this box dies?* — answers **no today,
+whatever the decryption test returns.** Closing the decryption half closes the
+decryption half. It does not close recoverability.
+
+One practical note: `owner-verify-backup-decrypt.sh` has changed since the
+evidence above described it (3981 → 5574 bytes, 02:08Z). Read the script, not
+this document's summary of it, before running it.
+
+### Verdict
+
+**Unchanged: NOT READY for owner acceptance**, on the same three blockers.
+What changed is that two rows are now honest about what they cover, one false
+guarantee in the schema has been made true, and the isolation claim has evidence
+for the code the merge brought in.
+
+**This section is about cloud readiness only.** A green 815 is not evidence that
+inventory, payments, providers or physical printing are done — the first is not
+merged, and the last has never been observed on paper. Nothing here supports
+labelling the portal complete.
+
+## Owner inputs still needed — the consolidated list
+
+Everything that could be done without the owner has been done. What is left is
+exactly three inputs, and each one unblocks a specific claim. The procedures
+themselves are already written and reviewed by the backup/accounts workstream —
+`evidence/02-public-access-changeset-PROPOSED.md`,
+`evidence/04b-mail-provider-owner-procedure.md`,
+`evidence/07b-recovery-owner-procedure.md` — and **none is applied**. This list
+does not duplicate them; it names the decisions and values only the owner holds.
+
+### Input 1 — a public staging hostname
+
+| | |
+|---|---|
+| **Needed** | One hostname the owner approves for staging, e.g. `staging-pos.<domain>`, and confirmation that its DNS A record may point at this host's public IP |
+| **Unblocks** | Blocker 1 — every claim about reaching the portal over the internet, and HTTPS end to end |
+| **Procedure** | `evidence/02-public-access-changeset-PROPOSED.md` |
+| ⚠ **Trap** | The staging certificate must be a **separate `certbot certonly`** issuance. It must **never** be an `--expand` of the production certificate, which covers only `atcworkspace.com` and `www` — an `--expand` would rewrite a certificate that currently serves production |
+
+### Input 2 — a real mail provider
+
+| | |
+|---|---|
+| **Needed** | SMTP host, port, username, password, and the `From` address to send as. Plus **authorized access to one real inbox** to observe a delivered code — or the owner's explicit confirmation that a code arrived and worked |
+| **Unblocks** | Blocker 2's remaining half (item 2 above), **and item 1** — the owner's own permanent admin account cannot be created until mail works, because `bootstrap-platform-admin.mjs` correctly refuses to mint an administrator it cannot send an invitation to |
+| **Procedure** | `evidence/04b-mail-provider-owner-procedure.md` |
+| ⚠ **Trap** | `/home/atc-noc/atc-pos/.env` is mode **664** today. `chmod 600` it **before** an `SMTP_PASSWORD` goes in, or the credential lands world-readable |
+| **Then also needed** | The owner's confirmed real email address, to pass as `POS_SEED_ADMIN_EMAIL`. Ask for it at that point — not before, since the script would refuse anyway |
+
+### Input 3 — decryption access
+
+| | |
+|---|---|
+| **Needed** | The passphrase for key `0F05CA51AEC13029`, entered **by the owner** on a host of their choosing — not supplied to this workstream — and the `RESULT:` line sent back. Plus a decision on where the backup secret key should actually live |
+| **Unblocks** | Blocker 3, the decryption half only |
+| **Procedure** | `evidence/07b-recovery-owner-procedure.md`; re-read `owner-verify-backup-decrypt.sh` first, it changed at 02:08Z |
+| ⚠ **Do not read it as more than it is** | Per CR-3, the backup secret key is on the backup host, where `docs/BACKUP-RESTORE.md` says it must not be. **"Can we recover if this box dies" answers no until custody is fixed**, whatever this test returns. The custody decision is the larger of the two and is also the owner's |
+
+### Not owner inputs, tracked separately
+
+These are decisions but not blockers, and none of them is waiting on a value:
+
+- **Merge `x/inventory`?** Until then, billing → stock → reports stays unverified
+  (item 4). Owner's call; this document does not ask for it.
+- **Which plans include which modules**, whether a route should set
+  `License.modules`, and whether the UI should hide an unlicensed module
+  (item 3). Product decisions; the enforcement they would rely on now exists.
+- **Physical printing** stays NOT TESTED until paper is observed. No input closes
+  this — it needs hardware.
