@@ -187,6 +187,12 @@ router.get(
         item: { select: { id: true, name: true, baseUnit: true } },
         location: { select: { id: true, name: true, code: true } },
         batch: { select: { id: true, batchCode: true, expiryDate: true } },
+        // The till, where the posting had one. Unlike createdById this IS a
+        // real relation, so it joins rather than being resolved afterwards:
+        // a terminal cannot be deleted out from under a movement — the
+        // foreign key is ON DELETE RESTRICT — so there is no "deleted row"
+        // case to degrade gracefully for.
+        terminal: { select: { id: true, code: true, name: true } },
       },
       orderBy: { seq: 'desc' },
       take: q.limit,
@@ -224,6 +230,11 @@ router.get(
         // a consumption posted by the till on a sale). That is a different
         // fact from "we did not record it", and the screen says so.
         createdBy: actorOut(m.createdById, actorById),
+        // null on nearly every row, and correctly so: a receipt, a count, a
+        // transfer and the scheduler are not rung up on any till. Present on
+        // sale consumptions and their reversals, where it is the till the
+        // order belonged to.
+        terminal: m.terminal,
       })),
       nextCursor: movements.length === q.limit ? String(movements[movements.length - 1].seq) : null,
     });

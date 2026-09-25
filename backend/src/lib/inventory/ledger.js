@@ -227,6 +227,12 @@ export const postMovements = async (tx, { companyId, movements }) => {
         idempotencyKey: m.idempotencyKey,
         occurredAt: m.occurredAt,
         createdById: m.createdById ?? null,
+        // The till, where one caused the posting. Almost nothing here has one:
+        // a goods receipt, a count, a transfer, a production run and the
+        // scheduler are not rung up anywhere, and for those null is the honest
+        // answer rather than a borrowed terminal. Only the sale path supplies
+        // it, and it supplies the ORDER's terminal — see consumption.js.
+        terminalId: m.terminalId ?? null,
         note: m.note ?? null,
       },
     });

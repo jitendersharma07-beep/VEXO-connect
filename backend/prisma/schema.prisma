@@ -1513,14 +1513,25 @@ model StockMovement {
   occurredAt     DateTime
   postedAt       DateTime          @default(now())
   createdById    String?
-  // INTEGRATION(foundation) — B§3.1 p6: transactions carry terminal/device
-  // attribution where operationally relevant, and a stock movement is named
-  // there explicitly. Nullable and with no foreign key because the foundation
-  // lane owns the Terminal model; the column exists now so that adding the
-  // relation later is a constraint on an existing column rather than a second
-  // migration rewriting a live ledger. Postings with no terminal behind them —
-  // a scheduler pass, a back-office correction — leave it null honestly.
+  // B§3.1 p6: transactions carry terminal/device attribution where operationally
+  // relevant, and a stock movement is named there explicitly. Null stays the
+  // honest answer for a posting no till caused — a scheduler pass, a goods
+  // receipt, a back-office correction — which is most of this table.
+  //
+  // For a sale it is the ORDER's till, not whichever till pressed "bill".
+  // Order.terminalId is what the day's takings are attributed to; a ledger that
+  // named a different till for the same sale would make the sales report and
+  // the stock report disagree about one event with nothing to say which was
+  // right. The two are the same till in the ordinary case anyway, because a
+  // device may only touch an order in its own store.
+  //
+  // Paired with companyId rather than referencing a bare id, the way Order and
+  // Device pair it with branchId: the denormalised companyId on this row is
+  // only worth something if the database checks it, and this is that check — a
+  // till belonging to another tenant cannot be stamped on this tenant's ledger.
+  // The pair is MATCH SIMPLE, so a movement with no till still writes.
   terminalId     String?
+  terminal       Terminal?         @relation(fields: [terminalId, companyId], references: [id, companyId], onDelete: Restrict)
   note           String?
 
   @@index([companyId, locationId, itemId, seq])
@@ -2918,12 +2929,20 @@ model Terminal {
   devices  Device[]
   orders   Order[]
   payments Payment[]
+  stockMovements StockMovement[]
 
   @@unique([branchId, code])
   // So a device, an order or a payment can name (terminalId, branchId) and
   // have the pairing enforced — a till from another store can never be
   // attributed to this store's takings.
   @@unique([id, branchId])
+  // The same guarantee one level up, for rows that carry companyId but not
+  // branchId. A stock movement's store is its location's, and a location may
+  // have none at all — a central kitchen or a warehouse belongs to the company
+  // and to no store — so (id, branchId) is not a pairing the ledger can name.
+  // (id, companyId) is, and it is the one that matters there: the ledger's
+  // tenant boundary.
+  @@unique([id, companyId])
   @@index([companyId])
   @@index([branchId])
 }

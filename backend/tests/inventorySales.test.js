@@ -681,3 +681,236 @@ describe('money coming back is not food coming back', () => {
     expect(res.status).toBe(409);
   });
 });
+
+/* ------------------------------------------------ which till rang it up */
+
+// The claim under test is narrow and it is the whole of INV-B2: a stock
+// movement caused by a sale names the till the SALE belonged to, and a
+// movement caused by anything else names no till at all.
+//
+// Everything here goes through the real routes with a real activated device
+// token, because the interesting cases are the ones where the order's till and
+// the request's device disagree, and only the HTTP walk can produce that
+// disagreement.
+describe('which till a sale’s stock is attributed to', () => {
+  let milk;
+  let latte;
+  let counter1;
+  let counter2;
+  let dev1;
+  let dev2;
+
+  // A till, and a device activated onto it. The token comes back exactly once,
+  // in the activation response, so it is captured here or not at all.
+  const makeTerminal = async (code, name) =>
+    ok(
+      await request(app).post('/api/terminals').set(auth(tok.owner)).send({ branchId: fx.storeA.id, code, name }),
+      201,
+    ).terminal;
+
+  const makeDevice = async (terminalId, name) => {
+    const device = ok(
+      await request(app)
+        .post('/api/devices')
+        .set(auth(tok.owner))
+        .send({ branchId: fx.storeA.id, terminalId, type: 'COUNTER', name }),
+      201,
+    ).device;
+    const activated = ok(await request(app).post(`/api/devices/${device.id}/activate`).set(auth(tok.owner)));
+    expect(activated.deviceToken, 'activation must hand back a token').toMatch(/^vxd_/);
+    return { device: activated.device, token: activated.deviceToken };
+  };
+
+  const onDevice = (req_, token) => (token ? req_.set('x-pos-device-token', token) : req_);
+
+  const openOn = async (token, items, as = tok.cashierA) =>
+    ok(await onDevice(request(app).post('/api/orders').set(auth(as)), token).send({ type: 'TAKEAWAY', items }), 201)
+      .order;
+
+  const billOn = (orderId, token, as = tok.cashierA) =>
+    onDevice(request(app).post(`/api/orders/${orderId}/bill`).set(auth(as)), token);
+
+  // Read off the row, not off the response: serializeOrder does not publish
+  // the till, and the question here is what was STORED — the same discipline
+  // movementsFor follows above.
+  const orderTerminal = async (orderId) =>
+    (await prisma.order.findUnique({ where: { id: orderId }, select: { terminalId: true } })).terminalId;
+
+  const consumptionMovements = (orderItemId) =>
+    prisma.stockMovement.findMany({
+      where: { sourceType: 'ORDER_ITEM', sourceId: orderItemId, type: 'SALE_CONSUMPTION' },
+      orderBy: { seq: 'asc' },
+    });
+
+  beforeEach(async () => {
+    milk = await makeItem({ name: 'Till milk', baseUnit: 'ML' });
+    await stockRoom([{ itemId: milk.id, qty: '10', unit: 'l', unitPricePaise: 6000, batchCode: 'TILL-1', expiryDate: day(30) }]);
+    latte = await makeProduct('Counter Latte');
+    const r = await makeRecipe('Counter recipe', [{ itemId: milk.id, qty: '200', unit: 'ml' }]);
+    ok(await linkRecipe(r.recipe.id, latte.id), 201);
+
+    counter1 = await makeTerminal('C1', 'Counter 1');
+    counter2 = await makeTerminal('C2', 'Counter 2');
+    dev1 = await makeDevice(counter1.id, 'Counter 1 till');
+    dev2 = await makeDevice(counter2.id, 'Counter 2 till');
+  });
+
+  it('stamps the order’s till on every movement the sale posts', async () => {
+    const order = await openOn(dev1.token, [{ productId: latte.id, qty: 2 }]);
+    expect(await orderTerminal(order.id), 'the order itself was rung up on Counter 1').toBe(counter1.id);
+    ok(await billOn(order.id, dev1.token));
+
+    const rows = await consumptionMovements(order.items[0].id);
+    expect(rows.length, 'one movement, from the one eligible batch').toBe(1);
+    for (const m of rows) expect(m.terminalId).toBe(counter1.id);
+
+    // The point of the exercise: the sales report and the stock report can be
+    // joined on the till and will agree about this sale.
+    const onOrder = await orderTerminal(order.id);
+    expect(rows.map((m) => m.terminalId)).toEqual(rows.map(() => onOrder));
+  });
+
+  // The decisive case for the documented rule. Opening at one counter and
+  // settling at another is ordinary — a queue moves, a counter closes — and
+  // the two candidate answers differ here and nowhere else.
+  it('follows the order’s till, not the device that pressed bill', async () => {
+    const order = await openOn(dev1.token, [{ productId: latte.id, qty: 1 }]);
+    const billed = await billOn(order.id, dev2.token);
+    ok(billed);
+
+    const rows = await consumptionMovements(order.items[0].id);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const m of rows) {
+      expect(m.terminalId, 'Counter 1 sold it; Counter 2 only closed it out').toBe(counter1.id);
+      expect(m.terminalId).not.toBe(counter2.id);
+    }
+  });
+
+  // A browser till sends no token. That is the state every existing
+  // installation is in, and it must record an absence rather than a guess.
+  it('records no till when the sale was never rung up on one', async () => {
+    const order = await openOn(null, [{ productId: latte.id, qty: 1 }]);
+    expect(await orderTerminal(order.id)).toBeNull();
+    ok(await billOn(order.id, null));
+
+    const rows = await consumptionMovements(order.items[0].id);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const m of rows) expect(m.terminalId, 'null is the honest answer, not a borrowed till').toBeNull();
+  });
+
+  // A reversal undoes a specific posting, so it has to net to zero on the same
+  // till. Attributing it to whoever processed the return would leave two tills
+  // wrong by the same amount for as long as the report is kept.
+  it('returns the stock to the till it left, not to whoever processed the return', async () => {
+    const order = await openOn(dev1.token, [{ productId: latte.id, qty: 2 }]);
+    ok(await billOn(order.id, dev2.token));
+    const [row] = await consumptionsFor(order.id);
+
+    ok(
+      await request(app)
+        .post(`${API}/sales/consumptions/${row.id}/return`)
+        .set(auth(tok.managerA))
+        .send({ qty: 1, reason: 'One of the two came straight back, unopened' }),
+      201,
+    );
+
+    const reversal = await prisma.stockMovement.findFirst({ where: { type: 'SALE_REVERSAL' } });
+    expect(reversal.terminalId, 'the till that sold it is the till that un-sells it').toBe(counter1.id);
+
+    // Net to zero per till, which is the property the attribution exists for.
+    const perTill = await prisma.stockMovement.groupBy({
+      by: ['terminalId'],
+      where: { terminalId: counter1.id },
+      _sum: { qty: true },
+    });
+    expect(Number(perTill[0]._sum.qty), 'two lattes out at 200 ml, one back').toBe(-200);
+  });
+
+  // Nothing but a sale has a till, and the ledger screen relies on that to know
+  // when to print the line at all.
+  it('leaves the till empty on postings no till caused', async () => {
+    const receipts = await prisma.stockMovement.findMany({ where: { type: 'GRN' } });
+    expect(receipts.length).toBeGreaterThan(0);
+    for (const m of receipts) expect(m.terminalId, 'a delivery is not rung up anywhere').toBeNull();
+  });
+
+  it('shows the till on the ledger screen, and nothing where there was none', async () => {
+    const order = await openOn(dev1.token, [{ productId: latte.id, qty: 1 }]);
+    ok(await billOn(order.id, dev1.token));
+
+    const body = ok(await request(app).get(`${API}/ledger`).set(auth(tok.owner)).query({ locationId: fx.roomA.id }));
+    const sale = body.movements.find((m) => m.type === 'SALE_CONSUMPTION');
+    const receipt = body.movements.find((m) => m.type === 'GRN');
+    expect(sale.terminal, 'the screen names the counter, not a bare id').toEqual({
+      id: counter1.id,
+      code: 'C1',
+      name: 'Counter 1',
+    });
+    expect(receipt.terminal, 'and says nothing at all about a delivery').toBeNull();
+  });
+
+  // The negative control, and the reason the constraint is a PAIR. The check
+  // is asserted by its Prisma code, not merely by "something threw": a test
+  // that accepted any rejection would still pass if the row were refused for
+  // the wrong reason, or if the FK were on terminalId alone and the tenant
+  // boundary were not being enforced at all.
+  it('refuses a movement stamped with another tenant’s till', async () => {
+    const other = await prisma.company.create({
+      data: { name: 'Somebody Else Ltd', slug: `other-co-${Date.now()}` },
+    });
+    // Minted, not hand-rolled: Branch.publicId carries a CHECK constraint on
+    // its shape, so a made-up string is refused before the interesting
+    // constraint is ever reached.
+    const { mintStorePublicId } = await import('../src/lib/identity.js');
+    const otherStore = await prisma.branch.create({
+      data: { companyId: other.id, publicId: await mintStorePublicId(prisma), name: 'Their store', code: 'XS' },
+    });
+    const theirTill = await prisma.terminal.create({
+      data: { companyId: other.id, branchId: otherStore.id, code: 'X1', name: 'Their counter' },
+    });
+
+    const attempt = prisma.stockMovement.create({
+      data: {
+        companyId: fx.company.id,
+        locationId: fx.roomA.id,
+        itemId: milk.id,
+        type: 'COUNT_ADJUSTMENT',
+        qty: '-1',
+        valuePaise: 0n,
+        costStatus: 'MISSING',
+        balanceQtyAfter: '0',
+        balanceValueAfter: 0n,
+        sourceType: 'STOCK_COUNT',
+        sourceId: 'cross-tenant-till-probe',
+        idempotencyKey: `cross-tenant-till-${Date.now()}`,
+        occurredAt: new Date(),
+        terminalId: theirTill.id,
+      },
+    });
+
+    await expect(attempt).rejects.toMatchObject({ code: 'P2003' });
+
+    // Positive control on the same statement: it is the PAIRING that refused,
+    // not the shape of the row. The identical insert naming this tenant's own
+    // till is accepted.
+    const allowed = await prisma.stockMovement.create({
+      data: {
+        companyId: fx.company.id,
+        locationId: fx.roomA.id,
+        itemId: milk.id,
+        type: 'COUNT_ADJUSTMENT',
+        qty: '-1',
+        valuePaise: 0n,
+        costStatus: 'MISSING',
+        balanceQtyAfter: '0',
+        balanceValueAfter: 0n,
+        sourceType: 'STOCK_COUNT',
+        sourceId: 'same-tenant-till-probe',
+        idempotencyKey: `same-tenant-till-${Date.now()}`,
+        occurredAt: new Date(),
+        terminalId: counter1.id,
+      },
+    });
+    expect(allowed.terminalId).toBe(counter1.id);
+  });
+});

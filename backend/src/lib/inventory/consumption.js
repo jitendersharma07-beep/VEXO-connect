@@ -164,7 +164,7 @@ const adjustmentsFor = async (tx, { companyId, recipeId, modifierIds }) => {
 // eligible batches cannot cover is posted WITHOUT a batch, so the quantity is
 // still recorded in full and the shortfall is visible as a negative position
 // rather than as stock that quietly never left.
-const movementsForItem = async (tx, { companyId, locationId, itemId, qtyMilli, orderItemId, occurredAt, userId, note }) => {
+const movementsForItem = async (tx, { companyId, locationId, itemId, qtyMilli, orderItemId, occurredAt, userId, terminalId, note }) => {
   const positions = await batchPositionsAt(tx, { locationId, itemId, asOf: occurredAt });
   const reserved = await reservedByBatchAt(tx, { locationId, itemId });
   const { picks, shortMilli } = selectFefo(positions, qtyMilli, reserved);
@@ -181,6 +181,7 @@ const movementsForItem = async (tx, { companyId, locationId, itemId, qtyMilli, o
     idempotencyKey: `sale:${orderItemId}:${itemId}:${p.batchId}`,
     occurredAt,
     createdById: userId ?? null,
+    terminalId: terminalId ?? null,
     allowNegative: true,
     note: note ?? null,
   }));
@@ -198,6 +199,7 @@ const movementsForItem = async (tx, { companyId, locationId, itemId, qtyMilli, o
       idempotencyKey: `sale:${orderItemId}:${itemId}:short`,
       occurredAt,
       createdById: userId ?? null,
+      terminalId: terminalId ?? null,
       allowNegative: true,
       note: note ?? 'No eligible batch covered this quantity',
     });
@@ -212,7 +214,15 @@ const movementsForItem = async (tx, { companyId, locationId, itemId, qtyMilli, o
 // Returns a summary; it never throws for a stock condition. It will propagate
 // a genuine database error, which is correct: a bill whose consumption could
 // not be written must not commit half-recorded.
-export const consumeForOrder = async (tx, { companyId, branchId, orderId, userId, occurredAt = new Date() }) => {
+// `terminalId` is the ORDER's till, not the device that happened to press
+// "bill". Order.terminalId is what the day's takings are attributed to, and a
+// ledger that named a different till for the same sale would leave the sales
+// report and the stock report disagreeing about one event with nothing to say
+// which was right. In the ordinary case they are the same till anyway, because
+// a device may only touch an order in its own store; the case where they differ
+// — an order opened at one counter and settled at another — is exactly the one
+// where following the order is the answer that means something.
+export const consumeForOrder = async (tx, { companyId, branchId, orderId, userId, terminalId = null, occurredAt = new Date() }) => {
   const items = await tx.orderItem.findMany({
     where: { orderId, status: 'ACTIVE' },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -312,6 +322,7 @@ export const consumeForOrder = async (tx, { companyId, branchId, orderId, userId
           orderItemId: item.id,
           occurredAt,
           userId,
+          terminalId,
           note: `Sale ${item.name}`,
         })),
       );
@@ -406,6 +417,12 @@ export const returnSaleStock = async (tx, { consumption, qty, reason, idempotenc
       idempotencyKey: `salereturn:${consumption.id}:${idempotencyKey}:${m.id}`,
       occurredAt,
       createdById: userId ?? null,
+      // The till the sale was rung on, copied from the movement being
+      // reversed rather than taken from whoever is processing the return.
+      // A reversal is an undoing of a specific posting, so the pair has to
+      // net to zero on the same till: attribute it to the returns counter
+      // instead and both tills end the month wrong by the same amount.
+      terminalId: m.terminalId,
       note: reason,
     });
   }

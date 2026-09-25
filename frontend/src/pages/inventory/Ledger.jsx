@@ -82,6 +82,15 @@ function MovementRow({ m }) {
           actor={m.createdBy}
           absent={AUTOMATIC_SOURCES.has(m.sourceType) ? 'posted automatically' : 'no person recorded'}
         />
+        {/* The till, when there was one. Only a sale has one — a delivery, a
+            count, a transfer and the scheduler are not rung up anywhere — so
+            this line appears on the rows where it means something and is
+            absent, rather than blank, on the rest. */}
+        {m.terminal ? (
+          <div className="text-slate-400">
+            at {m.terminal.name} <span className="text-slate-300">({m.terminal.code})</span>
+          </div>
+        ) : null}
       </Td>
       <Td className="text-xs text-slate-600">{m.location?.name}</Td>
       <Td>

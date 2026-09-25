@@ -1183,6 +1183,11 @@ router.post(
         branchId: order.branchId,
         orderId: order.id,
         userId: req.user.id,
+        // The order's till, not this request's device. The order is what the
+        // day's takings are attributed to, so the stock it consumed has to be
+        // attributed the same way or the two reports disagree about one sale.
+        // Null when the order was never opened on a till at all.
+        terminalId: order.terminalId,
         occurredAt: new Date(),
       });
       // ==== END LANE inventory ====
