@@ -1,12 +1,23 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
-import { asyncHandler, conflict, notFound, badRequest } from '../../lib/errors.js';
-import { hashPassword, randomPassword } from '../../lib/crypto.js';
-import { audit } from '../../lib/audit.js';
+import { asyncHandler, conflict, notFound, badRequest, AppError } from '../../lib/errors.js';
+import { audit, auditRequired } from '../../lib/audit.js';
+import { mailEnabled } from '../../config/env.js';
+import { recipientAllowed } from '../../lib/mail/mailer.js';
 import { requirePosAuth } from '../../middleware/auth.js';
 import { requireAtc } from '../../middleware/rbac.js';
 import { withDerived } from '../../lib/license.js';
+import { roleLabel } from '../../lib/permissions.js';
+import { requireAnotherActivePlatformAdmin } from '../../lib/userAuthority.js';
+import {
+  createInvitation,
+  invitationView,
+  isOpen,
+  resendCooldownRemaining,
+  rotateInvitationToken,
+  sendInvitationMail,
+} from '../../lib/invitations.js';
 
 // ATC-side console: customer onboarding and licence control. Access, expiry
 // and branch limits are decided here and only here — nothing a customer can
@@ -250,41 +261,323 @@ router.patch(
   }),
 );
 
-// Create the first CUSTOMER_OWNER for a company. Temp password returns once.
+// ---------------------------------------------------------------------------
+// Inviting the customer's owner
+// ---------------------------------------------------------------------------
+//
+// This used to mint a temporary password and return it in the response body.
+// That made the owner's first credential something VEXO chose, VEXO saw, and
+// VEXO then had to transmit — by whatever channel the operator reached for, to
+// an address nobody had proved the customer controlled. It also put a live
+// password into an API response, a browser's network tab and any screenshot of
+// the onboarding screen.
+//
+// An invitation removes every one of those. The customer proves the mailbox by
+// opening the link, chooses a password nobody else ever knows, and the account
+// does not exist until they do. Nothing here can name a password because
+// nothing here has one.
+
 const ownerSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
   fullName: z.string().trim().min(2).max(120),
 });
 
+// Refused at the point of asking rather than written as a PENDING row nobody
+// will ever receive — the same rule the tenant-side invitation route applies.
+const requireMailConfigured = () => {
+  if (!mailEnabled) {
+    throw new AppError(
+      503,
+      'POS_MAIL_NOT_CONFIGURED',
+      'Email is not configured on this deployment, so the owner invitation cannot be sent. ' +
+        'Configure the sender before onboarding a customer.',
+    );
+  }
+};
+
 router.post(
   '/companies/:companyId/owner',
   loadCompany,
   asyncHandler(async (req, res) => {
+    requireMailConfigured();
     const data = ownerSchema.parse(req.body);
-    const exists = await prisma.posUser.findUnique({ where: { email: data.email } });
-    if (exists) throw conflict('A POS account with this email already exists');
-    const tempPassword = randomPassword();
-    const user = await prisma.posUser.create({
-      data: {
+    // A suspended or pending company must not gain an owner who can sign in the
+    // moment it is reactivated without anyone reconsidering.
+    if (req.company.status !== 'ACTIVE') {
+      throw badRequest(`${req.company.name} is ${req.company.status}. Activate the company before inviting its owner.`);
+    }
+
+    const { invitation, token } = await prisma.$transaction(async (tx) => {
+      // Throws conflict('An account with this email already exists') — the
+      // caller is a named VEXO operator, so telling them the address is taken
+      // is an answer they have earned.
+      const created = await createInvitation(tx, {
+        companyId: req.company.id,
         email: data.email,
         fullName: data.fullName,
         role: 'CUSTOMER_OWNER',
+        createdById: req.user.id,
+      });
+      // Required-grade: this is the act that hands a company to somebody.
+      await auditRequired(tx, req, {
+        action: 'CUSTOMER_OWNER_INVITED',
+        entity: 'UserInvitation',
+        entityId: created.invitation.id,
         companyId: req.company.id,
-        passwordHash: await hashPassword(tempPassword),
-        mustChangePassword: true,
-      },
+        // No token, no hash, no link.
+        meta: { email: data.email, role: 'CUSTOMER_OWNER', byAtc: true },
+      });
+      return created;
     });
-    await audit(req, {
-      action: 'USER_CREATE',
-      entity: 'PosUser',
-      entityId: user.id,
-      companyId: req.company.id,
-      meta: { email: user.email, role: user.role, byAtc: true },
+
+    // Outside the transaction: an SMTP conversation is not something to hold a
+    // database lock through, and a delivery failure leaves a resendable row
+    // rather than rolling back an invitation that was correctly authorised.
+    await sendInvitationMail({
+      invitation,
+      token,
+      companyName: req.company.name,
+      roleLabel: roleLabel('CUSTOMER_OWNER'),
+      inviterName: req.user.fullName,
     });
-    res.status(201).json({
-      user: { id: user.id, email: user.email, fullName: user.fullName, role: user.role },
-      tempPassword,
+
+    // The link is NOT in this response. It is a single-use credential and it
+    // belongs in the customer's mailbox and nowhere else.
+    res.status(201).json({ invitation: invitationView(invitation) });
+  }),
+);
+
+router.get(
+  '/companies/:companyId/invitations',
+  loadCompany,
+  asyncHandler(async (req, res) => {
+    const invitations = await prisma.userInvitation.findMany({
+      where: { companyId: req.company.id },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
     });
+    res.json({ invitations: invitations.map((i) => invitationView(i)) });
+  }),
+);
+
+// Resend and revoke for invitations VEXO issued. The tenant-side routes cannot
+// serve these: they scope by req.companyScope, and an operator working across
+// customers is not inside any one of them.
+const loadInvitation = asyncHandler(async (req, _res, next) => {
+  const invitation = await prisma.userInvitation.findUnique({ where: { id: req.params.invitationId } });
+  if (!invitation) throw notFound('Invitation not found');
+  req.invitation = invitation;
+  next();
+});
+
+router.post(
+  '/invitations/:invitationId/resend',
+  loadInvitation,
+  asyncHandler(async (req, res) => {
+    requireMailConfigured();
+    if (!isOpen(req.invitation)) {
+      throw badRequest('This invitation is no longer open. Send a new one instead.');
+    }
+    // The recipient did not ask for this mail, and a resend button is otherwise
+    // a one-click way to post a stranger a message per press.
+    const wait = resendCooldownRemaining(req.invitation);
+    if (wait > 0) {
+      throw new AppError(429, 'POS_RATE_LIMITED', 'This invitation was just sent. Please wait a moment before sending it again.', undefined, {
+        retryAfterSeconds: wait,
+      });
+    }
+
+    const rotated = await prisma.$transaction(async (tx) => {
+      // A resend mints a NEW token and kills the old one, so a link forwarded
+      // by mistake stops working rather than staying live for its full week.
+      const result = await rotateInvitationToken(tx, req.invitation.id);
+      if (!result) return null;
+      await auditRequired(tx, req, {
+        action: 'USER_INVITE_RESENT',
+        entity: 'UserInvitation',
+        entityId: req.invitation.id,
+        companyId: req.invitation.companyId,
+        meta: { email: req.invitation.email, sentCount: result.invitation.sentCount, byAtc: true },
+      });
+      return result;
+    });
+    if (!rotated) throw badRequest('This invitation is no longer open. Send a new one instead.');
+
+    const company = rotated.invitation.companyId
+      ? await prisma.company.findUnique({ where: { id: rotated.invitation.companyId }, select: { name: true } })
+      : null;
+    await sendInvitationMail({
+      invitation: rotated.invitation,
+      token: rotated.token,
+      companyName: company?.name ?? null,
+      roleLabel: roleLabel(rotated.invitation.role),
+      inviterName: req.user.fullName,
+    });
+    res.json({ invitation: invitationView(rotated.invitation) });
+  }),
+);
+
+router.post(
+  '/invitations/:invitationId/revoke',
+  loadInvitation,
+  asyncHandler(async (req, res) => {
+    if (req.invitation.status === 'ACCEPTED') {
+      throw badRequest('This invitation has already been accepted. Disable the account instead.');
+    }
+    const invitation = await prisma.$transaction(async (tx) => {
+      // Conditional on PENDING so a revoke racing an acceptance loses cleanly
+      // rather than marking an existing account's own invitation revoked.
+      const claimed = await tx.userInvitation.updateMany({
+        where: { id: req.invitation.id, status: 'PENDING' },
+        data: { status: 'REVOKED', revokedAt: new Date(), revokedById: req.user.id },
+      });
+      if (claimed.count === 0) return null;
+      await auditRequired(tx, req, {
+        action: 'USER_INVITE_REVOKED',
+        entity: 'UserInvitation',
+        entityId: req.invitation.id,
+        companyId: req.invitation.companyId,
+        meta: { email: req.invitation.email, role: req.invitation.role, byAtc: true },
+      });
+      return tx.userInvitation.findUnique({ where: { id: req.invitation.id } });
+    });
+    if (!invitation) throw badRequest('This invitation has already been accepted. Disable the account instead.');
+    res.json({ invitation: invitationView(invitation) });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Platform administrators
+// ---------------------------------------------------------------------------
+//
+// The accounts that own this console. They are created by invitation here or by
+// scripts/bootstrap-platform-admin.mjs, and by nothing else — in particular
+// never by registering an email, never by belonging to a domain, and never by
+// promoting an account that already exists. Every one of those would make
+// holding a mailbox sufficient to own the platform.
+
+const platformAdminView = (u) => ({
+  id: u.id,
+  email: u.email,
+  fullName: u.fullName,
+  status: u.status,
+  lastLoginAt: u.lastLoginAt,
+  createdAt: u.createdAt,
+  emailVerifiedAt: u.emailVerifiedAt,
+});
+
+router.get(
+  '/platform-admins',
+  asyncHandler(async (_req, res) => {
+    const [admins, invitations] = await Promise.all([
+      prisma.posUser.findMany({
+        where: { role: 'POS_SUPER_ADMIN', companyId: null },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.userInvitation.findMany({
+        where: { role: 'POS_SUPER_ADMIN', companyId: null },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+    ]);
+    res.json({
+      admins: admins.map(platformAdminView),
+      invitations: invitations.map((i) => invitationView(i)),
+      // So the screen can grey out the last remaining Disable button for the
+      // same reason the server would refuse it, rather than offering an action
+      // that always fails.
+      activeCount: admins.filter((a) => a.status === 'ACTIVE').length,
+    });
+  }),
+);
+
+router.post(
+  '/platform-admins',
+  asyncHandler(async (req, res) => {
+    requireMailConfigured();
+    const data = ownerSchema.parse(req.body);
+    if (!recipientAllowed(data.email)) {
+      throw badRequest(
+        'Outside production this deployment may only mail approved addresses, and this one is not among them.',
+        'email',
+      );
+    }
+
+    const { invitation, token } = await prisma.$transaction(async (tx) => {
+      const created = await createInvitation(tx, {
+        companyId: null, // platform scope, not a tenant's
+        email: data.email,
+        fullName: data.fullName,
+        role: 'POS_SUPER_ADMIN',
+        createdById: req.user.id,
+      });
+      await auditRequired(tx, req, {
+        action: 'PLATFORM_ADMIN_INVITED',
+        entity: 'UserInvitation',
+        entityId: created.invitation.id,
+        meta: { email: data.email, role: 'POS_SUPER_ADMIN' },
+      });
+      return created;
+    });
+
+    await sendInvitationMail({
+      invitation,
+      token,
+      companyName: null,
+      roleLabel: roleLabel('POS_SUPER_ADMIN'),
+      inviterName: req.user.fullName,
+    });
+    res.status(201).json({ invitation: invitationView(invitation) });
+  }),
+);
+
+const adminStatusSchema = z.object({ status: z.enum(['ACTIVE', 'DISABLED']) });
+
+router.patch(
+  '/platform-admins/:userId/status',
+  asyncHandler(async (req, res) => {
+    const { status } = adminStatusSchema.parse(req.body);
+    const target = await prisma.posUser.findFirst({
+      where: { id: String(req.params.userId), role: 'POS_SUPER_ADMIN', companyId: null },
+    });
+    if (!target) throw notFound('Platform administrator not found');
+
+    if (status === 'DISABLED') {
+      // Two refusals, and the ORDER is the point.
+      //
+      // Any caller here is themselves an active platform administrator, so
+      // whenever the target is somebody else there is by definition another one
+      // left and the last-admin check cannot fire. It is reachable only when a
+      // caller disables THEMSELVES — which is also what the self-check catches.
+      // Running the self-check first would therefore make the last-admin rule
+      // permanently unreachable, and would answer the one unrecoverable case
+      // ("nobody can administer this platform any more") with a message about
+      // asking a colleague who does not exist.
+      //
+      // So: the permanent mistake is reported first, and the merely annoying
+      // one — locking yourself out mid-task while colleagues remain — second.
+      await requireAnotherActivePlatformAdmin(target.id);
+      if (target.id === req.user.id) {
+        throw badRequest('You cannot disable your own platform administrator account. Ask another administrator.');
+      }
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.posUser.update({ where: { id: target.id }, data: { status } });
+      if (status === 'DISABLED') {
+        // Immediate: a disabled administrator with a live session is still an
+        // administrator until it expires.
+        await tx.posSession.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      }
+      await auditRequired(tx, req, {
+        action: 'PLATFORM_ADMIN_STATUS',
+        entity: 'PosUser',
+        entityId: user.id,
+        meta: { email: user.email, status },
+      });
+      return user;
+    });
+    res.json({ admin: platformAdminView(updated) });
   }),
 );
 

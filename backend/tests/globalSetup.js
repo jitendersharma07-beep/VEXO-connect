@@ -1,4 +1,20 @@
-// Serializes whole vitest RUNS against the shared test database.
+// Serializes whole vitest RUNS against the shared test database, and starts
+// each one from an empty one.
+//
+// Two separate hazards, and the merge of x/accounts kept both because they do
+// not substitute for each other:
+//
+//   - BETWEEN runs: several agents work these lanes at once, so two vitest
+//     processes can be mid-run against one database, each wipe() deleting the
+//     other's fixtures. The advisory lock below is the fix.
+//   - AFTER a crash: a run stopped halfway leaves rows the NEXT file's wipe has
+//     no statement for, and the RESTRICT foreign keys then fail on residue that
+//     has nothing to do with the code under test — one stale row reported as a
+//     dozen red files. The TRUNCATE in reset() is the fix.
+//
+// ORDER IS LOAD-BEARING: the truncate runs only once the lock is held. Wiping
+// first would be the very corruption the lock exists to prevent, except done by
+// the process that is supposed to be preventing it.
 //
 // Every suite in tests/ wipes the tenant tables in beforeAll, and they all
 // point at one database. fileParallelism:false makes that safe WITHIN a run; it
@@ -6,15 +22,14 @@
 // vitest processes can be mid-run against the same database — and then each
 // one's wipe() deletes the other's fixtures.
 //
-// This worktree makes that sharper than the lanes it consolidates: its tests do
-// not run against a private database. The lane's own runner refuses anything
-// but vcx_foundation_test at 127.0.0.1:5440, which is ALSO the x/foundation
-// lane's database. So the collision here is CROSS-LANE — a foundation run and a
-// merge run are two different worktrees wiping one database.
+// Some worktrees make that sharper than others: a lane whose runner points at
+// another lane's database — the consolidation worktree pointed at
+// vcx_foundation_test at 127.0.0.1:5440, x/foundation's own — collides
+// CROSS-LANE, two different worktrees wiping one database.
 //
-// That is why the key below must stay byte-identical to the one in
-// x/foundation's tests/globalSetup.js. In a lane with a private database the
-// shared key is merely harmless; here it is load-bearing, and a "unique per
+// That is why the key below must stay byte-identical everywhere this file is
+// copied. In a lane with a private database the shared key is merely harmless;
+// where two lanes share one it is load-bearing, and a "unique per
 // lane" key would silently restore the bug.
 //
 // Observed 2026-09-24 in this worktree: a run here (pid 2493488) held three
@@ -148,8 +163,8 @@ export async function setup() {
             ? `  holder: ${who.app || '(unnamed)'} backend pid ${who.pid}, connected ${who.age} ago.\n`
             : '  holder: released while we were giving up — just re-run.\n') +
           '  Runs are serialized because they share one database and each wipes it.\n' +
-          '  This worktree shares vcx_foundation_test with the x/foundation lane,\n' +
-          '  so the holder may be a run in a DIFFERENT worktree. Wait and re-run.'
+          '  Some lanes point at another lane\'s database, so the holder may be a run\n' +
+          '  in a DIFFERENT worktree. Wait and re-run.'
       );
     }
 
@@ -183,6 +198,21 @@ export async function setup() {
       .catch(() => {});
   }, HEARTBEAT_MS);
   heartbeat.unref();
+
+  // Only now, with the lock held, is it safe to empty the database: this is the
+  // one moment no other run can be mid-fixture. _prisma_migrations is excluded
+  // deliberately — emptying it would make the next `migrate deploy` re-run
+  // migrations already applied to this schema. TRUNCATE ... CASCADE needs no
+  // knowledge of the dependency graph, which is why it is used here and not in
+  // the per-file helpers.
+  const tables = await client.$queryRaw`
+    select tablename::text as t from pg_tables
+    where schemaname = 'public' and tablename <> '_prisma_migrations'`;
+  if (tables.length) {
+    const list = tables.map((r) => `"public"."${r.t}"`).join(', ');
+    await client.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
+    note(`emptied ${tables.length} tables`);
+  }
 }
 
 export async function teardown() {

@@ -349,6 +349,16 @@ Allowed from `SUBMITTED` or `REJECTED`. Requires `phone.order.reassign`.
   returns, via `recomputeOrder()`. The response carries the new totals, and the
   UI must show them as a changed price, not reuse the old summary.
 - Writes a `PhoneOrderEvent` and an audit row with both store ids.
+- **`priceChanged` means the caller's payable moved** — `payableQuote` before vs
+  after, which is order total + tax + the new store's delivery charge. It is the
+  operator's cue to re-read the quote before hanging up.
+
+  It is deliberately *not* limited to `Order.total`/`taxAmount`. While the
+  catalogue is company-wide and each line's price and tax rate are snapshotted at
+  submit, those two figures **cannot** move on a reassignment, so a flag watching
+  only them would be false on every move ever made — including the ones that cost
+  the caller more. Corrected 09-24 (D-1); clients should not re-derive the drift
+  from `payableQuote` themselves.
 
 **200** `{ "phoneOrder": { …, "status": "SUBMITTED", "routedBranchId": "ckb2",
 "order": { …recomputed totals… } }, "priceChanged": true }`
@@ -466,7 +476,7 @@ edit. This lane does not touch them. `backend/src/lib/orders.js` and
 | C-2 | Pickup/delivery have no `OrderType` value | Both stored as `TAKEAWAY`; real mode on `PhoneOrder.fulfilment`. Not adding a value to a shared enum another lane owns |
 | C-3 | "Enterprise HQ-routing entitlement" has no mechanism to enforce | Conservative proxy: cross-store routing requires `MULTI_STORE`. Marked `// INTEGRATION(firstlogin)` |
 | C-4 | Serviceability: spec says "unsupported addresses … blocked or require an authorized alternative" but does not define serviceability | Pincode-based `BranchServiceArea`. Deterministic, no geo/maps dependency, testable. Radius/polygon is a later change behind the same API |
-| C-5 | "Preparation capacity" is undefined | Orders-per-slot per store (`slotMinutes`, `maxOrdersPerSlot`), counted over phone orders scheduled into the same slot |
+| C-5 | "Preparation capacity" is undefined | Orders-per-slot per store (`slotMinutes`, `maxOrdersPerSlot`). Counted over live (`SUBMITTED`/`ACCEPTED`) phone orders falling in the same slot: a scheduled order by its `scheduledFor`, an **ASAP order by the slot it was taken in** (`createdAt`). The ASAP arm was missing until 09-24 (D-2), which made the guard fail OPEN on the dominant path. Note a reassigned ASAP order keeps its original `createdAt`, so it occupies the slot of its creation, not of its arrival at the new store. A transfer arriving after that slot has elapsed therefore occupies nothing, so **the cap is not a hard limit and `capacity.booked` is a floor rather than an exact count** — do not rely on `available` alone to mean a kitchen has room. Evidence and the measured case are in `docs/VC104-BACKEND-DEFECTS.md` §D-2 *What this does not settle*; being closed on `x/vc104-slot-anchor` |
 | C-6 | Delivery charge: GST treatment unknown | **OPEN — owner.** Quoted beside the order, never folded into `Order.total`, never taxed. Captured as data: `PhoneOrder.deliverySupplier` and `.deliveryChargeTreatment`, both defaulting to UNRESOLVED. See §12 |
 
 C-6 is the one that most needs an answer, and §12 states exactly what has to be

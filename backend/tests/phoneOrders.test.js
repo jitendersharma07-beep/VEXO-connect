@@ -122,6 +122,27 @@ const baseSubmission = (over = {}) => ({
   ...over,
 });
 
+// Capacity fixtures tear down in a finally, and clear before they build as well
+// as after. Without both, one failing assertion leaves a cap row and orders
+// behind and the NEXT capacity test dies on the fixture instead of its subject
+// — which makes a negative-control run unreadable, since a cascade failure and
+// a real one look identical in the output.
+const withCapacity = async (branchId, maxOrdersPerSlot, fn) => {
+  const clear = async () => {
+    await prisma.phoneOrder.deleteMany({ where: { routedBranchId: branchId } });
+    await prisma.branchPrepCapacity.deleteMany({ where: { branchId } });
+  };
+  await clear();
+  await prisma.branchPrepCapacity.create({
+    data: { companyId: companyA.id, branchId, slotMinutes: 15, maxOrdersPerSlot },
+  });
+  try {
+    await fn();
+  } finally {
+    await clear();
+  }
+};
+
 beforeAll(async () => {
   await wipe();
   const passwordHash = await hashPassword(PW);
@@ -314,24 +335,40 @@ describe('branch options explain themselves', () => {
   });
 
   it('refuses a store whose prep slot is already full', async () => {
-    await prisma.branchPrepCapacity.create({
-      data: { companyId: companyA.id, branchId: a2.id, slotMinutes: 15, maxOrdersPerSlot: 1 },
-    });
-    const when = new Date(Date.now() + 3600e3);
-    const first = await submit(baseSubmission({ branchId: a2.id, scheduledFor: when.toISOString() }));
-    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    await withCapacity(a2.id, 1, async () => {
+      // An explicit scheduledFor, unlike the ASAP tests below: this is the
+      // SCHEDULED counting path, where the booking falls inside a slot range.
+      const when = new Date(Date.now() + 3600e3);
+      const first = await submit(baseSubmission({ branchId: a2.id, scheduledFor: when.toISOString() }));
+      expect(first.status, JSON.stringify(first.body)).toBe(201);
 
-    const res = await options({
-      fulfilment: 'DELIVERY',
-      addressId: addrA.id,
-      scheduledFor: when.toISOString(),
+      const res = await options({
+        fulfilment: 'DELIVERY',
+        addressId: addrA.id,
+        scheduledFor: when.toISOString(),
+      });
+      const a2opt = res.body.options.find((o) => o.branchId === a2.id);
+      expect(a2opt.unavailableReasons.map((r) => r.code)).toContain('AT_CAPACITY');
+      expect(a2opt.capacity.booked).toBe(1);
     });
-    const a2opt = res.body.options.find((o) => o.branchId === a2.id);
-    expect(a2opt.unavailableReasons.map((r) => r.code)).toContain('AT_CAPACITY');
-    expect(a2opt.capacity.booked).toBe(1);
+  });
 
-    await prisma.phoneOrder.deleteMany({ where: { routedBranchId: a2.id } });
-    await prisma.branchPrepCapacity.deleteMany({ where: { branchId: a2.id } });
+  it('counts ASAP orders against the slot as well (D-2)', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      // No scheduledFor, so this is an ASAP order and persists scheduledFor
+      // NULL. The sibling test above proves the SCHEDULED path; this one is the
+      // path almost every real caller takes, and NULL never falls in a range.
+      const first = await submit(baseSubmission({ branchId: a2.id }));
+      expect(first.status, JSON.stringify(first.body)).toBe(201);
+      expect(first.body.phoneOrder.scheduledFor).toBeNull();
+
+      const res = await options({ fulfilment: 'DELIVERY', addressId: addrA.id });
+      const a2opt = res.body.options.find((o) => o.branchId === a2.id);
+      // The kitchen holds one order per slot and is holding one, so the next
+      // one has to be refused. A guard that cannot see the booking fails OPEN.
+      expect(a2opt.capacity.booked).toBe(1);
+      expect(a2opt.unavailableReasons.map((r) => r.code)).toContain('AT_CAPACITY');
+    });
   });
 });
 
@@ -462,6 +499,325 @@ describe('idempotent submission', () => {
   });
 });
 
+// --- D-3: a phone order can carry modifiers ----------------------------------
+//
+// D-3 (docs/VC104-BACKEND-DEFECTS.md) was reported as "the phone-order API has
+// no modifier field, so a product with a REQUIRED group cannot be sold by
+// phone". The field is only the first of it. Three more things encode modifier
+// semantics on this path and each was written as though modifiers could not
+// arrive: the idempotency hash, the line-merge key, and the minimum-order-value
+// basket. Adding the field alone would have fixed the reported symptom and left
+// three quieter wrongs behind — a replayed key handing back the wrong order, two
+// different-topping lines collapsing into one, and every paid extra missing from
+// the store minimum. Each has a test below, and the ones that would have been
+// SILENT are marked, because a silent wrong answer is the expensive kind.
+//
+// Fixtures are built through prisma rather than the catalog API on purpose: this
+// suite's catalog has always been built that way (see `cappuccino` above), and
+// going through HTTP would couple these tests to the D-5 two-step group
+// workflow, which is a different lane's subject.
+describe('a phone order can carry modifiers (D-3)', () => {
+  let pizza;
+  let sizeRegular, sizeLarge, topCheese, topOlive, archivedOption, foreignOption, otherProductOption;
+
+  const withMinOrder = async (branchId, minOrder, body) => {
+    const prior = await prisma.branchServiceArea.findFirst({ where: { branchId, pincode: '560001' } });
+    await prisma.branchServiceArea.updateMany({
+      where: { branchId, pincode: '560001' },
+      data: { minOrder },
+    });
+    try {
+      return await body();
+    } finally {
+      // try/finally rather than this suite's usual restore-at-the-end, because
+      // these tests get deliberately failed during negative-control runs and a
+      // minimum left at 350.00 would cascade into the blocks below — turning a
+      // readable control into noise about unrelated tests.
+      await prisma.branchServiceArea.updateMany({
+        where: { branchId, pincode: '560001' },
+        data: { minOrder: prior.minOrder },
+      });
+    }
+  };
+
+  const linesOf = (orderId) =>
+    prisma.orderItem.findMany({
+      where: { orderId, status: 'ACTIVE' },
+      include: { modifiers: true },
+      orderBy: { unitPrice: 'desc' },
+    });
+
+  beforeAll(async () => {
+    const cat = await prisma.category.create({ data: { companyId: companyA.id, name: 'Pizza' } });
+    pizza = await prisma.product.create({
+      data: { companyId: companyA.id, categoryId: cat.id, name: 'Margherita', basePrice: '300.00', taxRateId: tax5.id },
+    });
+
+    // Exactly-one Size is what makes this product unsellable before the fix.
+    const size = await prisma.modifierGroup.create({
+      data: { productId: pizza.id, name: 'Size', minSelect: 1, maxSelect: 1, status: 'ACTIVE' },
+    });
+    sizeRegular = await prisma.modifierOption.create({
+      data: { groupId: size.id, name: 'Regular', price: '0.00', status: 'ACTIVE' },
+    });
+    sizeLarge = await prisma.modifierOption.create({
+      data: { groupId: size.id, name: 'Large', price: '100.00', status: 'ACTIVE' },
+    });
+
+    const tops = await prisma.modifierGroup.create({
+      data: { productId: pizza.id, name: 'Toppings', minSelect: 0, maxSelect: 2, status: 'ACTIVE' },
+    });
+    topCheese = await prisma.modifierOption.create({
+      data: { groupId: tops.id, name: 'Extra cheese', price: '50.00', status: 'ACTIVE' },
+    });
+    topOlive = await prisma.modifierOption.create({
+      data: { groupId: tops.id, name: 'Olives', price: '30.00', status: 'ACTIVE' },
+    });
+    archivedOption = await prisma.modifierOption.create({
+      data: { groupId: tops.id, name: 'Anchovies', price: '70.00', status: 'ARCHIVED' },
+    });
+
+    // Two near-misses that must not be accepted: a live option on a DIFFERENT
+    // product of the same tenant, and a live option in a DIFFERENT tenant. The
+    // sibling is its own product rather than a group bolted onto `cappuccino`,
+    // so nothing here changes what the blocks around this one are selling.
+    const sibling = await prisma.product.create({
+      data: { companyId: companyA.id, categoryId: cat.id, name: 'Calzone', basePrice: '280.00', taxRateId: tax5.id },
+    });
+    const otherGroup = await prisma.modifierGroup.create({
+      data: { productId: sibling.id, name: 'Filling', minSelect: 0, maxSelect: 1, status: 'ACTIVE' },
+    });
+    otherProductOption = await prisma.modifierOption.create({
+      data: { groupId: otherGroup.id, name: 'Oat', price: '25.00', status: 'ACTIVE' },
+    });
+    const bCat = await prisma.category.create({ data: { companyId: companyB.id, name: 'Bravo Food' } });
+    const bProduct = await prisma.product.create({
+      data: { companyId: companyB.id, categoryId: bCat.id, name: 'Bravo Pizza', basePrice: '300.00' },
+    });
+    const bGroup = await prisma.modifierGroup.create({
+      data: { productId: bProduct.id, name: 'Size', minSelect: 0, maxSelect: 1, status: 'ACTIVE' },
+    });
+    foreignOption = await prisma.modifierOption.create({
+      data: { groupId: bGroup.id, name: 'Large', price: '100.00', status: 'ACTIVE' },
+    });
+  });
+
+  // --- the reported symptom --------------------------------------------------
+
+  it('sells a product whose group is REQUIRED — the thing D-3 says it cannot', async () => {
+    const res = await submit(
+      baseSubmission({ items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeRegular.id] }] }),
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.phoneOrder.order.subtotal).toBe(300);
+
+    // The snapshot rows are the half `createMany` could not write. Reading them
+    // back is what separates "the request was accepted" from "the choice was
+    // recorded" — the old path would have thrown rather than drop them, but a
+    // future one could drop them quietly.
+    const [line] = await linesOf(res.body.phoneOrder.order.id);
+    expect(line.modifiers.map((m) => [m.groupName, m.name])).toEqual([['Size', 'Regular']]);
+  });
+
+  it('still refuses to skip a required choice, in the catalog\'s own words', async () => {
+    const body = baseSubmission({ items: [{ productId: pizza.id, qty: 1 }] });
+    const res = await submit(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error.field).toBe('modifierOptionIds');
+    expect(res.body.error.message).toMatch(/at least 1 from "Size"/);
+    // Refused before anything was written, so the key stays usable.
+    expect(await prisma.phoneOrder.count({ where: { idempotencyKey: body.idempotencyKey } })).toBe(0);
+  });
+
+  it('refuses more of a group than it allows', async () => {
+    const res = await submit(
+      baseSubmission({
+        items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeRegular.id, sizeLarge.id] }],
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/at most 1 from "Size"/);
+  });
+
+  it('refuses an archived option, another product\'s option and another tenant\'s', async () => {
+    for (const bad of [archivedOption.id, otherProductOption.id, foreignOption.id]) {
+      const res = await submit(
+        baseSubmission({ items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeRegular.id, bad] }] }),
+      );
+      expect(res.status, `option ${bad}: ${JSON.stringify(res.body)}`).toBe(400);
+      expect(res.body.error.field).toBe('modifierOptionIds');
+      // The MESSAGE, not just the field. Status and field alone do not
+      // discriminate here: an API that ignored `modifierOptionIds` outright
+      // would answer 400 on this same field, because the Size group is then
+      // unsatisfied — so this test passed against the unfixed code. Naming the
+      // reason is what makes it evidence that the option was rejected rather
+      // than never read.
+      expect(res.body.error.message, `option ${bad}`).toMatch(/Unknown or archived modifier option/);
+    }
+  });
+
+  // --- price -----------------------------------------------------------------
+
+  it('folds the extras into the line price, the tax and the quote', async () => {
+    const res = await submit(
+      baseSubmission({
+        items: [{ productId: pizza.id, qty: 2, modifierOptionIds: [sizeLarge.id, topCheese.id] }],
+      }),
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const po = res.body.phoneOrder;
+
+    // 300 + 100 + 50 = 450 a pizza, two of them = 900, GST 5% = 45 -> 945.
+    // Delivery 40 is quoted beside the order, never inside it.
+    expect(po.order.subtotal).toBe(900);
+    expect(po.order.taxAmount).toBe(45);
+    expect(po.order.total).toBe(945);
+    expect(po.payableQuote).toBe(985);
+
+    const [line] = await linesOf(po.order.id);
+    expect(Number(line.unitPrice)).toBe(450);
+    expect(line.modifiers.map((m) => Number(m.price)).sort((a, b) => a - b)).toEqual([50, 100]);
+  });
+
+  // --- the line-merge key ----------------------------------------------------
+
+  it('keeps two lines apart when only the topping differs — SILENT before the fix', async () => {
+    const res = await submit(
+      baseSubmission({
+        items: [
+          { productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id] },
+          { productId: pizza.id, qty: 1, modifierOptionIds: [sizeRegular.id] },
+          { productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id] },
+        ],
+      }),
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+
+    // The old key was product|variant, so all three collapsed onto one line at
+    // whichever size was seen first: a qty-3 Large, billed 1200 instead of 1100,
+    // and a kitchen ticket that never mentions the Regular. No error either way.
+    const lines = await linesOf(res.body.phoneOrder.order.id);
+    expect(lines.map((l) => [Number(l.unitPrice), l.qty])).toEqual([[400, 2], [300, 1]]);
+    expect(res.body.phoneOrder.order.subtotal).toBe(1100);
+  });
+
+  it('treats one choice written two ways as one line', async () => {
+    const res = await submit(
+      baseSubmission({
+        items: [
+          { productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id, topCheese.id] },
+          { productId: pizza.id, qty: 1, modifierOptionIds: [topCheese.id, sizeLarge.id] },
+          // The same option twice in one item is still one of it, so this must
+          // merge too and must not be priced twice or trip Size's maximum.
+          { productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id, topCheese.id, sizeLarge.id] },
+        ],
+      }),
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const lines = await linesOf(res.body.phoneOrder.order.id);
+    expect(lines.map((l) => [Number(l.unitPrice), l.qty])).toEqual([[450, 3]]);
+  });
+
+  // --- idempotency -----------------------------------------------------------
+
+  it('refuses a reused key whose toppings changed — SILENT before the fix', async () => {
+    const body = baseSubmission({
+      items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id, topCheese.id] }],
+    });
+    const first = await submit(body);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+
+    const changed = { ...body, items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeRegular.id] }] };
+    const res = await submit(changed);
+
+    // Without the modifiers in the hash this answered 200 and handed back the
+    // FIRST order: the operator is told the plain one succeeded, and the caller
+    // who asked to change their mind is billed 450 for a 300 pizza. A 409 that
+    // says the key is in use is the only honest answer.
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body.error.code).toBe('POS_IDEMPOTENCY_KEY_REUSED');
+
+    const [line] = await linesOf(first.body.phoneOrder.order.id);
+    expect(Number(line.unitPrice)).toBe(450);
+    expect(await prisma.phoneOrder.count({ where: { idempotencyKey: body.idempotencyKey } })).toBe(1);
+  });
+
+  it('replays one choice written two ways as the same request, not a clash', async () => {
+    const body = baseSubmission({
+      items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id, topCheese.id] }],
+    });
+    const first = await submit(body);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+
+    // The dedupe-and-sort has to be in the hash as well as the merge key. A
+    // retry that lists the same two options the other way round is the same
+    // request; refusing it would be a new wrong answer invented by the fix.
+    const second = await submit({
+      ...body,
+      items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [topCheese.id, sizeLarge.id] }],
+    });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(second.body.phoneOrder.id).toBe(first.body.phoneOrder.id);
+    expect(await prisma.phoneOrder.count({ where: { idempotencyKey: body.idempotencyKey } })).toBe(1);
+  });
+
+  // --- the minimum-order-value basket ----------------------------------------
+
+  it('counts the paid extras towards the store minimum — SILENT before the fix', async () => {
+    await withMinOrder(a1.id, '350.00', async () => {
+      const large = [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id] }];
+      const plain = [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeRegular.id] }];
+
+      // 300 + 100 clears 350. Counting base price alone put this basket at 300
+      // and refused a delivery the store would happily have taken.
+      const seen = await options({ fulfilment: 'DELIVERY', addressId: addrA.id, items: large });
+      const a1opt = seen.body.options.find((o) => o.branchId === a1.id);
+      expect(a1opt.unavailableReasons.map((r) => r.code)).not.toContain('BELOW_MIN_ORDER');
+      expect((await submit(baseSubmission({ items: large }))).status).toBe(201);
+
+      // And the number is still real: the same pizza without the paid size is
+      // 300 and is still refused. Without this half the test above passes on a
+      // minimum that was simply never enforced.
+      const under = await options({ fulfilment: 'DELIVERY', addressId: addrA.id, items: plain });
+      const underOpt = under.body.options.find((o) => o.branchId === a1.id);
+      expect(underOpt.unavailableReasons.map((r) => r.code)).toContain('BELOW_MIN_ORDER');
+      expect((await submit(baseSubmission({ items: plain }))).status).toBe(409);
+    });
+  });
+
+  // --- reassignment ----------------------------------------------------------
+
+  it('carries the extras into the new store\'s minimum, and keeps their price', async () => {
+    const created = await submit(
+      baseSubmission({ items: [{ productId: pizza.id, qty: 1, modifierOptionIds: [sizeLarge.id] }] }),
+    );
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const po = created.body.phoneOrder;
+
+    await withMinOrder(a2.id, '350.00', async () => {
+      // Reassign rebuilds the basket from the STORED lines, which is the one
+      // place the modifier ids are not in the request. Reading them back out of
+      // the order rows is what lets this order move at all: without it the
+      // basket is 300 against a 350 minimum and the move is refused.
+      const res = await request(app)
+        .post(`/api/phone-orders/${po.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'first store went down' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.phoneOrder.routedBranchId).toBe(a2.id);
+      expect(res.body.phoneOrder.deliveryCharge).toBe(60);
+    });
+
+    // Recompute runs off the stored rows, so the extra is still paid for and
+    // its snapshot survived the move.
+    const order = await prisma.order.findUnique({ where: { id: po.order.id } });
+    expect(Number(order.total)).toBe(420);
+    const [line] = await linesOf(po.order.id);
+    expect(Number(line.unitPrice)).toBe(400);
+    expect(line.modifiers.map((m) => m.name)).toEqual(['Large']);
+  });
+});
+
 describe('exactly one accepting store', () => {
   it('lets the routed store accept, with attribution', async () => {
     const created = await submit(baseSubmission());
@@ -550,6 +906,110 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
     // carried over: the tax figure is re-derived from the lines.
     expect(Number(order.total)).toBe(420);
     expect(Number(order.taxAmount)).toBe(20);
+  });
+
+  it('reports a price change when only the delivery charge moved (D-1)', async () => {
+    const created = await submit(baseSubmission());
+    const po = created.body.phoneOrder;
+    expect(po.deliveryCharge).toBe(40);
+    expect(po.payableQuote).toBe(460);
+
+    const res = await request(app)
+      .post(`/api/phone-orders/${po.id}/reassign`)
+      .set(auth(tokens.ownerA))
+      .send({ branchId: a2.id, reason: 'original store rejected' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    // The caller pays 480 now instead of 460, and the operator has to be told
+    // before they hang up. Food and tax CANNOT move on a reassignment — the
+    // catalog is company-wide (C-7) and each line's tax rate is snapshotted at
+    // submit — so the delivery charge is the only thing a reassignment changes.
+    // A priceChanged derived from total and tax alone is therefore not merely
+    // inaccurate here; it can never be true on any reassignment at all.
+    expect(res.body.phoneOrder.payableQuote).toBe(480);
+    expect(res.body.priceChanged).toBe(true);
+  });
+
+  it('stays quiet when the move costs the caller nothing (D-1 control)', async () => {
+    // Two stores serving one pincode at the same charge. Without this, a flag
+    // hardwired to true would satisfy the test above and still be useless — the
+    // operator would re-quote every caller on every move and learn to ignore it.
+    await prisma.branchServiceArea.updateMany({
+      where: { branchId: a2.id, pincode: '560001' },
+      data: { deliveryCharge: '40.00' },
+    });
+
+    const created = await submit(baseSubmission());
+    const po = created.body.phoneOrder;
+    expect(po.payableQuote).toBe(460);
+
+    const res = await request(app)
+      .post(`/api/phone-orders/${po.id}/reassign`)
+      .set(auth(tokens.ownerA))
+      .send({ branchId: a2.id, reason: 'balancing the load' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.phoneOrder.payableQuote).toBe(460);
+    expect(res.body.priceChanged).toBe(false);
+
+    await prisma.branchServiceArea.updateMany({
+      where: { branchId: a2.id, pincode: '560001' },
+      data: { deliveryCharge: '60.00' },
+    });
+  });
+
+  const moveToA2 = async (reason, backdateMs = 0) => {
+    const c = await submit(baseSubmission());
+    if (backdateMs) {
+      await prisma.phoneOrder.update({
+        where: { id: c.body.phoneOrder.id },
+        data: { createdAt: new Date(Date.now() - backdateMs) },
+      });
+    }
+    return request(app)
+      .post(`/api/phone-orders/${c.body.phoneOrder.id}/reassign`)
+      .set(auth(tokens.ownerA))
+      .send({ branchId: a2.id, reason });
+  };
+
+  it('counts a reassigned ASAP order against the slot it was taken in (D-2)', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      // One order taken natively at a2, leaving room for exactly one more.
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      // Two moved in from a1 within the same slot. The first fits; the second
+      // must be refused, which is the point of counting ASAP orders at all.
+      expect((await moveToA2('load balancing')).status).toBe(200);
+      expect((await moveToA2('load balancing')).status).toBe(409);
+    });
+  });
+
+  // KNOWN LIMITATION, recorded not endorsed — see D-2 "What this does not
+  // settle" in docs/VC104-BACKEND-DEFECTS.md. An ASAP order is anchored to its
+  // createdAt, but a reassignment is checked against the slot containing NOW.
+  // Move an order after its own slot has elapsed and it lands in a store
+  // without occupying anything there. Closing this needs a slot-anchor column,
+  // which is a schema decision, not a patch — so this test pins today's
+  // behaviour and will go red the day someone makes it.
+  it('does NOT count an ASAP order moved after its slot elapsed (D-2 limitation)', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      for (let i = 0; i < 3; i += 1) {
+        const res = await moveToA2('moved late', 3600_000);
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+      }
+
+      // Four live orders against a cap of two, reported as one and still open.
+      expect(
+        await prisma.phoneOrder.count({
+          where: { routedBranchId: a2.id, status: { in: ['SUBMITTED', 'ACCEPTED'] } },
+        }),
+      ).toBe(4);
+      const opt = await options({ fulfilment: 'DELIVERY', addressId: addrA.id });
+      const a2opt = opt.body.options.find((o) => o.branchId === a2.id);
+      expect(a2opt.capacity.booked).toBe(1);
+      expect(a2opt.available).toBe(true);
+    });
   });
 
   it('clears a prior acceptance so the new store must accept for itself', async () => {

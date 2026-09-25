@@ -23,6 +23,7 @@ if (process.env.NODE_ENV === 'production' || !/\/[a-z0-9_]*vc105[a-z0-9_]*(\?|$)
 
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
+const { mintStorePublicId } = await import('../src/lib/identity.js');
 
 // The operator supplies the password; it is never printed and never committed.
 const PW = process.env.POS_SEED_PASSWORD;
@@ -69,8 +70,23 @@ const company = await prisma.company.create({
     licenses: { create: { plan: 'MULTI_STORE', baseBranchLimit: 5, expiresAt: at('2027-12-31T00:00:00Z') } },
   },
 });
-const central = await prisma.branch.create({ data: { companyId: company.id, name: 'Central', code: 'CEN' } });
-const airport = await prisma.branch.create({ data: { companyId: company.id, name: 'Airport', code: 'AIR' } });
+// publicId is required — 20260924100100_foundation_org_identity made
+// Branch.publicId NOT NULL. That migration is not on x/vc105-api, so this
+// script ran green in its own lane and could not run at all here until the
+// two were put in the same tree. Minted through the same helper prisma/seed.js
+// uses, so the fixture carries a real VEXO Store ID rather than a literal.
+const central = await prisma.branch.create({
+  data: {
+    companyId: company.id, name: 'Central', code: 'CEN',
+    publicId: await mintStorePublicId(prisma, { stateName: 'Delhi' }),
+  },
+});
+const airport = await prisma.branch.create({
+  data: {
+    companyId: company.id, name: 'Airport', code: 'AIR',
+    publicId: await mintStorePublicId(prisma, { stateName: 'Delhi' }),
+  },
+});
 
 const owner = await prisma.posUser.create({
   data: { passwordHash, email: 'owner@vc105.demo.local', fullName: 'Demo Owner', role: 'CUSTOMER_OWNER', companyId: company.id },
@@ -139,8 +155,13 @@ const bill = async ({ branch, type, billedAt, lines, discountPaise = 0, refundPa
       },
     },
   });
+  // branchId is part of the relation, not decoration: 20260924100200 made
+  // Payment→Order a COMPOSITE foreign key, [orderId, branchId] → [id, branchId],
+  // so the database itself refuses to attach a payment to an order in another
+  // branch. That migration is not on x/vc105-api either, which is why this
+  // create needed no branchId there and cannot omit it here.
   await prisma.payment.create({
-    data: { orderId: order.id, amount: D(total - refundPaise), method: 'CASH', channel: 'MANUAL', receivedById: owner.id, createdAt: billedAt },
+    data: { orderId: order.id, branchId: branch.id, amount: D(total - refundPaise), method: 'CASH', channel: 'MANUAL', receivedById: owner.id, createdAt: billedAt },
   });
   if (refundPaise > 0) {
     await prisma.refund.create({

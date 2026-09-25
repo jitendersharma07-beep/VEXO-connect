@@ -21,9 +21,10 @@
 // has only ever been exercised by hand, if at all. A suite that only ever
 // reaches a table through Prisma proves the table works, not the product.
 //
-// Three tests below are TRIPWIRES, not approvals: they assert what the code
-// does today and say so at the assertion. Two of them are the D-5 pair in
-// docs/VC104-BACKEND-DEFECTS.md — fixing D-5 is supposed to break them.
+// One test below is a TRIPWIRE, not an approval: it asserts what the code does
+// today and says so at the assertion. It was three; the other two were the D-5
+// pair in docs/VC104-BACKEND-DEFECTS.md, and fixing D-5 turned them into the
+// refusal tests at the bottom of this file, which is what a tripwire is for.
 //
 // Runs ONLY against a database whose name ends in _test — it truncates tables.
 
@@ -138,6 +139,9 @@ const patchOption = (token, productId, groupId, optionId, body) =>
     .set(auth(token))
     .send(body);
 
+const getProduct = (token, productId) =>
+  request(app).get(`/api/catalog/products/${productId}`).set(auth(token));
+
 // Every one of the four routes answers with the whole product, so the group is
 // read back out of the response rather than out of the database — that is what
 // a client sees, and a route that wrote correctly but serialised wrongly would
@@ -151,6 +155,18 @@ const makeGroup = async (productId, body) => {
   const res = await postGroup(tokens.ownerA, productId, body);
   expect(res.status, `makeGroup ${JSON.stringify(body)}: ${JSON.stringify(res.body)}`).toBe(201);
   return groupNamed(res, body.name.trim()).id;
+};
+
+// The three-step flow a required group now needs, since D-5 was fixed: open it
+// with no minimum, fill it, then raise the minimum. Every intermediate state is
+// satisfiable, which is the whole point of the fix. Returns [groupId, ...optionIds].
+const makeRequiredGroup = async (productId, { name, minSelect, maxSelect }, options) => {
+  const groupId = await makeGroup(productId, { name, ...(maxSelect ? { maxSelect } : {}) });
+  const optionIds = [];
+  for (const o of options) optionIds.push(await makeOption(productId, groupId, o));
+  const res = await patchGroup(tokens.ownerA, productId, groupId, { minSelect });
+  expect(res.status, `makeRequiredGroup ${name}: ${JSON.stringify(res.body)}`).toBe(200);
+  return [groupId, ...optionIds];
 };
 
 const makeOption = async (productId, groupId, body) => {
@@ -267,11 +283,38 @@ describe('creating a modifier group', () => {
     expect(res.body.error.field).toBe('maxSelect');
   });
 
-  it('allows an exactly-one group, the commonest shape there is', async () => {
+  it('refuses a minimum on a group that cannot have options yet (D-5)', async () => {
     const p = await freshProduct();
+    // An exactly-one group is the commonest shape on a menu, and it can still
+    // be built — just not in one call, because between this call and the first
+    // option the product would be unsellable.
     const res = await postGroup(tokens.ownerA, p.id, { name: 'Size', minSelect: 1, maxSelect: 1 });
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(groupNamed(res, 'Size')).toMatchObject({ minSelect: 1, maxSelect: 1 });
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body.error.code).toBe('POS_CONFLICT');
+    expect(res.body.error.message).toMatch(/"Size" would require 1 choice but only 0 are available/);
+    // The remedy has to be in the message: without it this reads as "required
+    // groups are banned", which would be a worse bug than D-5.
+    expect(res.body.error.message).toMatch(/add its options, then raise the minimum/);
+
+    // The refusal must also have written nothing. The sibling paths pin this by
+    // selling the product afterwards, which cannot work here: the group under
+    // test is the one that was refused, so there is nothing to sell against.
+    // Assert the absence directly instead — a guard moved below the create
+    // would still answer 409 and still leave an unsatisfiable group behind.
+    expect(groupsOf(await getProduct(tokens.ownerA, p.id))).toEqual([]);
+    expect(await prisma.modifierGroup.count({ where: { productId: p.id } })).toBe(0);
+  });
+
+  it('builds an exactly-one group the supported way, and it sells', async () => {
+    const p = await freshProduct();
+    const [gid, whole] = await makeRequiredGroup(
+      p.id, { name: 'Milk', minSelect: 1, maxSelect: 1 }, [{ name: 'Whole', price: 0 }],
+    );
+    const read = await patchGroup(tokens.ownerA, p.id, gid, {});
+    expect(groupNamed(read, 'Milk')).toMatchObject({ minSelect: 1, maxSelect: 1 });
+    // The point of the whole exercise: the finished group is enforced at the till.
+    expect((await sell(p.id, [])).status).toBe(400);
+    expect((await sell(p.id, [whole])).status).toBe(201);
   });
 
   it('refuses a duplicate name on the same product, naming it in the message', async () => {
@@ -323,6 +366,7 @@ describe('updating a modifier group', () => {
   it('renames and re-bounds in one call', async () => {
     const p = await freshProduct();
     const id = await makeGroup(p.id, { name: 'Extras', minSelect: 0, maxSelect: 3 });
+    await makeOption(p.id, id, { name: 'Nuts', price: 10 });
     const res = await patchGroup(tokens.ownerA, p.id, id, { name: 'Add-ons', minSelect: 1, maxSelect: 2 });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(groupNamed(res, 'Add-ons')).toMatchObject({ id, minSelect: 1, maxSelect: 2 });
@@ -330,7 +374,11 @@ describe('updating a modifier group', () => {
 
   it('checks a lowered maxSelect against the STORED minSelect', async () => {
     const p = await freshProduct();
-    const id = await makeGroup(p.id, { name: 'Extras', minSelect: 2, maxSelect: 3 });
+    const [id] = await makeRequiredGroup(
+      p.id,
+      { name: 'Extras', minSelect: 2, maxSelect: 3 },
+      [{ name: 'Nuts', price: 10 }, { name: 'Choc', price: 10 }],
+    );
     // Only maxSelect is sent, so a schema-level .refine like groupCreate's
     // could not catch this — there is no minSelect in the payload to compare
     // against. groupUpdate deliberately has no refine and the check is written
@@ -344,7 +392,10 @@ describe('updating a modifier group', () => {
 
   it('checks a raised minSelect against the STORED maxSelect', async () => {
     const p = await freshProduct();
-    const id = await makeGroup(p.id, { name: 'Extras', minSelect: 1, maxSelect: 2 });
+    const id = await makeGroup(p.id, { name: 'Extras', maxSelect: 2 });
+    // 400 and not D-5's 409: the bounds contradict each other on their own
+    // terms, before anyone counts options, and the route checks them in that
+    // order on purpose. The narrower, older error is the more useful one.
     const res = await patchGroup(tokens.ownerA, p.id, id, { minSelect: 5 });
     expect(res.status, JSON.stringify(res.body)).toBe(400);
     expect(res.body.error.field).toBe('maxSelect');
@@ -352,7 +403,12 @@ describe('updating a modifier group', () => {
 
   it('clears the upper bound with an explicit null, and then a high minSelect is allowed', async () => {
     const p = await freshProduct();
-    const id = await makeGroup(p.id, { name: 'Extras', minSelect: 1, maxSelect: 2 });
+    const id = await makeGroup(p.id, { name: 'Extras', maxSelect: 2 });
+    for (const name of ['Nuts', 'Choc', 'Jam']) await makeOption(p.id, id, { name, price: 10 });
+
+    // Three options exist, so D-5 is satisfied either way and the only thing
+    // standing between this group and minSelect 3 is the stored upper bound.
+    expect((await patchGroup(tokens.ownerA, p.id, id, { minSelect: 3 })).status).toBe(400);
 
     // null and absent mean different things here: `data.maxSelect !== undefined`
     // distinguishes "clear it" from "leave it alone", which is why the schema
@@ -361,14 +417,15 @@ describe('updating a modifier group', () => {
     expect(cleared.status, JSON.stringify(cleared.body)).toBe(200);
     expect(groupNamed(cleared, 'Extras').maxSelect).toBeNull();
 
-    const raised = await patchGroup(tokens.ownerA, p.id, id, { minSelect: 9 });
+    const raised = await patchGroup(tokens.ownerA, p.id, id, { minSelect: 3 });
     expect(raised.status, JSON.stringify(raised.body)).toBe(200);
-    expect(groupNamed(raised, 'Extras')).toMatchObject({ minSelect: 9, maxSelect: null });
+    expect(groupNamed(raised, 'Extras')).toMatchObject({ minSelect: 3, maxSelect: null });
   });
 
   it('a no-op rename to the group\'s own name is not a conflict', async () => {
     const p = await freshProduct();
     const id = await makeGroup(p.id, { name: 'Extras' });
+    await makeOption(p.id, id, { name: 'Nuts', price: 10 });
     // The route guards the clash lookup with `data.name !== group.name`. Without
     // it, saving an unchanged form would 409 against the row being saved.
     const res = await patchGroup(tokens.ownerA, p.id, id, { name: 'Extras', minSelect: 1 });
@@ -387,8 +444,9 @@ describe('updating a modifier group', () => {
 
   it('archives a group, and the order path stops enforcing it', async () => {
     const p = await freshProduct();
-    const id = await makeGroup(p.id, { name: 'Size', minSelect: 1, maxSelect: 1 });
-    await makeOption(p.id, id, { name: 'Large', price: 20 });
+    const [id] = await makeRequiredGroup(
+      p.id, { name: 'Size', minSelect: 1, maxSelect: 1 }, [{ name: 'Large', price: 20 }],
+    );
 
     const blocked = await sell(p.id, []);
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(400);
@@ -442,7 +500,7 @@ describe('creating a modifier option', () => {
 
   it('allows a free option', async () => {
     const p = await freshProduct();
-    const id = await makeGroup(p.id, { name: 'Milk', minSelect: 1, maxSelect: 1 });
+    const id = await makeGroup(p.id, { name: 'Milk', maxSelect: 1 });
     const res = await postOption(tokens.ownerA, p.id, id, { name: 'Regular', price: 0 });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(groupsOf(res).find((g) => g.id === id).options[0].price).toBe(0);
@@ -651,62 +709,229 @@ describe('the audit trail for modifier authoring', () => {
   });
 });
 
-// --- D-5 -----------------------------------------------------------------------
+// --- D-5, fixed ------------------------------------------------------------------
 //
-// Both tests below are TRIPWIRES. They assert today's behaviour so that the
-// behaviour is at least written down and cannot change unnoticed; they are not
-// a statement that it is right. See docs/VC104-BACKEND-DEFECTS.md D-5.
+// The invariant the four routes now hold: an ACTIVE modifier group must have at
+// least `minSelect` ACTIVE options. Until this was fixed, four ordinary catalog
+// edits could break it and every one of them answered 200 or 201. The product
+// then could not be sold on ANY channel, because orders.js `resolveCatalogLine`
+// enforces minSelect over ACTIVE groups while building its option index from
+// ACTIVE options only. See docs/VC104-BACKEND-DEFECTS.md D-5.
+//
+// The two tests that used to live here were TRIPWIREs asserting exactly that
+// damage. They are now turned inside out: the same edits, refused. That is what
+// a tripwire is for, and it is why the `sell` calls below are kept rather than
+// replaced by a status-code check — a 409 on the write is only worth anything if
+// the product is still sellable after it, and THAT is the claim.
 
-describe('a required group can be left permanently unsatisfiable (D-5 tripwires)', () => {
-  it('TRIPWIRE: archiving the last active option of a required group makes the product unsellable', async () => {
-    const p = await freshProduct();
-    const g = await makeGroup(p.id, { name: 'Milk', minSelect: 1, maxSelect: 1 });
-    const o = await makeOption(p.id, g, { name: 'Whole', price: 0 });
-    expect((await sell(p.id, [o])).status).toBe(201);
+// A group in the state the guard now prevents. Written straight through Prisma
+// because every route into it is refused — which is precisely the position of a
+// database that predates the fix, so this is also the fixture for the repairs.
+const brokenGroup = async (productId, { name = 'Milk', minSelect = 1, options = [] } = {}) => {
+  const group = await prisma.modifierGroup.create({
+    data: { productId, name, minSelect, maxSelect: null, status: 'ACTIVE' },
+  });
+  const ids = [];
+  for (const o of options) {
+    const row = await prisma.modifierOption.create({
+      data: {
+        groupId: group.id,
+        name: o.name,
+        price: o.price.toFixed(2),
+        status: o.status ?? 'ACTIVE',
+      },
+    });
+    ids.push(row.id);
+  }
+  return [group.id, ...ids];
+};
 
-    // Accepted with no warning. The group stays ACTIVE with minSelect 1 and
-    // now has no ACTIVE option at all.
-    const archived = await patchOption(tokens.ownerA, p.id, g, o, { status: 'ARCHIVED' });
-    expect(archived.status, JSON.stringify(archived.body)).toBe(200);
+describe('a required group cannot be left unsatisfiable (D-5)', () => {
+  describe('the four ways in', () => {
+    // The first way in — POST with a minimum on a group that is born empty — is
+    // asserted up in 'creating a modifier group', next to the rest of that
+    // route's validation, rather than duplicated here.
 
-    // resolveCatalogLine builds its option index from ACTIVE options only, then
-    // enforces minSelect over ACTIVE groups. With the group active and every
-    // option archived there is no set of ids that satisfies it, so the product
-    // cannot be sold on ANY channel — till, phone or otherwise.
-    const without = await sell(p.id, []);
-    expect(without.status).toBe(400);
-    expect(without.body.error.message).toMatch(/Choose at least 1 from "Milk"/);
+    it('refuses archiving the last active option of a required group', async () => {
+      const p = await freshProduct();
+      const [g, whole] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1, maxSelect: 1 },
+        [{ name: 'Whole', price: 0 }],
+      );
+      expect((await sell(p.id, [whole])).status).toBe(201);
 
-    const withArchived = await sell(p.id, [o]);
-    expect(withArchived.status).toBe(400);
-    expect(withArchived.body.error.message).toMatch(/Unknown or archived modifier option/);
+      const res = await patchOption(tokens.ownerA, p.id, g, whole, { status: 'ARCHIVED' });
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error.code).toBe('POS_CONFLICT');
+      expect(res.body.error.message).toMatch(
+        /"Milk" would require 1 choice but only 0 are available/,
+      );
+      expect(res.body.error.message).toMatch(/Archive the whole group instead/);
 
-    // Recorded so the tripwire also documents the way out: archive the GROUP.
-    expect((await patchGroup(tokens.ownerA, p.id, g, { status: 'ARCHIVED' })).status).toBe(200);
-    expect((await sell(p.id, [])).status).toBe(201);
+      // The refusal has to be complete, not cosmetic: the option is still
+      // ACTIVE and the product still sells. A guard that 409s after writing
+      // would pass every assertion above and still have broken the catalog.
+      expect((await sell(p.id, [whole])).status).toBe(201);
+    });
+
+    it('refuses raising minSelect above the options that exist', async () => {
+      const p = await freshProduct();
+      const g = await makeGroup(p.id, { name: 'Toppings' });
+      const a = await makeOption(p.id, g, { name: 'Nuts', price: 10 });
+      const b = await makeOption(p.id, g, { name: 'Choc', price: 10 });
+
+      // maxSelect is null here, so the route's pre-existing `max < min` check is
+      // skipped entirely. This is the case that check never covered.
+      const res = await patchGroup(tokens.ownerA, p.id, g, { minSelect: 3 });
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error.message).toMatch(
+        /"Toppings" would require 3 choices but only 2 are available/,
+      );
+      expect(res.body.error.message).toMatch(/lower the minimum, or archive the whole group/);
+
+      // Two is the number it does have, and two is allowed.
+      const ok = await patchGroup(tokens.ownerA, p.id, g, { minSelect: 2 });
+      expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+      expect(groupNamed(ok, 'Toppings').minSelect).toBe(2);
+      expect((await sell(p.id, [a, b])).status).toBe(201);
+    });
+
+    it('refuses re-activating a group whose options were all archived meanwhile', async () => {
+      const p = await freshProduct();
+      const [g, whole] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1 },
+        [{ name: 'Whole', price: 0 }],
+      );
+      // Archiving the group is allowed, and so is emptying it afterwards — an
+      // archived group constrains nothing, so neither step can hurt anyone.
+      expect((await patchGroup(tokens.ownerA, p.id, g, { status: 'ARCHIVED' })).status).toBe(200);
+      expect((await patchOption(tokens.ownerA, p.id, g, whole, { status: 'ARCHIVED' })).status).toBe(200);
+      expect((await sell(p.id, [])).status).toBe(201);
+
+      // Bringing it back is where it would start hurting, so that is where it stops.
+      const res = await patchGroup(tokens.ownerA, p.id, g, { status: 'ACTIVE' });
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error.message).toMatch(
+        /"Milk" would require 1 choice but only 0 are available/,
+      );
+      expect((await sell(p.id, [])).status).toBe(201);
+    });
   });
 
-  it('TRIPWIRE: minSelect may be raised above the number of options that exist', async () => {
-    const p = await freshProduct();
-    const g = await makeGroup(p.id, { name: 'Toppings' });
-    const a = await makeOption(p.id, g, { name: 'Nuts', price: 10 });
-    const b = await makeOption(p.id, g, { name: 'Choc', price: 10 });
+  describe('what the guard must not get in the way of', () => {
+    it('archiving an option that is not the last one', async () => {
+      const p = await freshProduct();
+      const [g, whole, skim] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1, maxSelect: 1 },
+        [{ name: 'Whole', price: 0 }, { name: 'Skim', price: 5 }],
+      );
+      expect((await patchOption(tokens.ownerA, p.id, g, skim, { status: 'ARCHIVED' })).status).toBe(200);
+      expect((await sell(p.id, [whole])).status).toBe(201);
+      // And now Whole IS the last one.
+      expect((await patchOption(tokens.ownerA, p.id, g, whole, { status: 'ARCHIVED' })).status).toBe(409);
+    });
 
-    // maxSelect is null here, so the route's only cross-field check is skipped
-    // and nothing counts the options. Three required, two in existence.
-    const res = await patchGroup(tokens.ownerA, p.id, g, { minSelect: 3 });
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(groupNamed(res, 'Toppings').minSelect).toBe(3);
+    it('archiving the last option of a group that requires nothing', async () => {
+      const p = await freshProduct();
+      const g = await makeGroup(p.id, { name: 'Extras' });
+      const nuts = await makeOption(p.id, g, { name: 'Nuts', price: 10 });
+      expect((await patchOption(tokens.ownerA, p.id, g, nuts, { status: 'ARCHIVED' })).status).toBe(200);
+      expect((await sell(p.id, [])).status).toBe(201);
+    });
 
-    const both = await sell(p.id, [a, b]);
-    expect(both.status).toBe(400);
-    expect(both.body.error.message).toMatch(/Choose at least 3 from "Toppings"/);
+    it('editing an option without touching its status', async () => {
+      // minSelect 1 with exactly one option: the count is on the edge, and a
+      // guard that read `data.status` as ARCHIVED-when-absent would refuse this.
+      const p = await freshProduct();
+      const [g, whole] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1 },
+        [{ name: 'Whole', price: 0 }],
+      );
+      const res = await patchOption(tokens.ownerA, p.id, g, whole, { price: 7.5 });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(groupNamed(res, 'Milk').options[0].price).toBe(7.5);
+    });
+
+    it('archiving the whole group, which is the documented way to retire it', async () => {
+      const p = await freshProduct();
+      const [g] = await makeRequiredGroup(
+        p.id,
+        { name: 'Milk', minSelect: 1 },
+        [{ name: 'Whole', price: 0 }],
+      );
+      expect((await patchGroup(tokens.ownerA, p.id, g, { status: 'ARCHIVED' })).status).toBe(200);
+      expect((await sell(p.id, [])).status).toBe(201);
+    });
+  });
+
+  describe('a group that was already broken before the guard existed', () => {
+    // Rows like these are in any database that ran the old code. The guard is
+    // checked against the RESULT of the write, so it refuses unrelated edits to
+    // them too — deliberately, because that is the only moment anyone is looking.
+
+    it('refuses an unrelated edit, which is how the owner finds out at all', async () => {
+      const p = await freshProduct();
+      const [g] = await brokenGroup(p.id, {
+        minSelect: 1,
+        options: [{ name: 'Whole', price: 0, status: 'ARCHIVED' }],
+      });
+      // The premise: this product is already unsellable, and nothing in the
+      // catalog says so.
+      const blocked = await sell(p.id, []);
+      expect(blocked.status).toBe(400);
+      expect(blocked.body.error.message).toMatch(/Choose at least 1 from "Milk"/);
+
+      const res = await patchGroup(tokens.ownerA, p.id, g, { name: 'Dairy' });
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      // The name in the message is the one the write asked for, not the stored
+      // one, because the guard describes the state the write would leave behind.
+      expect(res.body.error.message).toMatch(/"Dairy" would require 1 choice but only 0 are available/);
+    });
+
+    it('lets you lower the minimum', async () => {
+      const p = await freshProduct();
+      const [g] = await brokenGroup(p.id, {
+        minSelect: 1,
+        options: [{ name: 'Whole', price: 0, status: 'ARCHIVED' }],
+      });
+      expect((await patchGroup(tokens.ownerA, p.id, g, { minSelect: 0 })).status).toBe(200);
+      expect((await sell(p.id, [])).status).toBe(201);
+    });
+
+    it('lets you restore the archived option', async () => {
+      const p = await freshProduct();
+      const [g, whole] = await brokenGroup(p.id, {
+        minSelect: 1,
+        options: [{ name: 'Whole', price: 0, status: 'ARCHIVED' }],
+      });
+      // The rule must never refuse the repair for the breakage it is reporting.
+      expect((await patchOption(tokens.ownerA, p.id, g, whole, { status: 'ACTIVE' })).status).toBe(200);
+      expect((await sell(p.id, [whole])).status).toBe(201);
+    });
+
+    it('lets you add a fresh option', async () => {
+      const p = await freshProduct();
+      const [g] = await brokenGroup(p.id, { minSelect: 1, options: [] });
+      const skim = await makeOption(p.id, g, { name: 'Skim', price: 5 });
+      expect((await sell(p.id, [skim])).status).toBe(201);
+    });
+
+    it('lets you archive the group', async () => {
+      const p = await freshProduct();
+      const [g] = await brokenGroup(p.id, { minSelect: 2, options: [{ name: 'Whole', price: 0 }] });
+      expect((await patchGroup(tokens.ownerA, p.id, g, { status: 'ARCHIVED' })).status).toBe(200);
+      expect((await sell(p.id, [])).status).toBe(201);
+    });
   });
 });
 
 // Sells one of the product through the ordinary till route. The order path is
 // the only place that can prove a catalog edit had the effect the edit claimed,
-// which is the whole point of the D-5 pair and of the two archive tests above.
+// and a D-5 refusal is worth nothing unless the product still sells afterwards.
 async function sell(productId, modifierOptionIds) {
   return request(app)
     .post('/api/orders')

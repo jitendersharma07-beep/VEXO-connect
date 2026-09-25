@@ -75,5 +75,12 @@ green suite. Every parameter the endpoint accepts is exercised too — `from`/`t
 `branchId`, `channel`, and all four `groupBy` values (`:294–296`, `:694`, `:697`).
 
 Raised on the shared task list as **#11**, flagged optional and non-blocking so
-it does not compete with **#10** (VC-104 D-1/D-2, which does need a decision).
+it does not compete with **#10** (VC-104 D-1/D-2, which did need a decision).
+Both were fixed on 09-24. What still needs one is the single D-2 limitation the
+fix does not close: an ASAP order reassigned after its own slot has elapsed
+occupies nothing, so a store can still be overfilled. It is being worked on
+branch `x/vc104-slot-anchor` — the anchor turns out to be derivable from the
+`REASSIGNED` event already written on every move, so it is a read change rather
+than the migration this note first claimed. See `docs/VC104-BACKEND-DEFECTS.md`
+§D-2 *What this does not settle*.
 Nothing here needs a decision before VC-105 ships.

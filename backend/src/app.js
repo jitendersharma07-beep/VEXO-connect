@@ -42,6 +42,10 @@ import reportingRoutes from './api/routes/reporting.js';
 // LANE foundation, Phase 2 — VC-102.
 import promotionRoutes from './api/routes/promotions.js';
 
+// LANE accounts — onboarding, invitations and account recovery.
+import accountRecoveryRoutes from './api/routes/accountRecovery.js';
+import invitationRoutes, { publicRouter as inviteAcceptRoutes } from './api/routes/invitations.js';
+
 export const createApp = () => {
   const app = express();
 
@@ -124,6 +128,17 @@ export const createApp = () => {
   });
   api.use('/health', healthRoutes);
   api.use('/auth', authRoutes);
+  // Second router on /auth: recovery is public and unauthenticated, and
+  // keeping it in its own file stops the signed-in surface and the
+  // not-signed-in-and-cannot-prove-anything surface sharing middleware by
+  // accident. Express falls through, so no path here collides with the above.
+  api.use('/auth', accountRecoveryRoutes);
+  // Accepting an invitation is unauthenticated by definition — the account
+  // does not exist yet — so it lives on its own path rather than under the
+  // managed surface, and no signed-in middleware can leak onto it by being
+  // added to the wrong router.
+  api.use('/invite', inviteAcceptRoutes);
+  api.use('/invitations', invitationRoutes);
   api.use('/dashboard', dashboardRoutes);
   api.use('/branches', branchRoutes);
   api.use('/users', userRoutes);

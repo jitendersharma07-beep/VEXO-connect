@@ -185,12 +185,15 @@ const discountAudit = (policy, before, after, approver, reason) => ({
 // Exported for LANE vc104-api: the phone-order centre snapshots catalog lines
 // the same way the till does. Exporting beats copying — a second copy would
 // drift the day this gains modifiers, and both paths must price identically.
-// That day is this merge. vc104 wrote its caller against the pre-modifier
-// signature and passes no modifierOptionIds; `?? []` below keeps that safe for
-// products whose groups are all optional, but the minSelect loop still runs,
-// so a product with a REQUIRED group is refused on the phone path with
-// "Choose at least N". See docs/VC104-BACKEND-DEFECTS.md D-3 — the phone-order
-// API needs a modifier field before such products can be sold over the phone.
+// That day was the a406 consolidation, and it drifted exactly as predicted:
+// vc104 had written its caller against the pre-modifier signature, so the
+// minSelect loop below refused every product with a REQUIRED group on the
+// phone path (D-3). Fixed 09-24 — `phoneOrders.js` now passes
+// modifierOptionIds, and shares `mergeCatalogItems` and `createLineData` with
+// the till below rather than keeping its own copies. The lesson the defect
+// actually taught: exporting the PRICING function was not enough, because the
+// line-merge key and the row writer encode the same modifier semantics and
+// those had been duplicated.
 export const resolveCatalogLine = async (companyId, { productId, variantId, qty, modifierOptionIds }) => {
   const product = await prisma.product.findFirst({
     where: { id: productId, companyId, status: 'ACTIVE' },
@@ -255,7 +258,27 @@ export const resolveCatalogLine = async (companyId, { productId, variantId, qty,
 // A line only merges with another line carrying the SAME modifier choice.
 const modifierKeyOf = (mods) => (mods ?? []).map((m) => m.optionId).sort().join(',');
 
-const createLineData = ({ modifiers, ...line }, orderId) => ({
+// The same rule stated over a REQUEST item rather than a resolved line: dedupe
+// and sort, because ["a","b"], ["b","a"] and ["a","a","b"] are one basket
+// choice and must land on one line. Shared with the phone path — D-3 came from
+// the phone centre carrying its own merge key that knew nothing about
+// modifiers, so two "same product, different topping" entries would have
+// collapsed into one line at whichever topping was seen first.
+export const mergeCatalogItems = (items) => {
+  const merged = new Map();
+  for (const item of items) {
+    const modKey = [...new Set(item.modifierOptionIds ?? [])].sort().join(',');
+    const key = `${item.productId}|${item.variantId ?? ''}|${modKey}`;
+    const cur = merged.get(key);
+    if (cur) cur.qty += item.qty;
+    else merged.set(key, { ...item });
+  }
+  return [...merged.values()];
+};
+
+// Exported for the same reason: a line's modifier snapshots are nested relation
+// rows, which rules out `createMany` on EVERY path that writes order items.
+export const createLineData = ({ modifiers, ...line }, orderId) => ({
   ...line,
   orderId,
   ...(modifiers.length
@@ -327,15 +350,8 @@ router.post(
     }
 
     // Merge duplicate product+variant+modifier entries into one line.
-    const merged = new Map();
-    for (const item of data.items) {
-      const key = `${item.productId}|${item.variantId ?? ''}|${[...new Set(item.modifierOptionIds ?? [])].sort().join(',')}`;
-      const cur = merged.get(key);
-      if (cur) cur.qty += item.qty;
-      else merged.set(key, { ...item });
-    }
     const lines = [];
-    for (const item of merged.values()) {
+    for (const item of mergeCatalogItems(data.items)) {
       lines.push(await resolveCatalogLine(req.companyScope.id, item));
     }
 

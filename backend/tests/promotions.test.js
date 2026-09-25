@@ -51,6 +51,7 @@ const wipe = async () => {
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -871,5 +872,111 @@ describe('modifier treatment', () => {
       });
     expect(res.status, JSON.stringify(res.body)).toBe(400);
     expect(res.body.error.message).toMatch(/modifier/i);
+  });
+});
+
+// --- D-6: what archiving a campaign costs ------------------------------------
+
+// Recorded, not asserted as desirable. `POST /:id/archive` had no test of any
+// kind before this block — it is the one lifecycle route the suite never drove
+// — so what follows pins the behaviour that is actually shipped, so that a
+// later policy decision changes a test on purpose rather than by accident.
+// See D-6 in docs/VC104-BACKEND-DEFECTS.md. The open question is whether
+// permanent code reservation is intended; these tests take no position on it.
+const archive = (token, id) =>
+  request(app).post(`/api/promotions/${id}/archive`).set(auth(token)).send({});
+
+describe('archiving a campaign (D-6)', () => {
+  it('is reachable from every live state, and is the end of the line', async () => {
+    const draft = await request(app).post('/api/promotions').set(auth(tokens.ownerA)).send(flat(1000));
+    expect((await archive(tokens.ownerA, draft.body.promotion.id)).status).toBe(200);
+
+    const published = await publishPromo(flat(1000));
+    expect((await archive(tokens.ownerA, published.id)).status).toBe(200);
+
+    const paused = await publishPromo(flat(1000));
+    expect((await request(app).post(`/api/promotions/${paused.id}/pause`).set(auth(tokens.ownerA)).send({})).status).toBe(200);
+    const done = await archive(tokens.ownerA, paused.id);
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect(done.body.promotion.status).toBe('ARCHIVED');
+  });
+
+  it('closes every move that could free the code, and there is no fourth', async () => {
+    const code = `BURN-${seq + 1}`;
+    const promo = await publishPromo(flat(2500, { code }));
+    expect((await archive(tokens.ownerA, promo.id)).status).toBe(200);
+
+    // 1. It cannot be edited, so the code cannot be changed off it.
+    const edited = await request(app)
+      .patch(`/api/promotions/${promo.id}`)
+      .set(auth(tokens.ownerA))
+      .send({ code: `${code}-OLD` });
+    expect(edited.status, JSON.stringify(edited.body)).toBe(409);
+    expect(edited.body.error.message).toMatch(/archived promotion cannot be edited/);
+
+    // 2. It cannot come back, so the code cannot be put to work again.
+    const republished = await request(app)
+      .post(`/api/promotions/${promo.id}/publish`)
+      .set(auth(tokens.ownerA))
+      .send({});
+    expect(republished.status, JSON.stringify(republished.body)).toBe(409);
+    expect((await request(app).post(`/api/promotions/${promo.id}/pause`).set(auth(tokens.ownerA)).send({})).status).toBe(409);
+    expect((await archive(tokens.ownerA, promo.id)).status).toBe(409);
+
+    // 3. Nobody else can take it. The unique index is on (companyId, code) with
+    //    no partial predicate, and the create route's duplicate check has no
+    //    status filter, so the archived row still answers for the code.
+    const reused = await request(app)
+      .post('/api/promotions')
+      .set(auth(tokens.ownerA))
+      .send(flat(2500, { code }));
+    expect(reused.status, JSON.stringify(reused.body)).toBe(409);
+    expect(reused.body.error.message).toMatch(new RegExp(`Code ${code} is already in use`));
+
+    // The row is still there holding it — this is reservation, not deletion.
+    const held = await prisma.promotion.findFirst({ where: { companyId: alpha.id, code } });
+    expect(held).toMatchObject({ id: promo.id, status: 'ARCHIVED', code });
+  });
+
+  it('leaves a discount that was already applied exactly as it was', async () => {
+    const promo = await publishPromo(percent(10, { code: `KEEP-${seq + 1}` }));
+    const order = await newOrder(tokens.cashierA1, a1.id); // ₹1000
+    expect((await applyPromo(tokens.cashierA1, order.id, { code: promo.code })).status).toBe(200);
+
+    expect((await archive(tokens.ownerA, promo.id)).status).toBe(200);
+
+    // The redemption snapshots name, code, version and amount at apply time, so
+    // archiving the campaign afterwards cannot re-price a bill that is already
+    // out. This is why D-6 is a lifecycle problem and not a money problem.
+    const after = await getOrder(tokens.cashierA1, order.id);
+    expect(after.discountAmount).toBe(100);
+    expect(after.total).toBe(900);
+    expect(after.promotions[0]).toMatchObject({
+      promotionId: promo.id,
+      code: promo.code,
+      amount: 100,
+      status: 'APPLIED',
+    });
+  });
+
+  it('does not reserve anything when the campaign had no code', async () => {
+    // `code` is nullable and Postgres allows many NULLs under a unique index, so
+    // an uncoded campaign cannot burn anything. Worth pinning: it bounds D-6 to
+    // coded campaigns, which is most of why the severity is Medium.
+    const first = await publishPromo(flat(700));
+    expect(first.code).toBeNull();
+    expect((await archive(tokens.ownerA, first.id)).status).toBe(200);
+
+    const second = await request(app).post('/api/promotions').set(auth(tokens.ownerA)).send(flat(700));
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+    expect(second.body.promotion.code).toBeNull();
+  });
+
+  it('is not a move a cashier can make', async () => {
+    const promo = await publishPromo(flat(300));
+    expect((await archive(tokens.cashierA1, promo.id)).status).toBe(403);
+    expect((await archive(tokens.mgrA1, promo.id)).status).toBe(403);
+    const still = await request(app).get('/api/promotions').set(auth(tokens.ownerA));
+    expect(still.body.promotions.find((p) => p.id === promo.id).status).toBe('PUBLISHED');
   });
 });
