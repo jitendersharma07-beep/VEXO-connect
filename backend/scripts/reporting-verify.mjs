@@ -853,9 +853,21 @@ const exc = await get(users.owner, '/reporting/exceptions', { preset: 'THIS_MONT
   check('I3 a detector that could not run reports no count and says why',
     could0not.every((d) => d.found === null && Boolean(d.note)),
     could0not.map((d) => d.kind).join(', '));
-  check('I4 a second scan of the same period raises nothing new',
-    scan.body?.raised === 0 && scan.body?.refreshed >= 0,
-    `raised ${scan.body?.raised}, refreshed ${scan.body?.refreshed}, cleared ${scan.body?.cleared}`);
+  // Runs its own second scan rather than treating the one above as the second
+  // after the seed's. The first scan of a demo database is entitled to raise
+  // findings that only became true since it was seeded: STALE_BRANCH_DATA is in
+  // the TRANSIENT set precisely because it is a condition, not a historical
+  // fact, so leaving the demo data alone for longer than staleAfterMinutes
+  // (180) makes every store that traded that day legitimately go stale. Observed
+  // 2026-09-25: the first scan raised 3, one per store that had been fresh when
+  // the seed ran — the detector working. The dedup claim is about the PAIR, and
+  // only the pair: whatever the first scan found, the scan immediately after it
+  // must add nothing.
+  const again = await post(users.owner, '/reporting/exceptions/scan?preset=THIS_MONTH', {});
+  check('I4 a scan immediately repeated raises nothing new',
+    again.status === 200 && again.body?.raised === 0 && again.body?.refreshed >= 0,
+    `first raised ${scan.body?.raised}, repeat raised ${again.body?.raised}, ` +
+      `refreshed ${again.body?.refreshed}, cleared ${again.body?.cleared}`);
 }
 {
   const rows = exc.body?.exceptions ?? [];
@@ -917,9 +929,17 @@ const exc = await get(users.owner, '/reporting/exceptions', { preset: 'THIS_MONT
     `HTTP ${r.status}, ${r.body?.exceptions?.length ?? 0} of their own, ${leaked.length} of ours`);
 }
 {
+  // Both numbers have to describe the same moment. `exc` at the top of this
+  // section was read BEFORE the scans in I2–I4, so comparing against it measured
+  // the order of the lines in this file rather than the agreement of two
+  // endpoints: any scan that raised anything made it fail, and on 2026-09-25 one
+  // legitimately did (dashboard 13 against a worklist snapshot of 10, the
+  // difference being exactly the 3 the scan had just raised). Re-read the
+  // worklist here.
   const dash = await get(users.owner, '/reporting/dashboard', { preset: 'THIS_MONTH' });
+  const nowList = await get(users.owner, '/reporting/exceptions', { preset: 'THIS_MONTH' });
   const s = dash.body?.exceptions;
-  const open = (exc.body?.exceptions ?? []).length;
+  const open = (nowList.body?.exceptions ?? []).length;
   check('I13 the dashboard band and the worklist agree on how many need action',
     Number(s?.open ?? -1) === open, `dashboard ${s?.open}, worklist ${open}`);
   check('I14 the dashboard band names the checks that could not run rather than implying a clear estate',

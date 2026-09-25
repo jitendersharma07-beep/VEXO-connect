@@ -220,7 +220,10 @@ export const reportAvailability = ({ key, label, cap, buildable }) => {
   return {
     state: UNAVAILABLE,
     note: cap
-      ? `${cap.label} is recorded, but this version does not build the ${label ?? key} report from it. No figures are shown rather than a zero.`
+      // The labels are plural noun phrases, so interpolating one as the subject
+      // of "is recorded" could not be right for any of them: "Kitchen and
+      // service delays is recorded" is the one an owner would have read first.
+      ? `${cap.label}: the data is recorded, but this version does not build the report from it. No figures are shown rather than a zero.`
       : 'This report is not part of this deployment.',
   };
 };
