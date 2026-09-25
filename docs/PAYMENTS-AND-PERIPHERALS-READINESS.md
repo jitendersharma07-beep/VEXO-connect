@@ -508,5 +508,12 @@ drawer and hold a card. Each line is a yes/no with a witness.
 
 ## Delivered commit
 
-Recorded at delivery; see `git log x/payments` for the commit that carries this
-document.
+| | |
+| --- | --- |
+| Branch | `x/payments` |
+| Tested from | `d5b1cb0` — "Let phone orders carry modifiers, and share the rules with the till (D-3)" |
+| Delivered | `1703cd6` — "Complete the payment and peripheral backend, and separate what each tender proves" |
+
+The 761-test run and the 9-check sandbox probe in §6 were both taken from the
+tree that became `1703cd6`. This line, and the commit that adds it, are the only
+difference.
