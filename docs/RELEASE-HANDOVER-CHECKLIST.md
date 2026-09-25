@@ -36,7 +36,7 @@ code changes to verified areas; documentation only after the freeze.
 | 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`), and a saved day close reported as "Could not file the closing" (`114ffc9`; also live in deployed v1.0.1 since `2c3acb1`) | RC-verified; `114ffc9` found and re-checked by Window 1's browser run on an RC-1-built stack | ✅ fixed, each moved a check FAIL → PASS |
 | 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser evidence ACCEPTED by the owner** 2026-09-23 (atc-noc dev stack, not a lab run, not full RC browser acceptance); one display per counter |
 | 5 | Physical receipt / KOT print | Browser-verified, **plus** hardware/driver hardware-verified (owner photos 2026-09-25) | ⏳ **STILL PENDING.** Run-book row 8 (hardware + Windows driver path) is **VERIFIED**; rows 1–7 and 9–11 — VEXO's own receipt, KOT and reprint on paper — are untested. A printer that self-tests proves the unit, not our output. `docs/PRINTER-UAT-RUNBOOK.md` |
-| 6 | Off-host encrypted backup | Scheduling and restore **re-measured 2026-09-24** — see §Off-host backup, which supersedes the `9ff94ac` bullets | 🟨 **Partly done** — installed, running, restore proven 16/16; **decryption still unproven** and destination-side deletion protection not verified |
+| 6 | Off-host encrypted backup | Scheduling and restore **re-measured 2026-09-24**; decryption **owner-run 2026-09-25** — see §Off-host backup and §Close-out, which supersede the `9ff94ac` bullets | 🟨 **Partly done** — installed, running, restore mechanism proven 16/16, and decryption now **PASS**. Still open: **no dump from an encrypted archive has been restored into a database** (the drill used a different, plaintext dump — see §Close-out), destination-side deletion protection not verified, and **CR-3 key custody open**, so recovery after losing `atc-noc` is still **no** |
 | 7 | Client onboarding (menu, stores, staff) | — | ⛔ **Blocked** — client data pack not supplied (B2) |
 | 8 | Reconcile against Product Master Specification v1.1 | — | ⛔ **Blocked** — document not held by anyone (B1) |
 | 9 | RC-1 in production | — | ⏸ **Owner decision**, then the deployment owner (B3) |
@@ -196,6 +196,127 @@ scenario off-host copies exist for. While `0F05CA51AEC13029` lives only in the
 `atc-noc` keyring — where `docs/BACKUP-RESTORE.md` says it must not be — the
 answer to "can the owner recover if this box dies?" is still **no**. Two
 different claims; one is now closed and one is open.
+
+### Close-out — 2026-09-25T07:25Z, at `ef567c6`
+
+#### One clean suite result for the combined code, bound to the tree that produced it
+
+Until now this ledger carried **790 tests / 30 files at `17058b9`**. That figure
+is **historical from here on**: `backend` at `17058b9` is tree `448b5371…`, and
+the candidate's is `72217e34…`. Different tree, so the old number describes code
+that is no longer the candidate. It is not deleted — a superseded measurement
+with its scope attached is worth more than a gap.
+
+Observed, replacing it:
+
+| | |
+|---|---|
+| Result | **32 files, 815 tests, all passed** |
+| Exit status | **0** — genuine, unfiltered |
+| Duration | 254.12 s, started 2026-09-25T04:29:09Z |
+| Commit run at | `fdaccdf` |
+| `backend` tree | `72217e347a8cf3037d6f8ba693f795d9d15d05d1` |
+| `backend/src` | `631eb3135e10fc06aad1b148c530e66daf05cdff` |
+| `backend/tests` | `24e007d22b281b28763a670d211974c22b513373` |
+| Log | `/tmp/vcxcr-full-suite.log`, complete and unfiltered |
+| Database | `vcx_staging_test` on the isolated dev Postgres (:5440) |
+
+**It transfers to the published commit by content, not by assumption.**
+`git rev-parse ef567c6:backend` is the same `72217e34…`, and
+`git diff --name-only 3fbc35a..ef567c6` returns nothing outside `docs/` and
+`deploy/` — six commits, not one line of `backend/`. So the tested source and the
+published source are the same bytes; re-running would measure an identical tree a
+second time, which is why it was not re-run. Had any of those commits touched
+`backend/`, this paragraph would not exist and the suite would have been re-run.
+
+**Bound by content, not by clock.** The run logs those tree hashes *before* and
+*after* itself, both sets identical, working tree CLEAN against `HEAD` and zero
+untracked files under `backend/` at both ends. That matters specifically here:
+my earlier 790-test run overlapped a peer's edit to `backend/src/permissions.js`
+mid-run, so on this branch a timestamp is not acceptable evidence. Four other
+sessions committed to it today. This run has a provable absence of that problem
+rather than an assurance against it.
+
+No test was skipped, excluded or deselected: the summary reads `815 passed (815)`
+with no skip count, `grep` for `.skip`/`.only`/`.todo` across `backend/tests/`
+returns nothing, and `vitest.config` adds no `exclude`, `bail` or
+`passWithNoTests`. The one line in the log containing the word "skipped" is a
+*test name* — `globalLimiter skipped (NODE_ENV=test at load)` — and it passed.
+
+The two files added since the previous run were also exercised alone first:
+`tests/licenseModuleGate.test.js` (14) and `tests/authTenantIsolation.test.js`
+(11) — **25 tests, exit 0**. Both numbers are worth keeping: a solo run starts
+from a `TRUNCATE`d database, and that exact difference hid an FK collision in my
+own new test file earlier this session. Passing alone and passing in the suite
+are two claims; both are now made.
+
+One invocation note, recorded because it produced a real exit 1 that was **not**
+a test failure: vitest path filters resolve against its root, `backend/`, so
+`backend/tests/x.test.js` matches nothing and the run exits 1 with `No test files
+found`. `tests/x.test.js` is the correct form. An exit 1 meaning "your filter was
+wrong" must never be filed as a failing suite — or, worse, as a passing one.
+
+#### The five verdicts, kept apart
+
+| Claim | Verdict |
+|---|---|
+| Remote archive retrieval, decryption, dump-vs-manifest integrity | **PASS** — owner-run 2026-09-25T03:57:11Z on `pos-prod-20260924T211406Z.tar.gpg`, inner dump `45cc0768…` |
+| Actual database restore **from that archive** | **NOT VERIFIED** — see below |
+| Recovery after loss of `atc-noc` (CR-3) | **OPEN** — the only usable private key is on that host |
+| Public staging hostname | **PENDING** — the name is now known (`staging.vexoconnect.com`, owner-supplied), but it resolves NXDOMAIN and nothing has been created |
+| Mail provider | **PENDING** — the provider is now known (cPanel), but `SMTP_HOST` is unset on staging, so `mailEnabled` is false and nothing has ever been sent |
+
+The last two rows moved from "we do not know what to build" to "we know what to
+run" — preparation, not status. Both verdicts are unchanged, and a named
+hostname is not a reachable one.
+
+**The restore verdict is a correction to this ledger, not a new limitation.**
+Both this file and `evidence/07b` previously said the restore was already proven
+"against the identical dump". It was not the identical dump. The 16/16 drill
+restored `pos-prod-20260923T211456Z.dump` — `74367d90…`, 101 869 bytes, 23
+tables, taken 09-23. The archive the owner decrypted contains `45cc0768…`,
+102 726 bytes, 24 models, taken 09-24. A day apart, different bytes.
+
+Two disjoint halves are proven and the join is not: **no dump has ever been taken
+out of an encrypted archive and loaded into Postgres.** The restore *mechanism*
+is proven; the restorability of the archive that was actually decrypted is not.
+The gap is narrow and cheap to close — `restore_drill.py` aimed at the decrypted
+dump would do it — but "both halves passed, so the chain works" is an inference,
+and this row is exactly where an inference would have been filed as a result.
+Correction table in `evidence/07-backup-recovery.md`.
+
+Nothing was deleted, pruned, moved or exported to reach these verdicts: 24 files
+remain in `~/atc-backups/pos-prod/`, the secret key remains in the keyring, and
+no private key, passphrase, decrypted dump or credential is in this repository.
+
+#### Publication
+
+Pushed to the existing GitHub remote, confirmed from GitHub's own responses
+rather than from the SSH alias `github-vexo-connect`:
+
+- `ssh -T` authenticates as **`jitendersharma07-beep/VEXO-connect`** — a
+  *repository*, not a user. That key is therefore a repo-scoped deploy key and
+  cannot reach the owner's other repositories. Worth knowing before trusting it
+  with anything wider.
+- The API returns `full_name: jitendersharma07-beep/VEXO-connect`,
+  `private: false`, `visibility: public`, `fork: false`, `archived: false`,
+  default branch `sprint/client-handover-rc`.
+
+**The repository is public, and that is the operative fact for everything pushed
+here.** The outgoing diff was scanned on that basis: the only IP literal in any
+added line is loopback, `127.0.0.1` — no public address, no lab address, no
+internal address of any kind. The only added hostnames are a reserved `.test`
+name and `atcworkspace.com`, already present 75 times in the published tree
+including `README.md` and `.env.example`, so not a new disclosure.
+
+That scan caught one thing in *this* section. An earlier draft listed the
+addresses it had checked for by writing them out — which would have added the
+lab's IP to a public repository in the course of asserting no such IP was
+present, and made the sentence false about itself. A negative claim does not
+need to reproduce what it denies. Rewritten above to name the classes instead.
+
+The evidence directory stays outside this repository, which is what makes these
+documents publishable at all.
 
 ## VC-101 evidence — with provenance
 
