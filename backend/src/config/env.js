@@ -43,6 +43,18 @@ export const env = {
   // A provider call that never returns must not hold a cashier, or a request
   // handler, forever. Exceeding this is UNKNOWN, never "refused".
   POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
+  // Encrypts the per-tenant merchant credentials stored in
+  // PaymentProviderAccount. Unset is the normal, shipped state: a deployment
+  // with no stored accounts never needs it, and the gateway falls back to the
+  // single-account POS_GATEWAY_KEY_* variables above. Validated below only if
+  // present — see lib/gateway/secrets.js for why it is read lazily.
+  POS_PAYMENT_SECRET_KEY: process.env.POS_PAYMENT_SECRET_KEY || null,
+  // Which card-terminal connector the store's terminals speak. Unset
+  // everywhere: no terminal vendor's SDK has been supplied, so the terminal
+  // routes refuse for the same reason the gateway routes do. See
+  // lib/terminal/index.js for the connectors that exist and what each is
+  // waiting on.
+  POS_TERMINAL_PROVIDER: process.env.POS_TERMINAL_PROVIDER || null,
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
@@ -106,4 +118,18 @@ if (env.POS_GATEWAY_API_BASE) {
 }
 if (!Number.isFinite(env.POS_GATEWAY_TIMEOUT_MS) || env.POS_GATEWAY_TIMEOUT_MS <= 0) {
   throw new Error('POS_GATEWAY_TIMEOUT_MS must be a positive number of milliseconds');
+}
+// A key of the wrong length fails at the first decrypt, which is the moment a
+// customer is standing at the counter. Refuse at boot instead, while nobody is
+// mid-transaction — the same rule the webhook secret follows. A short or
+// non-hex key is also the shape a truncated copy-paste takes, and half a key
+// is not a weaker key: it is an unreadable column of ciphertext.
+if (env.POS_PAYMENT_SECRET_KEY !== null && !/^[0-9a-fA-F]{64}$/.test(env.POS_PAYMENT_SECRET_KEY)) {
+  throw new Error('POS_PAYMENT_SECRET_KEY must be 64 hex characters (32 bytes)');
+}
+// The test terminal connector reports approvals on command, so production must
+// never be able to name it — the same distance the gateway keeps between
+// "verified by the provider" and "fake success".
+if (env.NODE_ENV === 'production' && env.POS_TERMINAL_PROVIDER?.startsWith('sim')) {
+  throw new Error(`Terminal connector "${env.POS_TERMINAL_PROVIDER}" cannot be used in production`);
 }

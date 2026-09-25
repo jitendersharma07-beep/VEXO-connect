@@ -8,16 +8,45 @@
 // owner, and until then this module's job is to refuse cleanly rather than to
 // pretend.
 //
-// ADAPTER CONTRACT. A provider is an object with a name and three methods:
+// ADAPTER CONTRACT. A provider is an object with a name, a capability
+// declaration and three required methods.
 //
-//   createSession({ amountPaise, currency, orderId, idempotencyKey })
+//   capabilities
+//     -> { createSession, getStatus, cancel, createRefund, partialRefund,
+//          fetchSettlement, verifyWebhook, checkoutHandoff,
+//          perAccountCredentials, cardPresent, contactless }
+//     All booleans, all required, none inferred. A capability declared false
+//     means the provider does not offer it — not that this codebase has not
+//     got round to it — and the adapter must say which in a comment beside the
+//     flag. Callers branch on this rather than on `typeof adapter.x ===
+//     'function'`, because a missing method cannot explain itself and an
+//     operator reading a readiness matrix needs the reason, not the gap.
+//
+//     cardPresent and contactless are in here to be false. An online checkout
+//     integration collects money through a browser or a payment link; it does
+//     not drive a card terminal, read a chip or accept a tap. Those need a
+//     terminal connector and a physical device — lib/terminal/, a different
+//     integration entirely — and no amount of gateway configuration produces
+//     card-present acceptance. The flags exist so that is machine-readable
+//     rather than a thing somebody has to know.
+//
+//   createSession({ amountPaise, currency, orderId, idempotencyKey, credentials })
 //     -> { providerRef, checkoutUrl }
 //     Opens one attempt to collect amountPaise. Must pass idempotencyKey to
 //     the provider so a retry returns the first attempt instead of opening a
 //     second one the customer could also pay.
 //
+// CREDENTIALS. Every method that reaches the provider takes `credentials`
+// ({ keyId, keySecret }), supplied by the caller from the merchant account the
+// ORDER resolves to — see lib/gateway/accounts.js. An adapter must not read
+// credentials out of the environment for itself: on a multi-tenant deployment
+// that is the same as settling every company's takings into one bank account,
+// which is what a process-global credential can only ever do. Adapters may fall
+// back to the environment pair when the caller passes nothing, which preserves
+// the single-account deployment this code was first written for.
+//
 //   createRefund({ intentProviderRef, chargeProviderRef, amountPaise, currency,
-//                  orderId, idempotencyKey })
+//                  orderId, idempotencyKey, credentials })
 //     -> { providerRef }
 //     Asks the provider to return amountPaise from the payment that took it.
 //     Two references, because providers do not agree on how many there are:
@@ -43,11 +72,35 @@
 //     let an attacker squat the idempotency key with a forged id and block
 //     the genuine event for good. The caller cannot misuse what it is not given.
 //
-// Two methods are OPTIONAL. The first exists because not every provider has a
-// browser step; the second because not every provider can be asked after the
-// fact what it did.
+// Four methods are OPTIONAL, and each is optional because a real provider
+// genuinely may not offer it.
 //
-//   fetchSettlement({ intentProviderRef })
+//   getStatus({ intentProviderRef, credentials })
+//     -> { status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNCERTAIN',
+//          chargeRef?, amountPaise?, currency?, method?, detail? }
+//     Where has this attempt got to? This is the question the CASHIER'S SCREEN
+//     asks, and it is deliberately not the question fetchSettlement asks. The
+//     difference is PENDING: an attempt in flight is a real and common state,
+//     and fetchSettlement cannot express it because a caller that may write a
+//     payment must never be able to read "not yet" as "no".
+//
+//     A status this adapter does not recognise is UNCERTAIN, never a guess.
+//     Guessing PENDING leaves a paid bill open; guessing SUCCEEDED closes an
+//     unpaid one. UNCERTAIN is the only honest answer and the caller must
+//     surface it as such rather than resolving it.
+//
+//     NOTHING here may record a payment. A status enquiry is a read.
+//
+//   cancel({ intentProviderRef, credentials })
+//     -> { cancelled: true }
+//     Makes the attempt unpayable AT THE PROVIDER. Declare it false unless the
+//     provider publishes an endpoint that actually does this — Razorpay, for
+//     one, does not, and a "cancel" that only closes our own row while the
+//     provider's page stays live is a lie the customer can disprove by paying.
+//     Where it is false the POS may still close its own intent, and it must say
+//     plainly that the provider's page may remain payable until it expires.
+//
+//   fetchSettlement({ intentProviderRef, credentials })
 //     -> { settled: true, providerRef, chargeRef, amountPaise, currency,
 //          method, captured, receipt, posOrderId }
 //      | { settled: false, reason }
@@ -78,7 +131,16 @@
 //     as "reconciliation unavailable" and say so, rather than falling back to
 //     anything that writes a payment on weaker evidence.
 //
-//   verifyCheckoutHandoff({ intentProviderRef, paymentId, signature })
+//   verifyCredentials({ credentials })
+//     -> { ok: boolean, detail: string }
+//     Do these keys authenticate? Must be a READ at the provider that takes no
+//     money and creates nothing. ok:false means the provider said no — NOT that
+//     the provider could not be reached, which is an unanswered question and
+//     must be reported in `detail` as such. Telling an operator their key is
+//     wrong because the network was down sends them to re-enter a correct key,
+//     and the second copy is the one with the typo in it.
+//
+//   verifyCheckoutHandoff({ intentProviderRef, paymentId, signature, credentials })
 //     -> boolean
 //     Proves the three values the provider's in-browser checkout handed back
 //     came from the provider and not from the page's own JavaScript. It is a

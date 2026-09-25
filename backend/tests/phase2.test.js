@@ -1067,7 +1067,15 @@ describe('daily closing', () => {
     const orderId = o.body.order.id;
     await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
     await prisma.payment.create({
-      data: { orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY', amount: '500.00', providerRef: `pay_probe_${Date.now()}` },
+      data: {
+        orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY',
+        // Stated because the database now requires channel and entrySource to
+        // agree. A GATEWAY row is one the provider confirmed; leaving it at
+        // the MANUAL_ENTRY default would have the row claim a cashier typed a
+        // payment nobody typed.
+        entrySource: 'PROVIDER_CONFIRMED',
+        amount: '500.00', providerRef: `pay_probe_${Date.now()}`,
+      },
     });
     const mgr = await prisma.posUser.findFirst({ where: { branchId: branchA1.id, role: 'BRANCH_MANAGER' } });
     await prisma.refund.create({
@@ -1320,7 +1328,11 @@ describe('daily closing', () => {
     const orderId = o.body.order.id;
     await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
     await prisma.payment.create({
-      data: { orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY', amount: '250.00', providerRef: `pay_post_${Date.now()}` },
+      data: {
+        orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY',
+        entrySource: 'PROVIDER_CONFIRMED',
+        amount: '250.00', providerRef: `pay_post_${Date.now()}`,
+      },
     });
 
     const p = (await preview(tokens.managerA1)).body.existingClose.postClose;
