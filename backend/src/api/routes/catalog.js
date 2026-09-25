@@ -572,6 +572,32 @@ const assertSatisfiable = ({ name, minSelect, status, activeOptions }, remedy) =
 
 const countActive = (group) => group.options.filter((m) => m.status === 'ACTIVE').length;
 
+// D-7. The guard above reads the group, decides, and then writes — three
+// statements with no transaction around them, which is correct for one caller
+// and not for two. Measured 2026-09-24 against an isolated database, not
+// inferred: two concurrent archives of the last two options of a minSelect-1
+// group each read "2 active", each computed 2-1=1, each passed, and both wrote.
+// Result 200/200 and ZERO active options on an ACTIVE required group — the
+// exact unsellable product D-5 exists to prevent, reached THROUGH its guard.
+// The cross-route pair races the same way: raising minSelect to 2 while the
+// last spare option is archived leaves minSelect 2 with 1 option.
+//
+// The lock is on the ModifierGroup row and BOTH routes take the same one, which
+// is what makes the cross-route case serialize too. It is held to commit, so
+// the counts read after it cannot be overtaken.
+//
+// Chosen over an optimistic version column because that needs a migration and a
+// retry protocol at every caller, for a contention rate that is — on catalogue
+// editing — effectively zero. This is a correctness floor, not a hot path.
+const lockGroup = (tx, groupId) =>
+  tx.$queryRaw`SELECT id FROM "ModifierGroup" WHERE id = ${groupId} FOR UPDATE`;
+
+// Deliberately NOT countActive(group): that counts the copy loadGroup read
+// before the lock existed, which is precisely the stale number the race turned
+// on. This one is read inside the transaction, after the lock.
+const activeOptionsIn = (tx, groupId) =>
+  tx.modifierOption.count({ where: { groupId, status: 'ACTIVE' } });
+
 router.post(
   '/products/:id/modifier-groups',
   ...canWrite,
@@ -621,39 +647,56 @@ router.patch(
   '/products/:id/modifier-groups/:groupId',
   ...canWrite,
   asyncHandler(async (req, res) => {
+    // Scope and existence FIRST, and outside the transaction: a caller from
+    // another company must get 404 without ever reaching the guard, because the
+    // guard's message names the group. Taking a lock before that would also let
+    // a stranger stall an owner's edit.
     const { product, group } = await loadGroup(req);
     const data = groupUpdate.parse(req.body);
-    const min = data.minSelect ?? group.minSelect;
-    const max = data.maxSelect !== undefined ? data.maxSelect : group.maxSelect;
-    if (max != null && max < min) throw badRequest('maxSelect must be at least minSelect', 'maxSelect');
+
     // D-5, two ways in through this one route: raising minSelect past the
     // options that exist, and re-activating a group whose options were all
-    // archived while it was away. `max < min` above was the only cross-field
+    // archived while it was away. `max < min` below was the only cross-field
     // check here, and it is skipped whenever maxSelect is null — the default.
-    assertSatisfiable(
-      {
-        name: data.name ?? group.name,
-        minSelect: min,
-        status: data.status ?? group.status,
-        activeOptions: countActive(group),
-      },
-      'Add or restore options first, or lower the minimum, or archive the whole group.',
-    );
-    if (data.name && data.name !== group.name) {
-      const clash = await prisma.modifierGroup.findFirst({
-        where: { productId: product.id, name: data.name },
+    //
+    // D-7: decide and write under the group's row lock, against numbers read
+    // after taking it. `group` above is a pre-lock snapshot and is used only for
+    // the 404 and for the audit id; every value the decision turns on is
+    // re-read inside.
+    await prisma.$transaction(async (tx) => {
+      await lockGroup(tx, group.id);
+      const fresh = await tx.modifierGroup.findUnique({ where: { id: group.id } });
+      if (!fresh) throw notFound('Modifier group not found');
+      const min = data.minSelect ?? fresh.minSelect;
+      const max = data.maxSelect !== undefined ? data.maxSelect : fresh.maxSelect;
+      if (max != null && max < min) throw badRequest('maxSelect must be at least minSelect', 'maxSelect');
+      assertSatisfiable(
+        {
+          name: data.name ?? fresh.name,
+          minSelect: min,
+          status: data.status ?? fresh.status,
+          activeOptions: await activeOptionsIn(tx, group.id),
+        },
+        'Add or restore options first, or lower the minimum, or archive the whole group.',
+      );
+      if (data.name && data.name !== fresh.name) {
+        const clash = await tx.modifierGroup.findFirst({
+          where: { productId: product.id, name: data.name },
+        });
+        if (clash) throw conflict(`Modifier group "${data.name}" already exists on this product`);
+      }
+      await tx.modifierGroup.update({
+        where: { id: group.id },
+        data: {
+          ...(data.name !== undefined ? { name: data.name } : {}),
+          ...(data.minSelect !== undefined ? { minSelect: data.minSelect } : {}),
+          ...(data.maxSelect !== undefined ? { maxSelect: data.maxSelect } : {}),
+          ...(data.status !== undefined ? { status: data.status } : {}),
+        },
       });
-      if (clash) throw conflict(`Modifier group "${data.name}" already exists on this product`);
-    }
-    await prisma.modifierGroup.update({
-      where: { id: group.id },
-      data: {
-        ...(data.name !== undefined ? { name: data.name } : {}),
-        ...(data.minSelect !== undefined ? { minSelect: data.minSelect } : {}),
-        ...(data.maxSelect !== undefined ? { maxSelect: data.maxSelect } : {}),
-        ...(data.status !== undefined ? { status: data.status } : {}),
-      },
     });
+    // Audited after commit on purpose: a rolled-back edit must leave no audit
+    // row claiming it happened.
     await audit(req, {
       action: 'MODIFIER_GROUP_UPDATE',
       entity: 'Product',
@@ -701,6 +744,7 @@ router.patch(
   '/products/:id/modifier-groups/:groupId/options/:optionId',
   ...canWrite,
   asyncHandler(async (req, res) => {
+    // Scope and existence first, outside the transaction — see the group route.
     const { product, group } = await loadGroup(req);
     const option = group.options.find((m) => m.id === req.params.optionId);
     if (!option) throw notFound('Modifier option not found');
@@ -708,30 +752,42 @@ router.patch(
     // D-5's commonest way in: retiring the last choice a required group has.
     // Counted both directions, because restoring an archived option is the
     // repair and must never be refused by the rule it repairs.
-    const wasActive = option.status === 'ACTIVE';
-    const willBeActive = data.status !== undefined ? data.status === 'ACTIVE' : wasActive;
-    assertSatisfiable(
-      {
-        name: group.name,
-        minSelect: group.minSelect,
-        status: group.status,
-        activeOptions: countActive(group) - (wasActive ? 1 : 0) + (willBeActive ? 1 : 0),
-      },
-      'Archive the whole group instead, or lower its minimum first.',
-    );
-    if (data.name && data.name !== option.name) {
-      const clash = await prisma.modifierOption.findFirst({
-        where: { groupId: group.id, name: data.name },
+    //
+    // D-7: the same lock as the group route, on the GROUP row rather than the
+    // option — two archives of two DIFFERENT options are the race, so a
+    // per-option lock would not have serialized them.
+    await prisma.$transaction(async (tx) => {
+      await lockGroup(tx, group.id);
+      const fresh = await tx.modifierGroup.findUnique({ where: { id: group.id } });
+      const freshOption = await tx.modifierOption.findUnique({ where: { id: option.id } });
+      if (!fresh) throw notFound('Modifier group not found');
+      if (!freshOption) throw notFound('Modifier option not found');
+      const wasActive = freshOption.status === 'ACTIVE';
+      const willBeActive = data.status !== undefined ? data.status === 'ACTIVE' : wasActive;
+      assertSatisfiable(
+        {
+          name: fresh.name,
+          minSelect: fresh.minSelect,
+          status: fresh.status,
+          activeOptions:
+            (await activeOptionsIn(tx, group.id)) - (wasActive ? 1 : 0) + (willBeActive ? 1 : 0),
+        },
+        'Archive the whole group instead, or lower its minimum first.',
+      );
+      if (data.name && data.name !== freshOption.name) {
+        const clash = await tx.modifierOption.findFirst({
+          where: { groupId: group.id, name: data.name },
+        });
+        if (clash) throw conflict(`Option "${data.name}" already exists in this group`);
+      }
+      await tx.modifierOption.update({
+        where: { id: option.id },
+        data: {
+          ...(data.name !== undefined ? { name: data.name } : {}),
+          ...(data.price !== undefined ? { price: data.price.toFixed(2) } : {}),
+          ...(data.status !== undefined ? { status: data.status } : {}),
+        },
       });
-      if (clash) throw conflict(`Option "${data.name}" already exists in this group`);
-    }
-    await prisma.modifierOption.update({
-      where: { id: option.id },
-      data: {
-        ...(data.name !== undefined ? { name: data.name } : {}),
-        ...(data.price !== undefined ? { price: data.price.toFixed(2) } : {}),
-        ...(data.status !== undefined ? { status: data.status } : {}),
-      },
     });
     await audit(req, {
       action: 'MODIFIER_OPTION_UPDATE',

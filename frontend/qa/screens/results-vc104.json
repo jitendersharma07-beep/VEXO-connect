@@ -1,11 +1,21 @@
 {
   "ui": "http://127.0.0.1:5383",
   "api": "http://127.0.0.1:5382",
-  "at": "2026-09-24T19:15:48.164Z",
-  "tree": "/home/atc-noc/vexo-connect-x-lanes/main-merge",
-  "branch": "main",
-  "baseSha": "d5b1cb04789e4adb94b3e57e3374d62b904f4069",
+  "at": "2026-09-25T02:03:06.738Z",
+  "tree": "/home/atc-noc/vexo-connect-x-lanes/w2-close",
+  "branch": "x/w2-integration-close",
+  "baseSha": "71315d442c60541b91ae9bdf716bb44610f87eb6",
   "dirty": true,
+  "contentSha": "f0068313f8ad4fb510e7fbd3fc30e8a99a6a11b6",
+  "runtime": {
+    "backendCwd": "/home/atc-noc/vexo-connect-x-lanes/w2-close/backend",
+    "backendInTree": true,
+    "database": "atc_pos_vc104ui_demo",
+    "schemaDigest": "a4215343d532",
+    "migrationsOnDisk": 22
+  },
+  "aborted": false,
+  "exitCode": 0,
   "passed": 75,
   "skipped": 0,
   "total": 75,
@@ -191,8 +201,8 @@
     {
       "name": "the replay returns the SAME order id",
       "pass": true,
-      "actual": "cmufwv31h000b12y6rxwqrquu",
-      "expected": "cmufwv31h000b12y6rxwqrquu",
+      "actual": "cmugbewsj000bt1sa7gxqq7mc",
+      "expected": "cmugbewsj000bt1sa7gxqq7mc",
       "note": ""
     },
     {
@@ -459,14 +469,14 @@
       "pass": true,
       "actual": true,
       "expected": true,
-      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–00:00 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
     },
     {
       "name": "the refusal carries the 2/2 count",
       "pass": true,
       "actual": true,
       "expected": true,
-      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–00:00 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
     },
     {
       "name": "CP is untouched by CH capacity",
@@ -480,28 +490,28 @@
       "pass": true,
       "actual": true,
       "expected": true,
-      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 0/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Available — no \"n/m booked\" means the server sent no capacity block"
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–00:00 · 1/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Available — no \"n/m booked\" means the server sent no capacity block"
     },
     {
       "name": "one ASAP submission moves the booked count by exactly one (D-2)",
       "pass": true,
       "actual": 1,
       "expected": 1,
-      "note": "CH went 0/2 → 2/2; before the fix an ASAP order was invisible to the counter and this stayed 0"
+      "note": "CH went 1/2 → 2/2; before the fix an ASAP order was invisible to the counter and this stayed 0"
     },
     {
       "name": "a full CH slot refuses ASAP too, with Kitchen full",
       "pass": true,
       "actual": true,
       "expected": true,
-      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–00:00 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
     },
     {
       "name": "the ASAP refusal carries the full count",
       "pass": true,
       "actual": true,
       "expected": true,
-      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–23:59 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
+      "note": "CH row: Brew Street Café — Cyber Hub BSC-CH 00:00–00:00 · 2/2 booked this 15-min slot Delivery ₹65.00 · min order ₹300.00 Unavailable Kitchen full Kitchen is full for that time (2/2)"
     },
     {
       "name": "cashier nav never offers Phone orders",
