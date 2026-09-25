@@ -5,6 +5,7 @@ import { recoveryLimiter } from '../../middleware/rateLimit.js';
 import { badRequest, asyncHandler, AppError } from '../../lib/errors.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { audit, auditRequired, clientIp } from '../../lib/audit.js';
+import { logger } from '../../lib/logger.js';
 import { mailEnabled } from '../../config/env.js';
 import { sendMailBestEffort } from '../../lib/mail/mailer.js';
 import { resetCodeEmail, passwordChangedEmail } from '../../lib/mail/templates.js';
@@ -142,7 +143,24 @@ const requestHandler = asyncHandler(async (req, res) => {
     // pressing. It leaks only that this address has been asked about recently,
     // which the attacker already knows — they are the one who asked.
     if (err instanceof ChallengeThrottled) throw throttled(err.retryAfterSeconds);
-    throw err;
+
+    // Everything else here is a delivery problem, and it is ours, not the
+    // caller's. Letting it surface would answer a registered address with a
+    // 500 while an unregistered one gets the 200 returned above — which never
+    // reaches this code at all, because there is nobody to mail. That
+    // difference is an account oracle, and it opens exactly when a provider is
+    // misconfigured or down: the moment the deployment is least able to notice
+    // and an attacker is most able to enumerate. So the answer stays identical
+    // and the operator is told instead.
+    //
+    // sendMail writes a FAILED outbox row before it throws, but an allow-list
+    // refusal is rejected before that row is ever created — so for that case
+    // this line is the only trace there will be. It carries no address: the
+    // outbox row holds the recipient, and this log does not need to.
+    logger.warn(
+      { userId: user.id, reason: err?.name ?? 'delivery-failed' },
+      'recovery code not delivered',
+    );
   }
   res.json(ACCEPTED);
 });

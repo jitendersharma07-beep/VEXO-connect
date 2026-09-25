@@ -135,6 +135,7 @@ model Company {
 
   // LANE providers
   integrationConnections IntegrationConnection[]
+
 }
 
 model Branch {

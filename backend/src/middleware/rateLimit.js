@@ -14,7 +14,7 @@ const isTest = process.env.NODE_ENV === 'test';
 // of them.
 //
 // It cannot weaken anything. The flag is only ever read alongside `isTest`, so
-// outside a test run `shouldSkip` is false whatever the flag says — there is no
+// outside a test run `skipInTest` is false whatever the flag says — there is no
 // value of it that disables a limiter in production. Callers are expected to
 // set it back to false in a finally/afterAll; tests/gateway.test.js and
 // tests/accountRecovery.test.js both do.

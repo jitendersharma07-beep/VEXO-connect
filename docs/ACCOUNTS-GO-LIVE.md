@@ -351,6 +351,19 @@ HTTP, reading mail out of a real SMTP conversation, on a fresh database. It
 covers bootstrap → last-admin protection → company → licence → owner invitation
 → accept → sign-in → recovery by code → hiring a colleague by emailed code →
 the oracle check.
+**Proven.** 785 backend tests across 29 files, and `deploy/accounts-journey.mjs`:
+47 checks driving the real built bundle in headless Chromium against a real
+backend over HTTP, reading mail out of a real SMTP conversation, on a fresh
+database. It covers bootstrap → last-admin protection → company → licence →
+owner invitation → accept → sign-in → recovery by code → hiring a colleague by
+emailed code → the oracle check.
+
+The oracle check is stronger than it was. `accountRecoveryOutage.test.js` holds
+it **while the mail provider is failing** — a registered address and an
+unregistered one answer identically when SMTP refuses the connection, where
+previously the registered one returned 500 and the unregistered one 200. That
+difference was readable by anyone, and it appeared precisely during a
+misconfiguration: the state step 1 of this document walks through.
 
 ```
 # fresh, migrated database required — the script asserts it and refuses otherwise
@@ -436,6 +449,23 @@ The remaining way to discriminate would be a `POST` to a recovery or invitation
 route, which **writes rows and can send mail in someone else's environment** — so
 it was not done. **Verifying accounts on staging is the staging owner's call, on
 their stack, and it is handed to them rather than assumed.**
+**Not proven.** Delivery through a real provider. Every message so far has gone
+to a local sink that relays nothing — and that includes the journey script
+itself, which **overwrites** `SMTP_HOST` with a loopback sink at line 145. It
+will pass identically against a correctly configured provider and against no
+provider at all, so it cannot be the evidence for this item. Nor can any
+backend test. Only a mailbox can.
+
+Step 1 is the gap, and after step 1 the first real evidence is the bootstrap
+invitation arriving in the owner's mailbox.
+
+**Which mailbox is an open question.** This document has said
+`support@vexoconnect.com`; the cloud-readiness brief supplies
+`ai.atcinfo@gmail.com`. They are not the same address and nothing here can
+choose between them — the second is the account this work was requested from,
+the first is a product address that may not exist yet. Confirm it explicitly
+before sending, because §1's allow-list safety net is inert in production and
+a mistyped address becomes a real message to a real stranger.
 
 **Unblocked, but not run here.** `deploy/e2e-workflow.mjs` (the till money-path
 harness) used to seat its Cyber Hub staff from the temporary password that came
