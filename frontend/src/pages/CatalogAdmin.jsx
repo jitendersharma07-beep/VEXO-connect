@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth.jsx';
 import { useToast } from '../components/toast.jsx';
 import { EmptyState, ErrorNote, Modal, PageHeader, StatusBadge } from '../components/ui.jsx';
 import { fmtINR, getAtcScope, isAtc } from '../lib/pos.js';
+import { prepareImage } from '../lib/productImagePrep.js';
 
 // /catalog — owner/ATC catalog admin (contract §5.1). Archive flows only; the
 // single hard delete in the UI is an empty category (server 409s otherwise).
@@ -364,6 +365,126 @@ function ProductForm({ initial, categories, taxRates, onSaved }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Menu photos
+// ---------------------------------------------------------------------------
+// The resize and re-encode logic lives in lib/productImagePrep.js. It is pure
+// and React-free specifically so the browser harness can import and exercise
+// the code that actually ships, rather than a copy of it that drifts.
+function PhotoEditor({ product, onProduct }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const choose = async (e) => {
+    const file = e.target.files?.[0];
+    // Reset immediately: without this, picking the SAME file twice after a
+    // failure fires no change event and the retry looks like it did nothing.
+    e.target.value = '';
+    if (!file) return;
+    setError('');
+    setBusy(true);
+    try {
+      const image = await prepareImage(file);
+      const { data } = await api.put(`/catalog/products/${product.id}/image`, {
+        dataUrl: image.dataUrl,
+      });
+      onProduct(data.product);
+      toast('Photo updated', 'success');
+    } catch (err) {
+      // A decode failure throws a plain Error and has no server response, so
+      // apiError would flatten it to a generic message. Keep whichever is the
+      // more specific of the two.
+      setError(err?.response ? apiError(err) : err.message || 'Could not use that image.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // No try/catch and no busy flag on purpose: ConfirmModal already owns both,
+  // and it keeps a failure visible INSIDE the dialog. Catching here would close
+  // the dialog on error and leave the reason on the page behind it.
+  const clear = async () => {
+    const { data } = await api.delete(`/catalog/products/${product.id}/image`);
+    onProduct(data.product);
+    toast('Photo removed', 'success');
+  };
+
+  return (
+    <div className="mt-6 border-t border-slate-200 pt-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-bold text-pos-ink">Photo</h3>
+        <span className="text-xs text-slate-400">Shown on the sell screen</span>
+      </div>
+
+      <div className="flex items-start gap-4">
+        <div className="h-24 w-24 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+          {product.imageUrl ? (
+            <img src={product.imageUrl} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center">
+              <Package className="h-7 w-7 text-slate-300" />
+            </div>
+          )}
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap gap-2">
+            {/* The input is driven by its label rather than styled directly:
+                file inputs cannot be restyled across browsers, and a label
+                pointing at one keeps the keyboard and screen-reader behaviour
+                that a div-with-onClick would throw away. */}
+            <label
+              className={`btn-ghost cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+              htmlFor={`photo-${product.id}`}
+            >
+              <Plus className="h-4 w-4" />
+              {busy ? 'Working…' : product.imageUrl ? 'Replace photo' : 'Add photo'}
+            </label>
+            <input
+              id={`photo-${product.id}`}
+              type="file"
+              className="sr-only"
+              // Narrow, because these three are what the server stores. A bare
+              // image/* invites HEIC off an iPhone, which most browsers cannot
+              // decode — better to grey it out in the picker than to accept it
+              // and fail after the wait.
+              accept="image/jpeg,image/png,image/webp"
+              disabled={busy}
+              onChange={choose}
+            />
+            {product.imageUrl ? (
+              <button
+                type="button"
+                className="btn-ghost text-red-600"
+                disabled={busy}
+                onClick={() => setConfirmClear(true)}
+              >
+                <Archive className="h-4 w-4" /> Remove
+              </button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            JPEG, PNG or WebP. Large photos are resized automatically before upload.
+          </p>
+          <ErrorNote message={error} />
+        </div>
+      </div>
+
+      <ConfirmModal
+        open={confirmClear}
+        title="Remove photo"
+        body={`Remove the photo from “${product.name}”? The item stays on the menu without one.`}
+        confirmLabel="Remove"
+        danger
+        onClose={() => setConfirmClear(false)}
+        onConfirm={clear}
+      />
+    </div>
+  );
+}
+
 // Variants use the ABSOLUTE unit price, not a delta (contract §5.1).
 function VariantsEditor({ product, onProduct }) {
   const toast = useToast();
@@ -647,14 +768,26 @@ function ProductsTab({ categories, taxRates }) {
                 load();
               }}
             />
+            {/* Both need a saved product to attach to, so they appear only
+                once the row exists — a photo has nowhere to go before there is
+                an id to name the file after. */}
             {modal !== 'new' ? (
-              <VariantsEditor
-                product={modal}
-                onProduct={(p) => {
-                  setModal(p);
-                  load();
-                }}
-              />
+              <>
+                <PhotoEditor
+                  product={modal}
+                  onProduct={(p) => {
+                    setModal(p);
+                    load();
+                  }}
+                />
+                <VariantsEditor
+                  product={modal}
+                  onProduct={(p) => {
+                    setModal(p);
+                    load();
+                  }}
+                />
+              </>
             ) : null}
           </>
         ) : null}

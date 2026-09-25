@@ -618,6 +618,22 @@ export default function Sell() {
   const [products, setProducts] = useState(null);
   const [prodError, setProdError] = useState('');
 
+  // Whether this grid shows a photo row at all — decided once for the whole
+  // grid, not per tile.
+  //
+  // Photos are opt-in and most shops will start with none, so a per-tile
+  // decision would be the worst of both: a shop with two photos out of forty
+  // gets two tall tiles and thirty-eight short ones, and because grid rows
+  // stretch to their tallest cell, the two photos also punch empty space into
+  // every neighbour on their row. Deciding per grid means a catalogue with no
+  // photos renders EXACTLY the layout that shipped before this feature — no
+  // reserved space, no placeholder, no regression for anyone who never uploads
+  // one — while a catalogue that uses photos gets a uniform grid, with the
+  // not-yet-photographed items carrying a neutral initial instead of a hole.
+  //
+  // `products` is null while loading, hence the guard.
+  const showPhotos = (products || []).some((p) => p.imageUrl);
+
   // order context
   const [order, setOrder] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1030,13 +1046,75 @@ export default function Sell() {
                   onClick={() => (hasVariants ? setVariantFor(p) : addItem(p, null))}
                   className="card flex min-h-[104px] flex-col items-start justify-between gap-2 p-3 text-left transition-colors hover:border-pos-royal hover:bg-pos-royal/5 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  {/* Photo row, present only when this catalogue actually uses
+                      photos — see showPhotos above. object-cover because a menu
+                      photo arrives in whatever aspect the phone took it in, and
+                      letterboxing every tile to fit would waste the height this
+                      grid is short of. Fixed height rather than an aspect ratio:
+                      aspect scales with tile width, and at 2xl the tiles are
+                      wide enough that a 4:3 box would push the price off the
+                      first screen of a long menu.
+
+                      The max-height variant is keyed on HEIGHT, not on one of
+                      the sm/md breakpoints, because the constraint here is
+                      vertical and the widths it appears at are not the narrow
+                      ones. Measured on a 6-item menu: at 1024x768 — the classic
+                      4:3 till — the full-size row put 4 of 6 items on screen,
+                      because that is the one size where the order panel still
+                      sits beside the grid while the screen is short, so the
+                      grid gets 2 columns AND taller tiles. At 64px all 6 fit.
+                      A width breakpoint cannot express that: 768x1024 is
+                      narrower and needs no help at all, since the panel stacks
+                      underneath and hands the grid its width back.
+
+                      780 and not 800 so a 1280x800 panel running fullscreen
+                      keeps the larger photo — it already fits 6 of 6 there, so
+                      shrinking it would cost picture for nothing. The same
+                      device in a browser has ~700px of viewport once the chrome
+                      is taken off, and is then caught, which is correct.
+
+                      aria-hidden and empty alt: the name is right underneath in
+                      the same button, so a screen reader announcing the photo
+                      would read every item twice. */}
+                  {showPhotos ? (
+                    <div className="mb-0.5 h-20 w-full shrink-0 overflow-hidden rounded-lg bg-slate-100 sm:h-24 [@media(max-height:780px)]:h-16">
+                      {p.imageUrl ? (
+                        <img
+                          src={p.imageUrl}
+                          alt=""
+                          aria-hidden="true"
+                          loading="lazy"
+                          decoding="async"
+                          className="h-full w-full object-cover"
+                          /* A row can outlive its file — a restore from an older
+                             database, or a half-finished migration of the image
+                             directory. Drop the broken-image glyph and leave the
+                             neutral placeholder, so one missing file looks like
+                             an item without a photo instead of a broken till. */
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none';
+                          }}
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-lg font-bold text-slate-300">
+                          {p.name.trim().charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                   {/* Clamped to three lines. A real café catalog carries names
                       like "Double Chocolate Fudge Brownie with Vanilla Bean
                       Ice Cream", and unclamped it stretched its whole grid row
                       to six lines, pushing the rest of the menu off screen.
                       The full name stays available via title= and on the
-                      cart line, which is not width-constrained. */}
-                  <div className="line-clamp-3 w-full text-sm font-bold leading-tight text-pos-ink" title={p.name}>
+                      cart line, which is not width-constrained.
+
+                      Drops to two lines once photos are on, because the tile is
+                      carrying a 96 px image as well by then. */}
+                  <div
+                    className={`${showPhotos ? 'line-clamp-2' : 'line-clamp-3'} w-full text-sm font-bold leading-tight text-pos-ink`}
+                    title={p.name}
+                  >
                     {p.name}
                   </div>
                   <div className="flex w-full items-center justify-between gap-1">

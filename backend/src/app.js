@@ -50,6 +50,8 @@ import promotionRoutes from './api/routes/promotions.js';
 // LANE accounts — onboarding, invitations and account recovery.
 import accountRecoveryRoutes from './api/routes/accountRecovery.js';
 import invitationRoutes, { publicRouter as inviteAcceptRoutes } from './api/routes/invitations.js';
+// LANE menu-images — product photos on the Sell grid.
+import { PRODUCT_IMAGE_URL_PREFIX, productImageRoot } from './lib/productImage.js';
 
 export const createApp = () => {
   const app = express();
@@ -104,6 +106,48 @@ export const createApp = () => {
         if (res.statusCode >= 400) return 'warn';
         return 'info';
       },
+    }),
+  );
+
+  // Menu photos, served UNAUTHENTICATED and on purpose. They are referenced by
+  // <img src> from the till, and the customer-facing display is a paired device
+  // with no POS session at all, so gating these on a session would blank the
+  // screen the diner looks at. The contents are a shop's own menu pictures —
+  // the same images a customer sees on the counter — and the path carries a
+  // cuid plus a content hash, so it is not enumerable even though it is not
+  // secret.
+  //
+  // Filenames are content-addressed, so a given path's bytes never change and
+  // the aggressive cache header is safe: a replaced photo is written under a
+  // new name and the old url simply stops being referenced.
+  //
+  // Deliberately ABOVE globalLimiter. That limiter allows 300 requests a minute
+  // keyed on req.ip, and with `trust proxy 2` every till in one café shares the
+  // shop's public address. A cache-cold Sell grid pulls one request per photo,
+  // so a few terminals opening a forty-item menu at the start of service could
+  // spend that budget on pictures — and the request that then gets the 429 is
+  // whichever came next, which is as likely to be placing an order as loading a
+  // thumbnail. Static, immutable, content-addressed files are the cheapest
+  // thing this process serves and they must not be able to crowd out the API.
+  //
+  // fallthrough stays at its default (true) so a miss continues to
+  // notFoundHandler and returns the POS JSON error shape, rather than
+  // express.static's own HTML 404.
+  //
+  // Those two decisions interact, in a way that happens to be exactly right.
+  // A HIT answers here and never calls next(), so it never reaches the limiter;
+  // a MISS calls next() and travels the rest of the stack, limiter included.
+  // Measured at 340 requests from one address: an existing photo returned
+  // 340x200 and zero 429, while an absent one returned 300x404 and then began
+  // refusing. So serving a real menu cannot starve the API, but hunting for
+  // files that are not there is still bounded.
+  app.use(
+    PRODUCT_IMAGE_URL_PREFIX,
+    express.static(productImageRoot(), {
+      index: false,
+      dotfiles: 'ignore',
+      maxAge: '365d',
+      immutable: true,
     }),
   );
 

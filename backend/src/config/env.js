@@ -21,6 +21,14 @@ export const env = {
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true',
   CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:5177',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+  // Where menu photos are written. Unset resolves to <backend>/var/product-images,
+  // which is right for a dev checkout and WRONG for a container, where that path
+  // is inside the image and the files would vanish on the next deploy — so a
+  // deployment must point this at a mounted volume. Kept out of `required()`
+  // deliberately: a POS with no product photos is a working POS, and failing to
+  // boot over an unset optional path would turn a cosmetic feature into an
+  // outage.
+  POS_PRODUCT_IMAGE_DIR: process.env.POS_PRODUCT_IMAGE_DIR || null,
   // Payment gateway (contract §13). Unset is the normal, shipped state: with no
   // provider named, every gateway route refuses. Production runs this way today
   // and will keep doing so until the owner supplies real provider credentials.

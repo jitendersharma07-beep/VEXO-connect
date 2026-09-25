@@ -1,0 +1,144 @@
+<!doctype html>
+<!--
+  Harness for lib/productImagePrep.js — NOT part of the app bundle.
+
+  The resize path cannot be covered by the backend suite (there is no canvas in
+  node) and a build only proves it parses. This loads the REAL module in a REAL
+  browser and puts synthetic photos through it.
+
+  Driven over CDP by tests/e2e/run-imageprep-harness.mjs, because this headless
+  build snapshots --dump-dom before module scripts finish:
+    npx vite --port 5623 &                                # from frontend/
+    chrome-headless-shell --remote-debugging-port=9222 &
+    node tests/e2e/run-imageprep-harness.mjs              # from the repo root
+
+  Not shipped: `vite build` has a single input (index.html), so this page exists
+  only under the dev server — same arrangement as uat-render.html.
+
+  It also renders to the page, so a human can just open it.
+-->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>image prep harness</title></head>
+  <body>
+    <pre id="out">running…</pre>
+    <script type="module">
+      import {
+        prepareImage,
+        dataUrlBytes,
+        MAX_UPLOAD_BYTES,
+        TARGET_MAX_EDGE,
+      } from '/src/lib/productImagePrep.js';
+
+      // A synthetic photo. Noise rather than flat colour on purpose: a solid
+      // fill compresses to almost nothing and would make the size loop look
+      // effective when it had done no work at all.
+      const makePhoto = async (w, h, type = 'image/png') => {
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d');
+        const img = ctx.createImageData(w, h);
+        let seed = 12345;
+        for (let i = 0; i < img.data.length; i += 4) {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+          img.data[i] = seed & 0xff;
+          img.data[i + 1] = (seed >> 8) & 0xff;
+          img.data[i + 2] = (seed >> 16) & 0xff;
+          img.data[i + 3] = 255;
+        }
+        ctx.putImageData(img, 0, 0);
+        const blob = await new Promise((r) => c.toBlob(r, type));
+        return new File([blob], `photo.${type.split('/')[1]}`, { type });
+      };
+
+      // The server's own regex, copied verbatim from lib/productImage.js. If the
+      // client ever emits something this does not match, the upload 400s.
+      const SERVER_RE = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
+      // And the server's own dimension ceiling.
+      const SERVER_MAX_DIMENSION = 2000;
+
+      window.__run = async () => {
+        const lines = [];
+        let failures = 0;
+        const check = (name, pass, detail) => {
+          if (!pass) failures += 1;
+          lines.push(`${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+        };
+
+        try {
+          // --- byte maths, against known quantities ----------------------
+          // "AAAA" decodes to 3 bytes, "AAA=" to 2, "AA==" to 1.
+          check('dataUrlBytes: no padding', dataUrlBytes('data:image/png;base64,AAAA') === 3);
+          check('dataUrlBytes: one pad', dataUrlBytes('data:image/png;base64,AAA=') === 2);
+          check('dataUrlBytes: two pads', dataUrlBytes('data:image/png;base64,AA==') === 1);
+
+          // --- a big photo is actually reduced ---------------------------
+          const big = await makePhoto(3000, 2000);
+          const out = await prepareImage(big);
+          check(
+            'huge photo lands under the cap',
+            out.bytes <= MAX_UPLOAD_BYTES,
+            `${(big.size / 1024).toFixed(0)} KB in -> ${(out.bytes / 1024).toFixed(1)} KB out`,
+          );
+          check(
+            'longest edge clamped to target',
+            Math.max(out.width, out.height) <= TARGET_MAX_EDGE,
+            `${out.width}x${out.height}`,
+          );
+          check('aspect ratio preserved', Math.abs(out.width / out.height - 3000 / 2000) < 0.02);
+          check('output matches the server regex', SERVER_RE.test(out.dataUrl), out.dataUrl.slice(0, 24));
+          check(
+            'declared mime equals what the encoder produced',
+            out.dataUrl.startsWith(`data:${out.actual};base64,`),
+            out.actual,
+          );
+          check('reported byte count matches payload', out.bytes === dataUrlBytes(out.dataUrl));
+
+          // --- a small photo is NOT upscaled -----------------------------
+          const small = await makePhoto(120, 90);
+          const smallOut = await prepareImage(small);
+          check(
+            'small photo keeps its size (no upscaling)',
+            smallOut.width === 120 && smallOut.height === 90,
+            `${smallOut.width}x${smallOut.height}`,
+          );
+
+          // --- a panorama must clear the SERVER's dimension ceiling -------
+          const wide = await makePhoto(5000, 200);
+          const wideOut = await prepareImage(wide);
+          check(
+            'panorama brought under the server dimension ceiling',
+            wideOut.width <= SERVER_MAX_DIMENSION && wideOut.height <= SERVER_MAX_DIMENSION,
+            `${wideOut.width}x${wideOut.height}`,
+          );
+
+          // --- a non-image must be refused, not uploaded as garbage -------
+          const notAnImage = new File([new Uint8Array([1, 2, 3, 4, 5])], 'x.png', {
+            type: 'image/png',
+          });
+          let refused = false;
+          let reason = '';
+          try {
+            await prepareImage(notAnImage);
+          } catch (e) {
+            refused = true;
+            reason = e.message;
+          }
+          check('a file that is not an image is refused', refused, reason);
+        } catch (err) {
+          failures += 1;
+          lines.push(`FAIL  harness threw: ${err && err.message}`);
+        }
+
+        lines.push(failures === 0 ? 'HARNESS: PASS' : `HARNESS: ${failures} FAILURE(S)`);
+        const text = lines.join('\n');
+        document.getElementById('out').textContent = text;
+        return text;
+      };
+
+      // Render for a human opening the page directly. The CDP driver calls
+      // window.__run() itself and awaits the returned promise.
+      window.__run();
+    </script>
+  </body>
+</html>
