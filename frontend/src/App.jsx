@@ -38,6 +38,7 @@ import Brands from './pages/Brands.jsx';
 import Regions from './pages/Regions.jsx';
 import Devices from './pages/Devices.jsx';
 import Permissions from './pages/Permissions.jsx';
+import Integrations from './pages/Integrations.jsx';
 import CustomerDisplay from './pages/CustomerDisplay.jsx';
 import PairDisplay from './pages/PairDisplay.jsx';
 import GuestTable from './pages/GuestTable.jsx';
@@ -504,6 +505,19 @@ export default function App() {
                     what="permissions"
                   >
                     <Permissions />
+                  </RequireAction>
+                }
+              />
+              {/* LANE providers — integration.read is the floor, and every
+                  control inside the page hides itself against its own action.
+                  Finance holds read plus discrepancy resolution, a store manager
+                  holds read plus retry: both get in, and both see a different
+                  screen. */}
+              <Route
+                path="integrations"
+                element={
+                  <RequireAction action="integration.read" what="integrations">
+                    <Integrations />
                   </RequireAction>
                 }
               />

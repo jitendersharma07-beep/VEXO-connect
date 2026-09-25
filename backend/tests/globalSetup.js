@@ -32,13 +32,14 @@
 // where two lanes share one it is load-bearing, and a "unique per
 // lane" key would silently restore the bug.
 //
-// Observed 2026-09-24 in this worktree: a run here (pid 2493488) held three
-// connections to vcx_foundation_test with no advisory lock on that database at
-// all, while foundation's globalSetup was already in place. A lock is a
-// participation protocol, so one non-participant defeats it for everyone:
-// foundation takes the lock, finds it uncontended, and proceeds straight into
-// this lane's fixtures. The damage foundation logged that morning is what that
-// looks like from the other side —
+// The incident that justifies the lock is still real, and belongs to the merge
+// worktree: a run there (pid 2493488) held three connections to
+// vcx_foundation_test with no advisory lock on that database at all, while
+// foundation's globalSetup was already in place. A lock is a participation
+// protocol, so one non-participant defeats it for everyone: foundation takes the
+// lock, finds it uncontended, and proceeds straight into the other run's
+// fixtures. The damage foundation logged that morning is what that looks like
+// from the other side —
 //   /tmp/vcx-a406-full-113135-r1.log — full suite, 11:31:35..11:33:40.
 //     foundationPeople.test.js 17/30 red, first causal failure "expected 401 to
 //     be 403": its PosUser rows were gone, so the tokens stopped resolving,
@@ -56,9 +57,9 @@
 //   - a lock cannot leak. Postgres drops it when the connection dies, so a
 //     killed or crashed run leaves nothing behind. Per-run databases survive
 //     their run and accumulate on a server this box shares between lanes.
-// Contention here is higher than in a private lane — every foundation run
-// competes too — but runs are ~2 min and waiting is cheaper than re-running on
-// corrupt fixtures.
+// Contention is low — only this lane's own runs compete — but the 100,000-row
+// import test alone takes ~8 min, so waiting is real and is still cheaper than
+// re-running on corrupt fixtures.
 //
 // A run that cannot get the lock FAILS with the holder named. It must never
 // proceed anyway: proceeding is exactly the corruption above, reported as a
@@ -83,11 +84,12 @@
 
 import { PrismaClient } from '@prisma/client';
 
-// 0x564358, "VCX". Identical to x/foundation's by requirement — see above.
-// Advisory locks are scoped to a database (verified 2026-09-24: the same key
-// held on vcx_kitchen_test refused a second session on that database and did
-// not block a session on vcx_foundation_test, and the pg_locks row carried the
-// database oid), so lanes WITH a private database still never contend.
+// 0x564358, "VCX". Identical to x/foundation's — see above for why that is a
+// convention here rather than a requirement. Advisory locks are scoped to a
+// database (verified 2026-09-24: the same key held on vcx_kitchen_test refused a
+// second session on that database and did not block a session on
+// vcx_foundation_test, and the pg_locks row carried the database oid), so lanes
+// sharing this key never contend across their private databases.
 const LOCK_KEY = 5653848;
 
 const TIMEOUT_MS = Number(process.env.VCX_TEST_DB_LOCK_TIMEOUT_MS ?? 300_000);

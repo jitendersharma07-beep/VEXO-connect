@@ -148,6 +148,38 @@ export const ACTIONS = Object.freeze([
   A('report.schedule.write', 'Reports', 'Create and change scheduled reports and recipients', 'COMPANY'),
   A('report.exception.read', 'Reports', 'View reporting exceptions and alerts', 'COMPANY'),
   A('report.exception.resolve', 'Reports', 'Acknowledge and resolve reporting exceptions', 'COMPANY'),
+  // ==== LANE providers ====
+  // Third-party integrations — Swiggy, Zomato, Reelo, Tally.
+  //
+  // Split finer than the screen is, because these are genuinely different
+  // authorities. Seeing that Tally is behind is a reporting question; holding
+  // the key it authenticates with is not. Retrying a stuck order is store work
+  // at 8pm; running a 100,000-customer loyalty import is neither, and is the one
+  // action in this module that editing a form cannot undo.
+  //
+  // No CASHIER entry among the `integration.*` keys, by design: an integration
+  // credential moves the tenant's money and the customer's points. The two
+  // `loyalty.*` keys below are the exception that proves the rule — they are till
+  // work rather than administration, and they are scoped STORE to say so.
+  A('integration.read', 'Integrations', 'View integration status', 'COMPANY'),
+  A('integration.configure', 'Integrations', 'Enable and configure an integration', 'COMPANY'),
+  A('integration.credential.write', 'Integrations', 'Store provider credentials', 'COMPANY'),
+  A('integration.test', 'Integrations', 'Run a provider connection test', 'COMPANY'),
+  A('integration.outlet.map', 'Integrations', 'Map provider outlets to stores', 'COMPANY'),
+  A('integration.job.retry', 'Integrations', 'Retry queued integration work', 'COMPANY'),
+  A('integration.discrepancy.resolve', 'Integrations', 'Resolve a reconciliation discrepancy', 'COMPANY'),
+  A('integration.import.run', 'Integrations', 'Run a historical loyalty import', 'COMPANY'),
+
+  // The till half of the loyalty integration. STORE scope, and in the CASHIER
+  // baseline, because a loyalty programme a cashier cannot reach is a loyalty
+  // programme the customer is told about and then not given.
+  //
+  // Redemption is here rather than behind an approval because the authorisation
+  // for spending a customer's points is the customer's own OTP, which the
+  // provider issues and verifies. A manager standing next to the till adds a
+  // signature to something the manager cannot actually consent to.
+  A('loyalty.lookup', 'Loyalty', 'Look up a customer loyalty balance', 'STORE'),
+  A('loyalty.redeem', 'Loyalty', 'Redeem loyalty points against a bill', 'STORE'),
 
   // Platform
   A('platform.tenant.manage', 'Platform', 'Manage tenants and licences', 'PLATFORM'),
@@ -185,7 +217,9 @@ const ALL = ACTION_KEYS.filter((k) => actionMeta(k).scope !== 'PLATFORM');
 // otherwise is one the store works around by wedging the drawer open. What a
 // cashier does NOT get is drawer.open.manual — opening the till with no sale
 // behind it is the movement worth authorising separately.
-const SELL = ['order.read', 'order.create', 'order.bill', 'kot.read', 'payment.record', 'drawer.open', 'table.read', 'catalog.read', 'promo.apply'];
+const SELL = ['order.read', 'order.create', 'order.bill', 'kot.read', 'payment.record', 'drawer.open', 'table.read', 'catalog.read', 'promo.apply', 'loyalty.lookup', 'loyalty.redeem'];
+// LANE providers added the two loyalty keys: a bill is where points are both
+// earned and spent, so they belong to whoever can take a bill.
 
 const ROLE_ACTIONS = Object.freeze({
   // The platform role. Every action including the platform-only ones; what it
@@ -219,6 +253,10 @@ const ROLE_ACTIONS = Object.freeze({
     // knowing which account they landed in. Cannot change it, and still
     // cannot open a till.
     'payment.account.read',
+    // LANE providers. Reconciling an aggregator payout against the bills, and
+    // chasing a sales voucher Tally rejected, is the Finance job description —
+    // so Finance can see and resolve, but cannot hold the keys or map outlets.
+    'integration.read', 'integration.discrepancy.resolve',
   ]),
 
   // The stores of one region. Store-level authority over them, no company
@@ -237,6 +275,9 @@ const ROLE_ACTIONS = Object.freeze({
     'report.exception.read', 'report.exception.resolve',
     'user.read', 'terminal.read', 'terminal.write', 'device.read', 'device.enrol', 'device.activate', 'device.revoke',
     'payment.account.read', 'drawer.open', 'drawer.open.manual',
+    // LANE providers. A Zomato order stuck in the outbound queue during service
+    // is an operations problem, not a configuration one.
+    'integration.read', 'integration.job.retry',
   ]),
 
   // One store (or the stores explicitly assigned). The spec's Store Manager.
@@ -253,6 +294,8 @@ const ROLE_ACTIONS = Object.freeze({
     'report.exception.read', 'report.exception.resolve',
     'user.read', 'terminal.read', 'device.read',
     'payment.account.read', 'drawer.open', 'drawer.open.manual',
+    // LANE providers — same reason as REGIONAL_MANAGER above.
+    'integration.read', 'integration.job.retry',
   ]),
 
   // Takes money. Cannot void an order, cannot refund, cannot close the day,

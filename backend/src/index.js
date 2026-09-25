@@ -4,6 +4,7 @@ import { logger } from './lib/logger.js';
 // ==== LANE inventory ====
 import { startInventoryScheduler } from './jobs/inventoryScheduler.js';
 // ==== END LANE inventory ====
+import { startWorker } from './lib/integrations/worker.js';
 
 const app = createApp();
 
@@ -26,3 +27,8 @@ if (process.env.INVENTORY_SCHEDULER === 'on') {
   });
 }
 // ==== END LANE inventory ====
+// Here and not in createApp(), so a test that builds an app does not acquire a
+// background timer that outlives the case and claims jobs out from under it.
+// Returns null unless POS_INTEGRATION_WORKER_INTERVAL_MS is set, which is the
+// shipped default — a deployment with no integration polls nothing.
+startWorker();

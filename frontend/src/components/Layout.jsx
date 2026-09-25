@@ -25,6 +25,7 @@ import {
   Package,
   PackagePlus,
   PhoneCall,
+  Plug,
   ReceiptText,
   ScrollText,
   Send,
@@ -181,6 +182,9 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
               {canAny('permission.read', 'support.grant.read') ? (
                 <NavItem to="/permissions" icon={ShieldCheck} label="Permissions" />
               ) : null}
+              {can('integration.read') ? (
+                <NavItem to="/integrations" icon={Plug} label="Integrations" />
+              ) : null}
             </>
           ) : null}
         </>
@@ -228,6 +232,12 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
           {can('user.read') ? <NavItem to="/team" icon={Users} label="Team" /> : null}
           {canAny('permission.read', 'support.grant.read') ? (
             <NavItem to="/permissions" icon={ShieldCheck} label="Permissions" />
+          ) : null}
+          {/* LANE providers — integration.read, not isOwner: Finance and a store
+              manager both hold it, and both have something to do on that screen
+              (resolve a discrepancy, retry stuck work). */}
+          {can('integration.read') ? (
+            <NavItem to="/integrations" icon={Plug} label="Integrations" />
           ) : null}
           {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
