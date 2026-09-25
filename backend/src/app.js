@@ -37,6 +37,7 @@ import deviceRoutes from './api/routes/devices.js';
 import permissionRoutes from './api/routes/permissions.js';
 // LANE vc104-api
 import phoneOrderRoutes from './api/routes/phoneOrders.js';
+import reportingRoutes from './api/routes/reporting.js';
 
 // LANE foundation, Phase 2 — VC-102.
 import promotionRoutes from './api/routes/promotions.js';
@@ -154,6 +155,11 @@ export const createApp = () => {
 
   // LANE vc104-api
   api.use('/phone-orders', phoneOrderRoutes);
+
+  // LANE reporting. A sibling of /reports, not a replacement: that router is the
+  // contract §10 sales report the POS still calls, and neither path is a prefix
+  // of the other.
+  api.use('/reporting', reportingRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);

@@ -108,6 +108,13 @@ model Company {
   promotions        Promotion[]
   customers         Customer[]
   phoneOrders       PhoneOrder[]
+
+  // LANE reporting — one contiguous block so two lanes editing this model at
+  // once resolve by keeping both additions rather than by picking a winner.
+  reportingSetting    ReportingSetting?
+  reportRecipients    ReportRecipient[]
+  reportSchedules     ReportSchedule[]
+  reportingExceptions ReportingException[]
 }
 
 model Branch {
@@ -2208,4 +2215,290 @@ model PhoneOrderEvent {
 
   @@index([phoneOrderId, at])
   @@index([companyId, at])
+}
+
+// ============================================================================
+// LANE reporting — reporting configuration, scheduled delivery and exceptions.
+//
+// No model here stores a computed figure. Every number in every report is
+// derived from the operational rows at read time, so a report cannot drift from
+// the records it describes and a bug fixed in the engine fixes history too.
+// What IS stored is what a report cannot derive: which timezone the business
+// keeps, who is allowed to receive a schedule, whether a delivery went out, and
+// whether a human has dealt with an exception.
+// ============================================================================
+
+// How this company keeps its books. The engine cannot guess any of these, and
+// guessing wrong is not a rounding error: it moves takings between days, weeks
+// and financial years.
+//
+// One row per company, created on first read with the defaults below, so a
+// tenant that has configured nothing still reports correctly for an Indian
+// cafe — which is every tenant today.
+model ReportingSetting {
+  id        String  @id @default(cuid())
+  companyId String  @unique
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // IANA name, not an offset. An offset cannot express a DST transition, and a
+  // chain with outlets in two countries will eventually have one.
+  timezone String @default("Asia/Kolkata")
+
+  // Minutes past local midnight at which the business day rolls over. A cafe
+  // closing at 01:30 wants its 00:45 sales counted against the previous day's
+  // takings, and this is the only figure that makes that true. 0 = calendar.
+  businessDayCutoffMinutes Int @default(0)
+
+  // ISO-8601 weekday numbers: 1 = Monday ... 7 = Sunday.
+  weekStartDay Int @default(1)
+
+  // The month the financial year opens in. 4 = April, the Indian default.
+  financialYearStartMonth Int @default(4)
+
+  // How long a location may be silent before the dashboard calls its data
+  // stale rather than merely quiet. Stale and zero are different claims, and
+  // the dashboard is required to tell them apart.
+  staleAfterMinutes Int @default(180)
+
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}
+
+// An address a schedule is allowed to send to.
+//
+// A schedule stores recipient ids, never free text. Without this table
+// "configurable recipients" lets any authenticated manager make the server mail
+// an arbitrary address on a timer, which is an open relay with a cron attached.
+// An address becomes approved by a deliberate, audited act, and the approval
+// can be withdrawn without editing every schedule that used it.
+model ReportRecipient {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  email String
+  label String?
+
+  // Approval is the whole point of the row, so it is recorded, not implied.
+  approvedAt   DateTime  @default(now())
+  approvedById String?
+  revokedAt    DateTime?
+
+  // Marks an address as belonging to the deployment's own testing, so a
+  // verification run can prove delivery without a customer receiving mail.
+  isTestAddress Boolean @default(false)
+
+  scheduleLinks ReportScheduleRecipient[]
+
+  @@unique([companyId, email])
+  @@index([companyId])
+}
+
+enum ReportCadence {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum ReportFormat {
+  CSV
+  XLSX
+  PDF
+}
+
+enum ReportScheduleState {
+  // Created but never sent to anyone. New schedules land here on purpose: a
+  // report configured by someone who has not yet been asked "mail this to these
+  // five addresses every morning?" must not start sending.
+  DRAFT
+  ACTIVE
+  PAUSED
+}
+
+// A standing instruction to produce a report and deliver it.
+model ReportSchedule {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name String
+  // Which report. Validated against the engine's registry on write, so a
+  // schedule can never name a report that does not exist.
+  reportKey String
+
+  cadence ReportCadence
+  format  ReportFormat  @default(CSV)
+
+  // Local time of day in `timezone`, as minutes past midnight.
+  sendAtMinutes Int    @default(360)
+  timezone      String @default("Asia/Kolkata")
+
+  // WEEKLY: the weekday it fires on, 0 = Sunday .. 6 = Saturday — the same
+  // numbering ReportingSetting.weekStartDay and weekdayOf() use. Two
+  // conventions in one lane is how a schedule ends up saying Monday while the
+  // week it reports on starts on Sunday.
+  //
+  // MONTHLY: day of month, clamped to the month's own length at send time so
+  // "the 31st" still fires in February instead of skipping the month in silence.
+  weekday    Int?
+  dayOfMonth Int?
+
+  // The locations this schedule reports on. Empty = every location the sender
+  // is authorised for, resolved again at send time — so a store whose access is
+  // later withdrawn stops appearing without anyone editing the schedule.
+  branchIds String[] @default([])
+
+  state ReportScheduleState @default(DRAFT)
+
+  createdAt   DateTime  @default(now())
+  createdById String?
+  updatedAt   DateTime  @updatedAt
+  activatedAt DateTime?
+  lastRunAt   DateTime?
+
+  recipients ReportScheduleRecipient[]
+  deliveries ReportDelivery[]
+
+  @@unique([companyId, name])
+  @@index([companyId, state])
+}
+
+model ReportScheduleRecipient {
+  scheduleId  String
+  schedule    ReportSchedule  @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   ReportRecipient @relation(fields: [recipientId], references: [id], onDelete: Restrict)
+
+  @@id([scheduleId, recipientId])
+  @@index([recipientId])
+}
+
+enum ReportDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  // Deliberately produced nothing. A schedule whose recipient list has been
+  // emptied by revocation is recorded rather than silently skipped: an owner
+  // who stops receiving a report is owed the reason.
+  SKIPPED
+}
+
+// One attempt at one period of one schedule.
+//
+// `runKey` is the period identity — the schedule's own name for the window it
+// reports on, e.g. "2026-09-23" or "2026-W39". It is UNIQUE per schedule, and
+// that uniqueness IS the deduplication: a retry, a double tick of the
+// scheduler, and two workers racing all try to insert the same key, and exactly
+// one wins. Retries then update the row they own instead of inserting a second
+// delivery, so a failed half-send can never mail an owner the same morning
+// report twice.
+model ReportDelivery {
+  id         String         @id @default(cuid())
+  scheduleId String
+  schedule   ReportSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  runKey String
+
+  // The window actually reported on, stored so a delivery can be reconciled
+  // against the screen for the same dates months later.
+  periodFrom String
+  periodTo   String
+
+  status   ReportDeliveryStatus @default(PENDING)
+  attempts Int                  @default(0)
+
+  // Addresses the attempt was made to, snapshotted at send time: the approved
+  // list changes, and "who received the March figures" must stay answerable.
+  sentTo String[] @default([])
+
+  // Approved addresses this attempt deliberately did NOT reach, kept beside the
+  // ones it did. With no mail transport in this build only test addresses are
+  // written to, and "sent to 1 of 4" is a sentence somebody has to be able to
+  // finish months later.
+  withheld String[] @default([])
+
+  // Which mechanism actually carried it. Recorded rather than assumed so nothing
+  // reads SENT as "emailed": today this is always FILE, a spool artifact on the
+  // server, and the day a real transport is configured the old rows still say
+  // truthfully what happened to them.
+  transport    String  @default("FILE")
+  artifactPath String?
+
+  rowCount  Int?
+  bytes     Int?
+  lastError String?
+
+  firstAttemptAt DateTime  @default(now())
+  lastAttemptAt  DateTime  @default(now())
+  sentAt         DateTime?
+
+  @@unique([scheduleId, runKey])
+  @@index([scheduleId, status])
+}
+
+enum ReportingExceptionKind {
+  LOW_STOCK
+  NEAR_EXPIRY
+  OVERDUE_REQUEST
+  CASH_DIFFERENCE
+  UNUSUAL_REFUND
+  UNUSUAL_DISCOUNT
+  DELAYED_KITCHEN_ORDER
+  STALE_BRANCH_DATA
+  UNCLOSED_SHIFT
+  SETTLEMENT_MISMATCH
+}
+
+enum ReportingExceptionStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  // Looked at and judged not to be a problem. Distinct from RESOLVED, which
+  // claims something was fixed.
+  DISMISSED
+}
+
+enum ReportingExceptionSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+// An exception a person is expected to do something about.
+//
+// Detection is derived at read time like every other figure; this row exists
+// for the part that cannot be derived — that a named human acknowledged it, and
+// when. `dedupeKey` makes a detector idempotent: re-running it re-opens nothing
+// and duplicates nothing, so the list stays a worklist instead of becoming a
+// growing pile of the same finding.
+model ReportingException {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  branchId  String?
+
+  kind     ReportingExceptionKind
+  severity ReportingExceptionSeverity @default(WARNING)
+
+  dedupeKey String
+
+  title  String
+  detail Json?
+
+  // Who is expected to act, as a role rather than a person: the individual on
+  // shift changes, the responsibility does not.
+  responsibleRole String
+  dueAt           DateTime?
+
+  status           ReportingExceptionStatus @default(OPEN)
+  detectedAt       DateTime                 @default(now())
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  resolvedAt       DateTime?
+  resolvedById     String?
+  resolutionNote   String?
+
+  @@unique([companyId, dedupeKey])
+  @@index([companyId, status, severity])
+  @@index([branchId, status])
 }

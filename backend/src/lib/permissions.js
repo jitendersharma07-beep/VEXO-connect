@@ -112,6 +112,29 @@ export const ACTIONS = Object.freeze([
   A('report.tax.read', 'Reports', 'Tax reports', 'COMPANY'),
   A('report.audit.read', 'Reports', 'Audit trail', 'COMPANY'),
 
+  // LANE reporting. Separate keys because these are separate authorities, not
+  // shades of one. Reading a consolidated figure across every store is not the
+  // same as reading one store's sales, food cost is commercially sensitive in a
+  // way turnover is not, changing the company's financial year moves every
+  // historical boundary at once, and a report that emails itself to an address
+  // reaches further than any screen. report.settings.write is the one that
+  // silently rewrites the past, which is why it is its own key rather than an
+  // implied consequence of being able to read a report.
+  A('report.dashboard.read', 'Reports', 'Consolidated multi-location dashboard', 'COMPANY'),
+  // Money received, owed, returned and settled. Separate from report.sales.read
+  // because what a store sold and what it actually banked are different
+  // questions with different readers: a cash-difference or settlement shortfall
+  // names the person who handled the till, which is not something every reader
+  // of a turnover figure should see.
+  A('report.payments.read', 'Reports', 'Collections, dues, refunds, settlement and cash reports', 'COMPANY'),
+  A('report.inventory.read', 'Reports', 'Consumption, wastage and stock reports', 'COMPANY'),
+  A('report.settings.read', 'Reports', 'View reporting policy', 'COMPANY'),
+  A('report.settings.write', 'Reports', 'Change timezone, business day and financial year', 'COMPANY'),
+  A('report.schedule.read', 'Reports', 'View scheduled reports and recipients', 'COMPANY'),
+  A('report.schedule.write', 'Reports', 'Create and change scheduled reports and recipients', 'COMPANY'),
+  A('report.exception.read', 'Reports', 'View reporting exceptions and alerts', 'COMPANY'),
+  A('report.exception.resolve', 'Reports', 'Acknowledge and resolve reporting exceptions', 'COMPANY'),
+
   // Platform
   A('platform.tenant.manage', 'Platform', 'Manage tenants and licences', 'PLATFORM'),
 ]);
@@ -165,6 +188,12 @@ const ROLE_ACTIONS = Object.freeze({
     'org.store.read', 'org.brand.read', 'org.region.read',
     'catalog.read', 'order.read', 'dayclose.read',
     'report.sales.read', 'report.tax.read', 'report.audit.read',
+    // LANE reporting: Finance reads everything and schedules the sends, but does
+    // not resolve a stock exception — that is the storekeeper's job, and an
+    // acknowledgement from someone who was not there closes nothing.
+    'report.dashboard.read', 'report.payments.read', 'report.inventory.read',
+    'report.settings.read', 'report.settings.write',
+    'report.schedule.read', 'report.schedule.write', 'report.exception.read',
     'user.read', 'permission.read', 'support.grant.read',
     'terminal.read', 'device.read', 'promo.read',
   ]),
@@ -178,6 +207,11 @@ const ROLE_ACTIONS = Object.freeze({
     'order.read', 'order.create', 'order.bill', 'order.void', 'order.item.void', 'kot.read',
     'payment.record', 'refund.issue', 'dayclose.read', 'dayclose.perform',
     'report.sales.read', 'report.tax.read', 'promo.read', 'promo.apply',
+    // LANE reporting: a dashboard over the region's stores, and the exceptions
+    // raised in them. Not report.settings.write — the financial year belongs to
+    // the company, not to one region of it.
+    'report.dashboard.read', 'report.payments.read', 'report.inventory.read', 'report.settings.read',
+    'report.exception.read', 'report.exception.resolve',
     'user.read', 'terminal.read', 'terminal.write', 'device.read', 'device.enrol', 'device.activate', 'device.revoke',
   ]),
 
@@ -188,6 +222,11 @@ const ROLE_ACTIONS = Object.freeze({
     'order.read', 'order.create', 'order.bill', 'order.void', 'order.item.void', 'kot.read',
     'payment.record', 'refund.issue', 'dayclose.read', 'dayclose.perform',
     'report.sales.read', 'promo.read', 'promo.apply',
+    // LANE reporting: the same dashboard, resolved to the stores they hold. The
+    // scope decides the reach; this only decides that they may open it. A store
+    // manager counts the till, so the cash and collections reports are theirs.
+    'report.dashboard.read', 'report.payments.read', 'report.inventory.read', 'report.settings.read',
+    'report.exception.read', 'report.exception.resolve',
     'user.read', 'terminal.read', 'device.read',
   ]),
 
@@ -204,9 +243,22 @@ const ROLE_ACTIONS = Object.freeze({
   // Reach is decided by assignment: a company stock controller gets none, a
   // store storekeeper gets one. Stock actions themselves arrive with the
   // inventory lane (see EXTENSION_POINTS).
-  INVENTORY: Object.freeze(['catalog.read', 'org.store.read', 'order.read']),
+  // LANE reporting adds the consumption and wastage reports plus the stock
+  // exceptions, because a variance report nobody can open is a variance nobody
+  // investigates. No sales or dashboard access: stock control is not a reason to
+  // see the company's turnover.
+  INVENTORY: Object.freeze([
+    'catalog.read', 'org.store.read', 'order.read',
+    'report.inventory.read', 'report.settings.read',
+    'report.exception.read', 'report.exception.resolve',
+  ]),
 
-  PURCHASE: Object.freeze(['catalog.read', 'org.store.read', 'org.legalEntity.read', 'org.gst.read', 'report.sales.read']),
+  PURCHASE: Object.freeze([
+    'catalog.read', 'org.store.read', 'org.legalEntity.read', 'org.gst.read', 'report.sales.read',
+    // LANE reporting: purchase prices and receiving differences are this role's
+    // own work, reported back to it.
+    'report.inventory.read', 'report.settings.read', 'report.exception.read',
+  ]),
 
   DELIVERY: Object.freeze(['order.read', 'kot.read', 'table.read', 'catalog.read']),
 

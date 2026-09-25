@@ -7,6 +7,7 @@ import {
   BarChart3,
   Building2,
   CalendarCheck,
+  CalendarClock,
   KeyRound,
   Landmark,
   LayoutDashboard,
@@ -19,6 +20,8 @@ import {
   PhoneCall,
   ReceiptText,
   ScrollText,
+  Send,
+  ShieldAlert,
   ShieldCheck,
   ShoppingCart,
   Store,
@@ -80,6 +83,41 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
       <NavItem key="devices" to="/devices" icon={MonitorSmartphone} label="Tills & devices" />
     ) : null,
   ].filter(Boolean);
+  // LANE reporting — the multi-location report centre, by held action rather
+  // than by the role list the legacy /reports links use. FINANCE, REGIONAL_MANAGER
+  // and AUDITOR hold report.*.read and are refused by that role list, so they
+  // would otherwise have permissions with nowhere to use them.
+  const reportingLinks = [
+    can('report.dashboard.read') ? (
+      <NavItem key="hq" to="/reporting" icon={Building2} label="Consolidated" end />
+    ) : null,
+    canAny(
+      'report.sales.read',
+      'report.tax.read',
+      'report.payments.read',
+      'report.inventory.read',
+      'report.dashboard.read',
+    ) ? (
+      <NavItem key="reports" to="/reporting/reports" icon={BarChart3} label="All reports" />
+    ) : null,
+    can('report.exception.read') ? (
+      <NavItem key="exceptions" to="/reporting/exceptions" icon={ShieldAlert} label="Exceptions" />
+    ) : null,
+    can('report.schedule.read') ? (
+      <NavItem key="schedules" to="/reporting/schedules" icon={Send} label="Scheduled reports" />
+    ) : null,
+    can('report.settings.read') ? (
+      <NavItem key="periods" to="/reporting/settings" icon={CalendarClock} label="Reporting periods" />
+    ) : null,
+  ].filter(Boolean);
+  const reportingGroup = reportingLinks.length ? (
+    <>
+      <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+        Reporting
+      </div>
+      {reportingLinks}
+    </>
+  ) : null;
   const orgGroup = orgLinks.length ? (
     <>
       <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
@@ -120,6 +158,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
               <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
               <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
+              {reportingGroup}
               {orgGroup}
               {/* A scoped VEXO operator holds user.read inside the tenant;
                   the grant-gated links appear only while a grant is live. */}
@@ -174,6 +213,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
           ) : null}
           {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
+          {reportingGroup}
           {orgGroup}
         </>
       )}

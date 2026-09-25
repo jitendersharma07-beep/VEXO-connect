@@ -17,21 +17,26 @@ import {
 // do not offer controls the API would refuse, but hiding a button is
 // presentation and this is the enforcement.
 
-// Builds req.perm. Mount after resolveCompanyScope, which establishes the
-// tenant; this adds "and what may they do, where".
-export const loadPermissionContext = asyncHandler(async (req, _res, next) => {
-  if (!req.user) throw unauthorized();
-  const companyId = req.companyScope?.id ?? null;
-
+/**
+ * What a principal may do, and where — resolved from stored assignments and
+ * rules rather than from anything the caller sent.
+ *
+ * Separated from the middleware because a request is not the only thing that
+ * needs this answer. A scheduled report runs with nobody's session attached and
+ * still has to be held to its owner's current authority, and the one thing that
+ * must not exist is a second implementation of this resolution: the day the two
+ * disagree, the timer delivers a reach the screen would have refused.
+ */
+export const permissionContextFor = async (user, companyId) => {
   // A platform operator has no assignments and no rules of its own — its reach
-  // is the role, narrowed by the support-grant check below.
-  const isPlatform = req.user.role === 'POS_SUPER_ADMIN';
+  // is the role, narrowed by the support-grant check in requireAction.
+  const isPlatform = user.role === 'POS_SUPER_ADMIN';
 
   const [assignments, rules] = await Promise.all([
     isPlatform
       ? []
       : prisma.userStoreAssignment.findMany({
-          where: { userId: req.user.id, branch: { companyId } },
+          where: { userId: user.id, branch: { companyId } },
           select: { branchId: true },
         }),
     companyId
@@ -42,7 +47,7 @@ export const loadPermissionContext = asyncHandler(async (req, _res, next) => {
       : [],
   ]);
 
-  const scope = storeScopeFor(req.user, assignments);
+  const scope = storeScopeFor(user, assignments);
 
   // Which stores a BRANCH-level rule may bind to for this principal.
   //
@@ -65,15 +70,22 @@ export const loadPermissionContext = asyncHandler(async (req, _res, next) => {
     ruleBranchIds = inRegion.map((b) => b.id);
   }
 
-  const resolved = resolveRules(rules, { userId: req.user.id, branchIds: ruleBranchIds });
+  const resolved = resolveRules(rules, { userId: user.id, branchIds: ruleBranchIds });
 
-  req.perm = {
-    role: req.user.role,
+  return {
+    role: user.role,
     resolved,
     scope,
-    can: (action) => can({ role: req.user.role, resolved }, action),
-    actions: () => effectiveActions({ role: req.user.role, resolved }),
+    can: (action) => can({ role: user.role, resolved }, action),
+    actions: () => effectiveActions({ role: user.role, resolved }),
   };
+};
+
+// Builds req.perm. Mount after resolveCompanyScope, which establishes the
+// tenant; this adds "and what may they do, where".
+export const loadPermissionContext = asyncHandler(async (req, _res, next) => {
+  if (!req.user) throw unauthorized();
+  req.perm = await permissionContextFor(req.user, req.companyScope?.id ?? null);
   next();
 });
 

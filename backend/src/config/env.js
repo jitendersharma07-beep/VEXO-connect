@@ -43,6 +43,21 @@ export const env = {
   // A provider call that never returns must not hold a cashier, or a request
   // handler, forever. Exceeding this is UNKNOWN, never "refused".
   POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
+
+  // LANE reporting — scheduled report delivery.
+  //
+  // Where a produced report is written. There is no mail or messaging transport
+  // in this product, so a delivery lands in a spool directory and the row says
+  // so; nothing here can reach a customer's inbox. That is the shipped state and
+  // it is recorded rather than worked around: a transport that silently wrote to
+  // disk while the screen said "sent by email" would be the worst of the three
+  // possible behaviours.
+  REPORTING_SPOOL_DIR: process.env.REPORTING_SPOOL_DIR || null,
+  // The timer that fires due schedules. Off unless explicitly switched on, so
+  // deploying this lane cannot start sending anything on its own — a schedule
+  // still has to be activated by a person, and the process still has to be told
+  // to tick.
+  REPORTING_SCHEDULER: process.env.REPORTING_SCHEDULER === 'true',
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
