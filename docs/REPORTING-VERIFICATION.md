@@ -847,6 +847,28 @@ broken.
 
 ## 9. Deployment and rollback
 
+### Where the branch sits
+
+`x/reporting` is pushed to `github` and `main` is not touched. **`main` has moved
+on since this branch merged it**: it was `584de37` at the merge, and while this
+lane was finishing, a W2 integration-close lane advanced it by 15 commits. So the
+branch is behind `main` again, and merging it forward is the owner's call, not
+this lane's.
+
+What can be said about that merge without making it is that the two change sets
+are **disjoint**. `main`'s 15 commits touch one backend source file
+(`api/routes/catalog.js`), three test files, two documents and another lane's
+browser-QA artifacts; none of them touch `src/lib/reporting`, the reporting
+route, `prisma/`, any frontend page or component this lane changed, or anything
+inside `frontend/qa/screens/reporting/`. Both directions of that check were run
+with a positive control, because a pathspec that matches nothing and a pathspec
+that is misspelled produce the same empty output — and this document has already
+recorded two vacuous passes that looked like evidence (§5).
+
+One consequence worth expecting: `main` adds two large test files, so the unit
+total after a merge will be **higher than the 1054 in §6**, and a reader
+comparing the two counts should not read the difference as this lane's.
+
 ### Deploying
 
 1. Apply the two migrations. Six new tables and seven new enums; every `ALTER` in
