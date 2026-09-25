@@ -83,7 +83,32 @@ export const fmtPaise = (paise) => {
 // value, and it says so in words. It must never fall through to ₹0.00.
 export const COST_UNKNOWN = 'cost not known';
 
-export const fmtCost = (paise) => (paise === null || paise === undefined ? COST_UNKNOWN : fmtPaise(paise));
+// A unit cost is NOT a money amount and must not be routed through fmtPaise.
+//
+// The ledger holds it as Decimal(20,6) paise per BASE unit — "30.400000" is
+// thirty and two fifths of a paisa per gram — because rice at ₹60/kg is 6
+// paise per gram, and rounding that to the nearest paisa would lose a third of
+// it. fmtPaise takes INTEGER paise and returns an em-dash for anything else,
+// so every unit-cost cell in this portal was rendering "—" over a number the
+// server had computed correctly: not a wrong figure, but a figure withheld,
+// which is worse on a column whose entire job is to show cost.
+//
+// Shown in paise rather than rupees for the same reason the column exists:
+// ₹0.06 per gram is mostly zeroes, and the cheap items — where the per-unit
+// figure is the only readable one — collapse to ₹0.00.
+export const fmtCost = (paise) => {
+  if (paise === null || paise === undefined || paise === '') return COST_UNKNOWN;
+  const s = String(paise).trim();
+  if (!/^-?\d+(\.\d+)?$/.test(s)) return COST_UNKNOWN;
+  const neg = s.startsWith('-');
+  const [whole, frac = ''] = (neg ? s.slice(1) : s).split('.');
+  // Two decimals always, four when the extra two carry something. Past four,
+  // a unit cost is describing the division rather than the cost.
+  const padded = (frac + '0000').slice(0, 4);
+  const shown = padded.slice(2) === '00' ? padded.slice(0, 2) : padded;
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${neg ? '-' : ''}${grouped}.${shown} p`;
+};
 
 export const COST_STATUS_STYLES = {
   ACTUAL: 'bg-emerald-100 text-emerald-700',
