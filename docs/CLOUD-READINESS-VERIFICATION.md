@@ -698,20 +698,21 @@ does not duplicate them; it names the decisions and values only the owner holds.
 
 | | |
 |---|---|
-| **Needed** | One hostname the owner approves for staging, e.g. `staging-pos.<domain>`, and confirmation that its DNS A record may point at this host's public IP |
+| **Needed** | ~~One hostname the owner approves~~ — **supplied 2026-09-25: `staging.vexoconnect.com`.** What remains is the DNS A record itself: `staging.vexoconnect.com. 300 IN A 103.168.210.243` |
 | **Unblocks** | Blocker 1 — every claim about reaching the portal over the internet, and HTTPS end to end |
-| **Procedure** | `evidence/02-public-access-changeset-PROPOSED.md` |
+| **Procedure** | `evidence/02b-staging-vexoconnect-changeset-PROPOSED.md`, which **supersedes** `02-…` and adds the rollback plan. The `staging-pos.atcworkspace.com` option in `02-…` is withdrawn — do not run both |
 | ⚠ **Trap** | The staging certificate must be a **separate `certbot certonly`** issuance. It must **never** be an `--expand` of the production certificate, which covers only `atcworkspace.com` and `www` — an `--expand` would rewrite a certificate that currently serves production |
 
 ### Input 2 — a real mail provider
 
 | | |
 |---|---|
-| **Needed** | SMTP host, port, username, password, and the `From` address to send as. Plus **authorized access to one real inbox** to observe a delivered code — or the owner's explicit confirmation that a code arrived and worked |
+| **Needed** | ~~SMTP host, port, username, password, From~~ — **provider supplied 2026-09-25: cPanel.** Host/port/security/username/From are all now specified. What remains is **the mailbox password**, entered at a hidden local prompt, plus **confirmation of one real external inbox** |
 | **Unblocks** | Blocker 2's remaining half (item 2 above), **and item 1** — the owner's own permanent admin account cannot be created until mail works, because `bootstrap-platform-admin.mjs` correctly refuses to mint an administrator it cannot send an invitation to |
-| **Procedure** | `evidence/04b-mail-provider-owner-procedure.md` |
-| ⚠ **Trap** | `/home/atc-noc/atc-pos/.env` is mode **664** today. `chmod 600` it **before** an `SMTP_PASSWORD` goes in, or the credential lands world-readable |
-| **Then also needed** | The owner's confirmed real email address, to pass as `POS_SEED_ADMIN_EMAIL`. Ask for it at that point — not before, since the script would refuse anyway |
+| **Procedure** | `evidence/04d-staging-mail-config-PREPARED.md` for **staging**; run `~/vcx-cloudready-local/set-staging-smtp.sh`. `04b-…` remains the **production** procedure and its four traps still apply there |
+| ⚠ **Trap** | **Staging SMTP does not go in `/home/atc-noc/atc-pos/.env`** — that file is production configuration, and the brief says not to assume otherwise. Staging's values live in `~/vcx-cloudready-local/.secret-mail`, mode 600, outside the repo. (`04b`'s note that the production file is mode **664** and must be `chmod 600`ed *before* a password goes in still stands — for production) |
+| ⚠ **Second trap** | On staging `NODE_ENV` defaults to `development`, so `MAIL_ALLOWED_RECIPIENTS` is **mandatory**: setting `SMTP_HOST` without it stops the API booting. Looks like a breakage; it is the guard |
+| **Then also needed** | The owner has named `admin@vexoconnect.com` — but **no such account exists on staging**, and a same-domain message never leaves the mail server, so it cannot prove deliverability. An **external** inbox (e.g. the `ai.atcinfo@gmail.com` already on record) is needed as well, and needs explicit confirmation |
 
 ### Input 3 — decryption access
 
@@ -740,3 +741,285 @@ These are decisions but not blockers, and none of them is waiting on a value:
   characters-per-line off the self-test photograph already in hand. At ~32 or
   fewer the unit is 58 mm, which is a code change, and the whole session would
   be measuring the wrong target.
+
+## Owner answers applied — 2026-09-25T04:52Z, at `fdaccdf`
+
+The owner answered two of the three inputs above. This section records what
+each answer unblocked, what it did **not**, and five measurements taken while
+applying them. It supersedes nothing; the tables in "Owner inputs still needed"
+are still the index, with the two procedure references updated in place.
+
+### What was supplied
+
+| Input | Answer | Effect |
+|---|---|---|
+| 1 — staging hostname | "we have new domain in the name of **vexoconnect.com**" | Name decided: **`staging.vexoconnect.com`**. Still blocked on the DNS record itself |
+| 2 — mail provider | **cPanel** | Configuration specified to the variable name. Still blocked on the password |
+| 2 — owner-admin address | `admin@vexoconnect.com` | Recorded. **No such account exists on staging** — see below |
+| 3 — decryption | *(not part of this round)* | Unchanged |
+
+Neither answer closes its blocker. Both convert "we do not know what to build"
+into "we know exactly what to run, and it needs one owner action."
+
+### Input 1 — specified, and now has the rollback plan it was missing
+
+`evidence/02b-staging-vexoconnect-changeset-PROPOSED.md` supersedes
+`02-…`, whose own text said the hostname was the owner's to choose and that
+substituting it was the only change needed. The `staging-pos.atcworkspace.com`
+option is **withdrawn**, not deprioritised — do not run both.
+
+Re-measured 2026-09-25 rather than copied forward: `staging.vexoconnect.com` is
+**NXDOMAIN**, the apex is `160.19.41.196`, `mail.vexoconnect.com` is
+`103.168.211.147`, this box is `103.168.210.243`. **Three different machines
+answer for this domain** — a sentence like "the vexoconnect.com server" is now
+ambiguous and should not be used in an instruction.
+
+`ls /etc/letsencrypt/renewal/` shows `atcworkspace.com.conf`, `vexoone.com.conf`,
+`vexoone.com-0001.conf`, `vexovm.com.conf` — **no `vexoconnect.com`**. So the
+brief's "separate staging certificate, do not expand production" is satisfied
+*structurally*: there is no `vexoconnect.com` lineage here for an `--expand` to
+attach to, and the production certificate is a different file the change-set
+never opens.
+
+Three things the earlier change-set did not say, each of which would otherwise
+be discovered the hard way:
+
+- **Negative caching cuts the wrong way on creation.** The zone SOA minimum is
+  `86400`, and this box has already queried the name today. A local `dig`
+  returning nothing after the record is created may mean a cached NXDOMAIN, not
+  a failed change. Check `dig @ns1.atcinfocom.in` directly.
+- **Set the record's TTL to 300 at creation.** It is the one decision that makes
+  rollback fast, and it cannot be made retroactively.
+- **Issuing the certificate publishes the hostname permanently.** Certificate
+  Transparency logs are public and append-only, so `staging.vexoconnect.com`
+  becomes discoverable at Step 3 and **stays discoverable after a full
+  rollback**. `certbot delete` removes the local files, not the log entry.
+  Staging must therefore not rely on its URL being unknown. If the owner wants
+  it genuinely non-public, an IP allow-list in the Step 4 server block is two
+  lines now and awkward later.
+
+The rollback plan is a full table in `02b-…`: reverse order 5→4→3→2→1, each with
+its time-to-effect and residue, plus a blast-radius table. **Production is not
+in the rollback path at all** — no step writes `sites-available/default`,
+`atcworkspace.com.conf`, or anything under `/home/atc-noc/atc-pos/`.
+
+### Input 2 — specified to the variable name; the password is the only gap
+
+`evidence/04d-staging-mail-config-PREPARED.md`. It keeps `04b`'s four traps and
+**corrects one thing**, on the brief's explicit instruction:
+
+> `/home/atc-noc/atc-pos/.env` was previously production configuration. Do not
+> assume it belongs to staging or modify it for staging SMTP.
+
+`04b` §1 sends the values to that file. That is right for production and wrong
+for staging, so §1 is now **scoped to production only** — not retracted.
+Staging's values go to `~/vcx-cloudready-local/.secret-mail`, mode 600, outside
+the repo entirely. `vcxcr`'s `load_env` already sources `.secret`, so one
+guarded line wires it in with **no edit to `vcxcr`**, which belongs to another
+live session. A file outside the repo also cannot be committed by a careless
+`git add -A`, which a gitignored file inside it still can.
+
+**Three variable names are commonly guessed wrong, and the wrong name reads as
+"unset" on any machine** — a check against `SMTP_USER`, `SMTP_PASS` or
+`SMTP_SECURE` proves nothing. The code reads `SMTP_USERNAME`, `SMTP_PASSWORD`
+and `SMTP_SECURITY` (`config/env.js:53-69`). This document made that mistake
+once while auditing the running process and is recording it so the next reader
+does not repeat it.
+
+**A staging-specific trap that looks like a breakage.** `NODE_ENV` is unset on
+the staging API and `config/env.js:8` defaults it to `development`, so
+`config/env.js:167` makes `MAIL_ALLOWED_RECIPIENTS` **mandatory**: set
+`SMTP_HOST` without it and the API **will not boot**. It will look as though
+configuring mail broke staging. It did not — the guard fired, and the reason is
+the last line of `.runlogs/api.log`. This is the mirror of `04b`'s trap 3: in
+production the allow-list is inert and a typo reaches a stranger; on staging it
+is compulsory and a typo is refused before the socket opens. **Staging has a
+safety net production does not**, which is the argument for doing the first real
+delivery test here.
+
+The password is taken by `~/vcx-cloudready-local/set-staging-smtp.sh`: `read -rs`,
+so never echoed, never in shell history and **never in argv**; confirmed by
+re-entry; written under `umask 077` *before* the file exists rather than
+`chmod`ed after; and POSIX single-quote-escaped, because the file is *sourced*
+and an apostrophe in a mail password would otherwise end the quote and let the
+remainder run as shell. That escaping was verified with a negative control — a
+value carrying `'`, `"`, `` ` ``, `$`, `;` and an embedded `touch` round-trips
+exactly and creates no canary file. The script's output is key **names** and the
+file mode only, so it is safe to paste in full.
+
+**Measured mail state on staging, which corroborates all of the above:**
+
+| Table | Rows |
+|---|---|
+| `EmailOutbox` | **0** |
+| `AuthChallenge` | **0** |
+| `UserInvitation` | **0** |
+
+No message has ever been attempted from this stack, no recovery challenge has
+ever been issued, and no invitation has ever been created. Consistent with
+`SMTP_HOST` unset, and it also confirms the `x/accounts` session's restraint
+held — they declined to run a `forgot-password` probe here, and nothing shows
+one was run.
+
+### One mailbox will not close this item, and `admin@vexoconnect.com` is the wrong one to use alone
+
+`admin@vexoconnect.com` is a **local** mailbox on `mail.vexoconnect.com`. Exim
+sees a recipient in a domain it hosts and delivers it locally — **the message
+never leaves the server**, so SPF, DKIM and DMARC are never evaluated. A
+successful `admin@` → `admin@` test proves the credentials authenticate, the
+code sends, the template renders and the link is well-formed. It proves
+**nothing about deliverability**, and it will pass even with the domain's mail
+authentication in the broken state measured below.
+
+The deliverability half needs a recipient at a provider that judges the domain.
+`ai.atcinfo@gmail.com` is the natural choice — Gmail shows all three verdicts
+under *Show original* — and it needs the owner's explicit confirmation before
+use. The acceptance procedure keeps these as **two separate steps** (`04d` §7
+steps 6 and 7); collapsing them is the specific error that section exists to
+prevent.
+
+### Three DNS defects, independently reproduced
+
+Measured here and, separately, by the `x/accounts` session. Neither of us was
+working from the other's numbers.
+
+| Record | Value | Defect and consequence |
+|---|---|---|
+| SPF | `" v=spf1 ip4:103.168.211.147 -all "` | Leading **and** trailing space inside the quotes. RFC 7208 §4.5 selects records that *begin* `v=spf1`, so a strict evaluator sees **no SPF record at all** — the `-all` believed to be protecting the domain is not being read. This is not a softer policy; it is no policy |
+| DMARC | `"v=DMARC1"` | The mandatory `p=` tag is absent. RFC 7489 §6.3 discards such a record, so DMARC is **inert** rather than permissive. Fix with a complete record starting at `p=none` |
+| DKIM | `default._domainkey`, `k=rsa`, blob begins `MIGf…` | **1024-bit** RSA. Works; below the 2048-bit norm. Lowest priority of the three |
+
+The IP in the SPF record is *correct* — it is `mail.vexoconnect.com`, and FCrDNS
+checks out (MX → host → matching PTR). Only the whitespace is wrong.
+
+**Two consequences worth stating plainly.** First, the domain is new, so it has
+no sending reputation; with SPF effectively unread and DMARC inert, **expect the
+first Gmail message to land in Spam.** That is a domain-authorisation result,
+not a code result, and merging the two would produce a false defect report.
+Second, this box is `103.168.210.243` and the SPF record authorises only
+`103.168.211.147` with a hard `-all`, so **the staging backend must relay
+through authenticated cPanel submission and must never send directly** — which
+is the configuration prepared, and the only one that can work.
+
+Fixing SPF and DMARC is three zone edits, no service impact, no rollback risk,
+and independent of everything else here. They can be done first.
+
+### Owner access on staging — measured, and not what the record implied
+
+| Account | Role | Status | Last login |
+|---|---|---|---|
+| `pos.admin@atcinfocom.in` | `POS_SUPER_ADMIN` | ACTIVE | 09-24 17:54 |
+| `ai.atcinfo@gmail.com` | `POS_SUPER_ADMIN` | ACTIVE | **09-24 18:12** |
+| `admin@vexoconnect.com` | — | **does not exist** | — |
+
+Eleven `PosUser` rows, two of them platform admins, both `ACTIVE` with
+`mustChangePassword` false.
+
+So the owner **does** have working super-admin access to staging under
+`ai.atcinfo@gmail.com`, and it has been exercised — `lastLoginAt` is a
+server-side write, not a claim. That is a stronger position than "Real platform
+admin — PASS, after CR-1" conveys on its own.
+
+The gap is different from the one the record describes: **the address the owner
+has now named, `admin@vexoconnect.com`, is not provisioned.** Creating it is
+itself mail-dependent — `bootstrap-platform-admin.mjs` correctly refuses to mint
+an administrator it cannot send an invitation to — so it sits behind Input 2.
+Whether the owner wants that account at all, or is content with the Gmail one,
+is a question worth asking before the work is done.
+
+**Three failed sign-ins today.** `.runlogs/api.log` records exactly three
+requests since the API started, all `POST /api/auth/login`, all **401**, at
+approximately 04:09, 04:12 and 04:16, each carrying
+`Origin: http://127.0.0.1:8120`. Two things follow. The CORS repair is
+**holding** — these are honest 401s, not the "Not allowed by CORS" 500 that
+origin produced before. And some stored credential does not match its account.
+`~/vcx-cloudready-local/creds-map-check.mjs` is the right instrument for that —
+it verifies offline against the hash, so it cannot consume an attempt or trip
+the 15-minute lockout — and it belongs to the session that wrote it. Not
+duplicated here.
+
+### The ordering constraint that stops Input 2 closing before Input 1
+
+Email links are built from `APP_URL` (`backend/src/lib/mail/templates.js:22`),
+which on the loopback stack is `http://127.0.0.1:8120` — an address that, in a
+recipient's mail client, points at *their own machine*.
+
+| Claim | Provable now | Needs the hostname first |
+|---|---|---|
+| Delivery to a real inbox | **yes** | |
+| `From` renders correctly | **yes** | |
+| SPF/DKIM/DMARC verdict at the far end | **yes** | |
+| The emailed **code** works when typed | **yes** — it is typed into the app | |
+| The emailed **link** is usable | | **yes** |
+| Owner-admin login over the real origin | | **yes** |
+
+This is an ordering constraint, not a new blocker. Delivery can be proven today;
+link usability cannot, and no amount of mail configuration changes that.
+**Report the two separately until Input 1 lands.**
+
+### What `:5540` is running — settled without restarting it
+
+The `x/accounts` session asked, correctly, what revision the staging API has
+loaded: node resolves modules at load, the process started 04:02:43, and the
+branch head moved four times afterwards. A restart against a named commit was
+the obvious answer. It was not needed, and measurement is the stronger one:
+
+1. The newest file under `backend/src` has mtime **02:25:05** — 1h37m *before*
+   the process started. Everything it loaded is what is on disk now.
+2. The tracked tree is clean and `backend/` has no untracked or ignored files,
+   so "on disk now" is the checkout.
+3. `git log --name-only 3fbc35a..HEAD` touches **only** `deploy/` and `docs/`.
+   Zero paths under `backend/`.
+
+**`:5540` is running `backend/src` exactly as at `fdaccdf`** — and equivalently
+at `856e179`, `97457ee` and `3fbc35a`, which are byte-identical there.
+
+This conclusion has a short shelf life: **the moment any commit touches
+`backend/`, fact 3 stops holding** and the honest answer reverts to "unknown
+without a restart." Do not reuse the paragraph without re-checking the log.
+
+### MFA is not implemented — do not let a citation imply otherwise
+
+`docs/W2-INTEGRATION-CLOSE.md` on `main` cites `src/lib/{totp,userAuthority}.js`
+for account recovery. The recovery half is accurate. **`totp.js` is wired to
+nothing**: `grep -rln totp backend/src` returns exactly one path — the file
+itself. No importer, no enrolment endpoint, no second factor at login. It is
+unused scaffolding.
+
+Raised by the `x/accounts` session against its own lane's document and verified
+here independently. **No readiness verdict in this document claims MFA is
+available**, and no approved requirement asks for it.
+
+### Item 5 (module licensing, inventory) — corroborated from the runtime side
+
+Sections 3 and 4 of the 02:40Z reconciliation state this correctly from the
+source. Three runtime measurements agree, and are recorded because they are a
+different kind of evidence:
+
+- **The gate refuses nothing today.** `grep -n 'inventory\.\|purchase\.\|kitchen\.\|delivery\.'`
+  on `lib/permissions.js` returns exactly **four** lines — and they are the four
+  `EXTENSION_POINTS` *declarations* themselves. No action key in the catalogue
+  carries a module prefix, so `requiredModuleFor()` returns `null` for every
+  action that exists and the check at `middleware/permissions.js:118` is
+  unreachable in practice.
+- **Nothing has set `modules`.** All three `License` rows on staging read
+  `modules = {}`, status `ACTIVE` — the empty default, never written.
+- **Inventory is absent from this tree at the database level.** The only tables
+  matching module/licence/stock/inventory are `License` and `LicenseAddon`.
+  There is no stock table to consume from.
+
+So the entitlement middleware is a correct, fail-closed mechanism wired in
+advance of the lanes that will use it — and **module licensing is not complete**:
+no provisioning API, no UI, and no enforcement on module routes, because there
+are no module routes. **Billing → stock → reports cannot be verified**, and the
+reason is not a skipped check: the tables do not exist here. No lane was merged
+to change that, and this document does not ask for one.
+
+### Verdict — unchanged
+
+**NOT READY for owner acceptance.** The three blockers stand. Two of them now
+have a named target, a written procedure and a rollback plan instead of an open
+question, which is progress in preparation and not in status.
+
+Nothing in this section is evidence that the product is complete. A backend test
+count cannot establish that, and this section adds no test count at all.
