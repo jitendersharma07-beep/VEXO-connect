@@ -334,7 +334,27 @@ the comment now says that is a convention rather than a requirement.
 | **BLOCKED** | Reelo's auth-header scheme — needs written confirmation. |
 | **BLOCKED** | Tally voucher reconciliation against a real TallyPrime instance; credit-note, receipt, purchase, GST and cost-centre tags need an XML export of a real voucher before those posting types are enabled. |
 | **NEEDS OWNER** | Live activation of anything. Production activation, live financial transactions, real-customer bulk imports and external messages are reserved to the owner. |
-| **NEEDS OWNER** | `git push`. The lane rules forbid it and the task conditioned it on authorization; the work is committed locally on `x/providers` and has not been pushed. |
+| **NEEDS OWNER** | `git push` — see below. The five commits are local on `x/providers` and have not been pushed. |
 | **NOT DONE** | Zomato menu push and settlement statement import — `NOT_OFFERED` in the registry; there is no documented API for either. |
 | **NOT DONE** | Any provider sandbox call. No provider has been contacted. |
 | **IMPLEMENTED-UNVERIFIED** | Every adapter. They match the published documentation and pass deterministic tests; that is not the same as a provider having accepted a request, and this lane does not claim it is. |
+
+### 8.1 The push, for whoever does it
+
+Owner decision 2026-09-25: the owner pushes this, not the lane. The command is
+recorded here so it does not have to be reconstructed later:
+
+```
+git -C /home/atc-noc/vexo-connect-x-lanes/providers push -u github x/providers
+```
+
+Five commits, `1c7e8e6..2d39142`. It creates a new remote branch and touches no
+existing one. Two things worth knowing before running it: the remote
+`VEXO-connect` is **public**, so the branch and its full diff become visible to
+anyone the moment it lands and cannot be un-published; and `x/integration`
+already on the remote is the deploy/CI lane (rate limiter, e2e scripts), not
+this one — the two share no files, so the similar name is not a collision.
+
+Nothing in these commits contains a credential. The staged diff was scanned for
+connection strings, bearer tokens and key-shaped assignments before each commit,
+and `POS_INTEGRATION_SECRET_KEY` is read from the environment with no default.
