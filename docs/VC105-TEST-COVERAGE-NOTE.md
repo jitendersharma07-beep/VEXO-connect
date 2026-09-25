@@ -84,3 +84,33 @@ branch `x/vc104-slot-anchor` — the anchor turns out to be derivable from the
 than the migration this note first claimed. See `docs/VC104-BACKEND-DEFECTS.md`
 §D-2 *What this does not settle*.
 Nothing here needs a decision before VC-105 ships.
+
+**Update 09-25 — the limitation is fixed on the branch, and still open on
+`main`.** Both halves of that sentence matter, so neither is dropped here.
+
+*Fixed on the branch.* `x/vc104-slot-anchor` anchors a moved order to the `at`
+of the latest `REASSIGNED` event into its current store, which is exactly the
+derivation this note predicted, with **no new column** — the migration it adds
+is two `CREATE INDEX` and nothing else. I verified it independently rather than
+on report: a worktree built from `4b0ea9f` plus the branch's uncommitted work,
+on a throwaway Postgres of my own, gives **673/673 backend tests green (22
+files)**, and the original measurement (cap 2, three back-dated transfers ⇒ four
+live orders reporting `booked = 1, available = true`) now reads **2 live and
+`booked = 2`**, with the second transfer refused `409 AT_CAPACITY`.
+
+*Still open on `main`.* That work is **uncommitted in its own worktree** as of
+this writing, so nothing of it is on `main` (`dd15369`) or on `github/main`
+(`584de37`). Anyone reading this note against either tip is still reading a tree
+where a late transfer occupies nothing. Do not treat the paragraph above as
+shipped until the branch lands.
+
+*One gap the branch's own negative controls found.* Its mutation battery runs
+twelve mutants; eleven are caught. The twelfth — delete the binding capacity
+re-check from inside the reassign transaction — leaves **the entire suite
+green**, because every sequential test is already refused by the advisory read
+that runs before the transaction. So the in-transaction re-check on reassign is
+currently unpinned. That is a test-coverage gap, not a defect: the call is
+present and correct. It is also, read the other way, the cleanest evidence that
+the binding check does **not** change ordinary behaviour — it only decides
+genuine races, which is what keeps the advisory capacity contract intact.
+Reported to the branch owner with a proposed deterministic test.
