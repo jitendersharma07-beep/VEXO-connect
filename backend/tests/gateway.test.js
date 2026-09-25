@@ -711,7 +711,12 @@ describe('the shipped, unconfigured state', () => {
     // The registry's gate is a whitelist, so an unfamiliar NODE_ENV such as
     // "staging" refuses rather than quietly allowing a settle-on-command
     // adapter. This is the second, independent gate behind the boot check.
-    await withEnv({ NODE_ENV: 'staging' }, async () => {
+    // POS_QR_BASE_URL is cleared because importing the registry pulls in
+    // config/env.js, which refuses a localhost card URL anywhere but test and
+    // development. That refusal is correct, but it belongs to the QR lane and
+    // not to this test — without the override, anyone running the suite with
+    // the dev stack's base URL exported sees this fail for the wrong reason.
+    await withEnv({ NODE_ENV: 'staging', POS_QR_BASE_URL: undefined }, async () => {
       const { getAdapter } = await import('../src/lib/gateway/index.js');
       expect(() => getAdapter()).toThrowError(/not enabled on this deployment/i);
     });

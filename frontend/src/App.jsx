@@ -17,6 +17,7 @@ import PhoneOrders from './pages/PhoneOrders.jsx';
 import PhoneOrderNew from './pages/PhoneOrderNew.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
+import FloorDesigner from './pages/FloorDesigner.jsx';
 import SalesReport from './pages/SalesReport.jsx';
 import MenuProfitability from './pages/MenuProfitability.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
@@ -30,6 +31,7 @@ import Devices from './pages/Devices.jsx';
 import Permissions from './pages/Permissions.jsx';
 import CustomerDisplay from './pages/CustomerDisplay.jsx';
 import PairDisplay from './pages/PairDisplay.jsx';
+import GuestTable from './pages/GuestTable.jsx';
 import NotFound from './pages/NotFound.jsx';
 
 function Home() {
@@ -59,6 +61,12 @@ export default function App() {
                 pairing token, so it lives outside RequireAuth on purpose —
                 an unpaired display shows its pairing screen, never login. */}
             <Route path="/display" element={<CustomerDisplay />} />
+            {/* LANE floorplan — the address printed on a table card. Outside
+                RequireAuth because the credential is the token in the path: a
+                guest has no staff session and must never meet a login form.
+                This path is half of POS_QR_BASE_URL/t/<token> and cannot be
+                renamed without reprinting every card already on a table. */}
+            <Route path="/t/:token" element={<GuestTable />} />
             <Route
               path="/"
               element={
@@ -143,6 +151,14 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <TablesAdmin />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="floor-designer"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <FloorDesigner />
                   </RequireRoles>
                 }
               />

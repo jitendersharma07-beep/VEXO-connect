@@ -4,7 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import pinoHttp from 'pino-http';
 
-import { env, gatewayEnabled } from './config/env.js';
+import { env, gatewayEnabled, qrOrderingEnabled } from './config/env.js';
 import { logger, resSerializer } from './lib/logger.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { notFoundHandler, errorHandler } from './middleware/error.js';
@@ -37,6 +37,9 @@ import deviceRoutes from './api/routes/devices.js';
 import permissionRoutes from './api/routes/permissions.js';
 // LANE vc104-api
 import phoneOrderRoutes from './api/routes/phoneOrders.js';
+import floorRoutes from './api/routes/floors.js';
+import tableQrRoutes from './api/routes/tableQr.js';
+import guestQrRoutes from './api/routes/guestQr.js';
 
 // LANE foundation, Phase 2 — VC-102.
 import promotionRoutes from './api/routes/promotions.js';
@@ -154,6 +157,18 @@ export const createApp = () => {
 
   // LANE vc104-api
   api.use('/phone-orders', phoneOrderRoutes);
+
+  // LANE floorplan
+  api.use('/floors', floorRoutes);
+  api.use('/table-qr', tableQrRoutes);
+  // PUBLIC, and the only unauthenticated write surface in the product. It
+  // carries no requirePosAuth by design: the credential is the token printed on
+  // the card. Mounted only when a customer-facing origin is configured, so a
+  // deployment that has not set POS_QR_BASE_URL has no guest endpoint to probe
+  // at all — the same reasoning as the gateway webhook above.
+  if (qrOrderingEnabled) {
+    api.use('/guest/qr', guestQrRoutes);
+  }
 
   app.use('/api', api);
   app.use('/health', healthRoutes);

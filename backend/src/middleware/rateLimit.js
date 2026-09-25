@@ -33,6 +33,23 @@ export const globalLimiter = rateLimit({
   message,
 });
 
+// The guest QR endpoints are the only unauthenticated, write-capable surface in
+// the product: anyone who can photograph a table can reach them. The global
+// limiter is far too generous for that — 300/minute is a comfortable budget for
+// walking four-digit join codes or minting visits. A real party scans once,
+// joins once and submits a handful of times, so 40 a minute is invisible to them
+// and ruinous to a script.
+export const guestQrLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: shouldSkip,
+  message: {
+    error: { code: 'POS_RATE_LIMITED', message: 'Too many requests from this phone. Please wait a moment.' },
+  },
+});
+
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,

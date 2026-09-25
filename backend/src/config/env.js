@@ -43,6 +43,13 @@ export const env = {
   // A provider call that never returns must not hold a cashier, or a request
   // handler, forever. Exceeding this is UNKNOWN, never "refused".
   POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
+  // Origin the printed table QR codes point at — the address a guest's phone,
+  // on mobile data and not on the restaurant's LAN, has to be able to reach.
+  // Deliberately NOT defaulted to APP_URL: APP_URL is the staff console and is
+  // routinely a localhost or LAN address, and a card printed with one of those
+  // is scrap. Unset means QR issuing refuses; it is never guessed from the
+  // request's Host header, which a caller controls.
+  POS_QR_BASE_URL: process.env.POS_QR_BASE_URL || null,
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
@@ -107,3 +114,34 @@ if (env.POS_GATEWAY_API_BASE) {
 if (!Number.isFinite(env.POS_GATEWAY_TIMEOUT_MS) || env.POS_GATEWAY_TIMEOUT_MS <= 0) {
   throw new Error('POS_GATEWAY_TIMEOUT_MS must be a positive number of milliseconds');
 }
+
+// A QR card is printed once and then glued to a table, so a bad base URL is not
+// a bug that gets noticed and redeployed — it is a stack of scrap paper and a
+// room full of guests who cannot order. The checks therefore run at boot, not at
+// print time. http and localhost are allowed in test and development so the
+// suite and a laptop can exercise the flow; the whitelist is on the safe
+// environments, so an unset NODE_ENV refuses rather than allows.
+if (env.POS_QR_BASE_URL) {
+  let parsed;
+  try {
+    parsed = new URL(env.POS_QR_BASE_URL);
+  } catch {
+    throw new Error('POS_QR_BASE_URL must be an absolute URL');
+  }
+  const local = env.NODE_ENV === 'test' || env.NODE_ENV === 'development';
+  if (!local && parsed.protocol !== 'https:') {
+    throw new Error('POS_QR_BASE_URL must be an https:// origin outside test and development');
+  }
+  const unreachable = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
+  // URL.hostname keeps the brackets on an IPv6 literal ("[::1]"), so the bare
+  // form in the list above would never match without this.
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (!local && (unreachable.includes(host) || host.endsWith('.local'))) {
+    throw new Error(`POS_QR_BASE_URL host "${parsed.hostname}" is not reachable from a customer's phone`);
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error('POS_QR_BASE_URL must not carry a query string or fragment');
+  }
+}
+
+export const qrOrderingEnabled = Boolean(env.POS_QR_BASE_URL);
