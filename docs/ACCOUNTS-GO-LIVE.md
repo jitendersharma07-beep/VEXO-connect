@@ -3,9 +3,17 @@
 What an operator does to take this from "implemented and tested" to "a real
 customer can be onboarded". Written to be followed in order, once.
 
-Everything below is **implemented and verified against a local SMTP sink**.
-The one thing that is **not** proven is delivery through a real provider,
-because no mailbox credentials exist on the deployment yet. Step 1 is that
+Everything below is **implemented and verified against a local SMTP sink**. That
+is one of three separate statuses, and §6 keeps them apart on purpose:
+
+| | |
+|---|---|
+| **A** Accounts software, against a local SMTP sink | **PASS** |
+| **B** The running staging stack | **not established here — the staging owner's** |
+| **C** A real mailbox receiving an invitation or reset | **NOT DONE** — needs owner input |
+
+A passing A is not B, and neither is C. No mailbox credential exists on the
+deployment yet, so nothing has left this box for the internet. Step 1 is that
 configuration, and nothing else here works until it is done — deliberately.
 
 ---
@@ -48,28 +56,66 @@ MAIL_FROM=VEXO Connect <no-reply@vexoconnect.com>
 APP_URL=https://<production host>/pos
 ```
 
-**Why `mail.vexoconnect.com` specifically, and not ATC's mail server.** Measured
-2026-09-25, not assumed:
+**Why `mail.vexoconnect.com` specifically, and not ATC's mail server.** The table
+below separates what was *measured* from what is *inferred*, because an earlier
+revision of this section blurred the two and drew a conclusion the evidence does
+not support. Measured 2026-09-25, each value re-read rather than remembered.
+
+**Verified** — observed directly, and where DNS is involved, confirmed against
+the authoritative nameserver (`ns1/ns2.atcinfocom.in`) as well as a public
+resolver, so a caching resolver cannot be the source:
 
 | Fact | Value |
 |---|---|
-| `vexoconnect.com` SPF | `v=spf1 ip4:103.168.211.147 -all` |
-| `mail.vexoconnect.com` resolves to | `103.168.211.147` — the authorised IP |
 | `vexoconnect.com` MX | `mail.vexoconnect.com` |
+| `mail.vexoconnect.com` A | `103.168.211.147` |
+| Reverse DNS for `103.168.211.147` | `mail.vexoconnect.com` — forward-confirmed, which receivers check |
+| `vexoconnect.com` SPF | `" v=spf1 ip4:103.168.211.147 -all "` — note the leading space; see below |
 | Port 587 greeting | `220 ns1.atcinfocom.in ESMTP Postfix` |
 | Advertises | `STARTTLS`, `AUTH PLAIN LOGIN` — what `smtpClient.js` implements |
-| This application server | `103.168.211.243` — **not** authorised |
+| TLS certificate | Let's Encrypt, CN `www.vexoconnect.com`, **SAN includes `mail.vexoconnect.com`**; `openssl -verify_hostname mail.vexoconnect.com` → `Verify return code: 0 (ok)`. Valid 2026-09-24 → 2026-12-23 |
+| Certificate validation in our client | **Enforced.** `tlsOptions` defaults to `{}` (`smtpClient.js:110`) and `mailer.js` never overrides it, so `rejectUnauthorized` stays at Node's default `true`; `servername: host` is set on both TLS paths (lines 133, 195). No env var anywhere in `src/` can weaken it |
+| Envelope sender | **Correct.** `MAIL FROM:<…>` uses `addrOf(from)`, which strips a display name to a bare address — SPF is evaluated on the envelope, so `VEXO Connect <no-reply@…>` must not go on the wire verbatim, and does not |
+| DKIM key published | `default._domainkey.vexoconnect.com` exists (`v=DKIM1; k=rsa; p=MIGf…`). Selectors `mail`, `dkim`, `k1`, `s1`, `selector1`, `google` are absent |
 
-The SPF record ends in `-all`, a hard fail, and names exactly one address. So
-mail for this domain has to be submitted **through the domain's own server**,
-authenticated: that way the outbound hop leaves `103.168.211.147`, which SPF
-authorises. `mail.atcinfocom.in` (`103.168.210.27`) is a working mail server and
-the wrong answer — a `@vexoconnect.com` sender submitted through it fails SPF at
-the far end, and the symptom is mail that this box reports as *sent* and the
-recipient never sees.
+**Not verified** — do not restate these as facts:
 
-Only the username and password are missing. The host, port, security and sender
-above are verified.
+| Open question | Why it is not settled from here |
+|---|---|
+| The relay's actual **outbound** IP | `103.168.211.147` is what the name resolves *to*. A relay's egress address need not equal its inbound A record. Only a `Received:` header at the receiving end proves it |
+| Whether the relay **DKIM-signs** on submission | `smtpClient.js` does no signing — grepped, not assumed. A published key proves a key exists, not that this relay uses it. Only headers on an arriving message prove signing |
+| Whether the mailbox may send as `no-reply@vexoconnect.com` | Needs the credential. Many providers refuse a `From` that differs from the authenticated mailbox, which would surface as a `550` on `MAIL FROM` or `DATA` |
+
+**On the SPF record's leading space.** The published TXT is `" v=spf1 …"`, with a
+space before `v=`. RFC 7208 §4.5 says to *"discard records that do not begin with
+a version section of exactly `v=spf1`"*. Read strictly, this record is discarded,
+the domain evaluates as having **no** SPF record, and the `-all` never applies —
+the opposite of the hard-fail protection the rest of this section assumed.
+Implementations vary in whether they trim leading whitespace, and which ones do
+was **not** tested, so treat the record's effect as unknown rather than either
+way. The trailing space is harmless (the ABNF is `record = version terms *SP`).
+Correcting it is a one-character DNS edit, **and it is the owner's or the DNS
+host's to make — it is proposed here, not done.**
+
+**What this does and does not justify.** Submitting through the domain's own
+authenticated server remains the right choice: it is the only host the SPF record
+names, it has matching forward and reverse DNS, and it is where a DKIM signature
+could be applied. What the earlier revision got wrong was the negative claim —
+that a `@vexoconnect.com` message relayed through `mail.atcinfocom.in`
+(`103.168.210.27`) would be "accepted here and never seen". That does not follow:
+
+- RFC 7208 §8.4 is explicit that *"disposition of SPF fail messages is a matter
+  of local policy."* A fail is a signal, not a rejection. Receivers may reject,
+  defer, annotate a header, or file it in Junk.
+- `vexoconnect.com` publishes **no enforcing DMARC policy** (below), so nothing
+  instructs a receiver to act on the failure.
+- This application server's own address (`103.168.211.243`, confirmed as this
+  host's egress) is **irrelevant** to SPF when mail is submitted through a
+  smarthost, because the sending IP a receiver evaluates is the relay's, not
+  ours. Reasoning from our own IP was a category error.
+
+Only the username and password are missing. Host, port, security, sender form
+and certificate validation are verified above.
 
 ### Then prove it, before trusting it
 
@@ -96,15 +142,38 @@ Notes that are enforced, not advice:
 - `SMTP_HOST` without `MAIL_FROM` is refused, as is `SMTP_USERNAME` without
   `SMTP_PASSWORD`. Half a configuration fails at boot rather than at the first
   customer.
-- The sending domain must be authorised for that sender (SPF/DKIM) or the mail
-  is accepted here and dropped at the far end.
-- **`_dmarc.vexoconnect.com` is currently `v=DMARC1` with no `p=` tag.** A DMARC
-  record without a policy tag is invalid, and receivers that parse strictly
-  ignore the whole record. That does not block delivery — SPF still passes on its
-  own — but it forfeits the reputation benefit and is a plausible cause if
-  invitations land in Junk while the delivery check above reports PASS. Fixing it
-  is a DNS edit (`v=DMARC1; p=none; rua=mailto:...` to start, tightening later),
-  not a code change, and it is the owner's or the DNS host's to make.
+- The sending domain should be authorised for that sender (SPF/DKIM). If it is
+  not, the mail is accepted by the relay and its treatment at the far end is the
+  receiver's choice — reject, quarantine, Junk, or deliver anyway. "Accepted
+  here" genuinely tells you nothing about what the recipient sees, but the
+  failure mode is *unpredictable*, not *guaranteed loss*.
+- **`_dmarc.vexoconnect.com` is currently exactly `v=DMARC1`** — no `p=`, and no
+  `rua=`. Checked against RFC 9989 (DMARC, Standards Track) rather than from
+  memory, because the previous wording here was wrong. What the RFC actually
+  says, in two parts that matter in this order:
+  - `p` is *"RECOMMENDED for DMARC Policy Records"*, not mandatory, and *"if this
+    tag is not present in an otherwise syntactically valid DMARC Policy Record,
+    then the record is treated as if it included `p=none`."* So a missing `p` is
+    **not** the fatal syntax error this document used to claim.
+  - But the record is then subject to the rule for records lacking a valid `p`:
+    if a `rua` is present with at least one valid URI the receiver *"MUST act as
+    if a record containing `p=none` was retrieved and continue processing"* —
+    **otherwise** *"the Mail Receiver applies no DMARC processing to this
+    message."* This record has no `rua`, so the second branch applies.
+
+  Net effect: DMARC is published but **inert** — no policy is enforced, and
+  because there is no `rua`, no aggregate reports are produced either, so there
+  is no feedback channel to diagnose delivery problems with. It does not block
+  delivery, and it is a plausible contributor if invitations land in Junk while
+  the delivery check above reports PASS. Note also that RFC 9989 permits
+  receivers to *"accept email that fails the DMARC validation check even if the
+  published Domain Owner Assessment Policy is `reject`"* — DMARC never
+  guarantees an outcome in either direction.
+
+  A record such as `v=DMARC1; p=none; rua=mailto:<a mailbox someone reads>` would
+  make it active and start the reports. **This is a proposal requiring the
+  owner's approval, not a step to carry out** — no DNS record has been changed,
+  and none should be without that approval.
 - `MAIL_ALLOWED_RECIPIENTS` is a non-production safety net (e.g.
   `*@vexoconnect.com`). Leave it **unset in production**; set it anywhere a
   copied-in production database could otherwise mail real customers.
@@ -224,13 +293,39 @@ person can use "Forgot password?" themselves.
   which is the single place in the codebase that mints a session. So recovery
   cannot walk past any gate that lives at login — present or future.
 
-  Stated that way deliberately, because **MFA is not wired up.** The schema has
-  `TotpCredential` and `MfaRecoveryCode`, the audit enum has `MFA_LOGIN`, and
-  `src/lib/totp.js` is implemented and unit-tested — but nothing in `src/`
-  imports any of it. There is no enrolment endpoint and no second factor at
-  login. Do not read the reset flow's safety as evidence that MFA is enforced;
-  it is evidence that MFA *can* be added at login later without reopening
-  recovery as a bypass.
+  Stated that way deliberately, because **MFA is not implemented in the login
+  flow.** The schema has `TotpCredential` and `MfaRecoveryCode`, the audit enum
+  has `MFA_LOGIN`, and `src/lib/totp.js` is implemented and unit-tested — but
+  nothing in `src/` imports any of it (grepped, and re-grepped). There is no
+  enrolment endpoint and no second factor at login.
+
+  To be unambiguous about what the bullet above is worth: **"recovery does not
+  mint a session" is not MFA enforcement.** It is a narrower claim — that
+  recovery cannot *bypass* whatever login enforces. If login enforces nothing,
+  there is nothing to bypass, and the property is still worth keeping because it
+  is what stops a future second factor from being undone by the reset screen.
+
+  **Checked against the approved requirements, not assumed:** no requirement for
+  MFA, 2FA or a second factor exists in `docs/` at all — the only textual match
+  is a hex string in an unrelated deploy note. The `TotpCredential`,
+  `MfaRecoveryCode` and `totp.js` scaffolding was added by this lane's own commit
+  `ccf8423`, unrequested, and is unused. So there is no approved enforcement to
+  "finish": whether MFA should exist at all is an **owner decision**, and
+  implementing it belongs to the authentication owner, not here. Nothing was
+  built speculatively on the strength of scaffolding this lane itself introduced.
+
+  The related gap that *is* on the record is **F-3** in
+  `docs/CLIENT-HANDOVER-SCOPE.md`, and it is genuine: `requirePosAuth` reads
+  `mustChangePassword` into `req.user` (`middleware/auth.js:51`) but never gates
+  on it, so the flag is enforced by the browser alone. Checked rather than
+  repeated: **no current code path can create the dangerous combination.** Every
+  writer of `mustChangePassword: true` pairs it with a credential no string
+  satisfies (`users.js:213`, `users.js:363`), and the paths that set a real
+  password set the flag to `false` (`auth.js:205`, `invitations.js:191`,
+  `accountRecovery.js:256`). The residual exposure is therefore rows predating
+  this lane that hold the flag *and* a known password. F-3 is marked "Open —
+  owner decision", the fix touches every route, and it sits with the
+  authentication owner — so it is reported here, not taken.
 
 ---
 
@@ -274,12 +369,60 @@ They assert the *right* refusal: another tenant's row reads as **404, identical
 to a row that does not exist**, rather than 403. A 403 would confirm the record
 exists and turn the endpoint into an existence oracle.
 
-**Not proven.** Delivery through a real provider. Every message so far has gone
-to a local sink that relays nothing. Step 1 is the gap, and after step 1 the
-first real evidence is the bootstrap invitation arriving at
-`support@vexoconnect.com` — **and that address has not been confirmed by the
-owner as a mailbox they can open.** It is the address the earlier report named,
-which is not the same as confirmation.
+### Three statuses, deliberately not merged into one
+
+These get conflated, and conflating them is how staging-only work gets described
+as live. Each line below is a separate claim with separate evidence, and passing
+one says nothing about the next.
+
+| # | Status | State | Evidence, and its limit |
+|---|---|---|---|
+| **A** | Accounts **software** verified against a **local SMTP sink** | **PASS** | 820 backend tests + `accounts-journey.mjs` 46/46 on a fresh database. The sink is a real SMTP conversation, and it **relays nothing** — so this proves the software, and nothing about the internet |
+| **B** | The **running staging stack** verified | **NOT ESTABLISHED — not ours to establish** | See below |
+| **C** | **Real mailbox** invitation / reset verified | **NOT DONE** | Blocked on owner input: a mailbox credential in the secret store and a confirmed recipient. `support@vexoconnect.com` is still a **placeholder** — it is the address an earlier report named, which is not the owner confirming it exists and that they can open it |
+
+**A does not imply B, and B does not imply C.** In particular: the 46-check
+journey is an **isolated** harness that builds its own database and its own sink.
+It says nothing whatsoever about the staging stack, and it **does not prove the
+previously reported staging API 502 is fixed.**
+
+**On B, and why this lane stops here.** Measured 2026-09-25, and the last line is
+the reason the rest cannot be concluded from here:
+
+- `http://127.0.0.1:8120/api/health` answers **200** `{"status":"ok","service":"atc-pos-api"}`.
+  So the **502 report is stale** — but a health endpoint answering is not the
+  accounts endpoints working, and it is not a mail configuration.
+- That edge fronts `127.0.0.1:5540`, a `node src/index.js` whose cwd is the
+  **`cloud-readiness` lane**, not this one. Staging belongs to that lane's owner.
+- That lane is running an **older accounts revision**: `650be16` is an ancestor of
+  its head, while `9c43b4d`, `584de37` and `4eca256` are **not**.
+- The process started `04:02:43`; the lane's head commit is dated `04:03:25` —
+  **42 seconds later.** The running code is therefore whatever was on disk at
+  module-load time and is not provably the current checkout. Only that owner can
+  say what is actually loaded.
+- Staging's **mail configuration is unknown.** It cannot be read from here: the
+  environment of another owner's process is not ours to read, and `mailStatus()`
+  in `mailer.js` is surfaced by **no route**, so there is no endpoint that reports
+  it either. *(That is a real operability gap and a fair thing to add later — a
+  deployment should be able to answer "is mail configured" without someone
+  reading its environment. It would need care not to disclose the username.)*
+
+Two read-only probes were attempted and both were **discarded by their own
+negative controls**, which is the only reason this section says "not established"
+rather than something more confident:
+
+1. `GET /api/atc/companies` → 401. But `/api/atc/definitely-not-a-route` → **401
+   too**, because the router-level guard fires on the mount prefix before routing.
+   The 401 distinguishes nothing.
+2. `OPTIONS` on each accounts route → 204 with no `Allow` header. But
+   `OPTIONS /api/definitely-not-a-route-xyz` → **204 as well**: CORS answers every
+   preflight ahead of routing. Also distinguishes nothing.
+
+A probe that returns the same answer for "present" and "absent" is not evidence.
+The remaining way to discriminate would be a `POST` to a recovery or invitation
+route, which **writes rows and can send mail in someone else's environment** — so
+it was not done. **Verifying accounts on staging is the staging owner's call, on
+their stack, and it is handed to them rather than assumed.**
 
 **Unblocked, but not run here.** `deploy/e2e-workflow.mjs` (the till money-path
 harness) used to seat its Cyber Hub staff from the temporary password that came

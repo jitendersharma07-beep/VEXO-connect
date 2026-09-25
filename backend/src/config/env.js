@@ -57,8 +57,12 @@ export const env = {
   SMTP_SECURITY: process.env.SMTP_SECURITY || 'starttls',
   SMTP_USERNAME: process.env.SMTP_USERNAME || null,
   SMTP_PASSWORD: process.env.SMTP_PASSWORD || null,
-  // Envelope + header sender. The provider must be authorised to send as this
-  // domain (SPF/DKIM), or the mail is accepted here and dropped there.
+  // Envelope + header sender. The provider should be authorised to send as this
+  // domain (SPF/DKIM). If it is not, the relay still accepts the message and what
+  // happens next is the receiver's local policy — reject, quarantine, Junk, or
+  // deliver regardless. So acceptance here says nothing about receipt there; it
+  // is not, however, the guaranteed loss an earlier version of this comment
+  // claimed. See docs/ACCOUNTS-GO-LIVE.md §1 for the measured DNS facts.
   MAIL_FROM: process.env.MAIL_FROM || null,
   MAIL_REPLY_TO: process.env.MAIL_REPLY_TO || null,
   // Outside production, a comma-separated allowlist of recipient patterns
