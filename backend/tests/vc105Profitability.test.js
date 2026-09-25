@@ -191,11 +191,32 @@ describe('VC-105 engine: cost coverage', () => {
     expect(r.rows[0].contributionMarginPaise).toBeNull();
     expect(r.rows[0].marginPercent).toBeNull();
     expect(r.rows[0].costStatus).toBe('MISSING');
+    // Task #11 (docs/VC105-TEST-COVERAGE-NOTE.md): the suite pinned the refusal
+    // in four places and never the reason string the client prints ("Reason no
+    // cost exists: …"). It is computed as `[...costReasons][0] ?? 'NO_COST_SOURCE'`,
+    // so a regression surfaces as a plausible-looking fallback rather than an
+    // error — asserting MISSING without the reason cannot catch that.
+    expect(r.rows[0].costStatusReason).toBe('NO_COST_SOURCE');
     expect(r.rows[0].segment).toBe('UNCLASSIFIED');
     // The sales side is still fully reported — only the cost side is unknown.
     expect(r.rows[0].netSalesPaise).toBe(10000);
     expect(r.totals.cogsPaise).toBeNull();
     expect(r.totals.contributionMarginPaise).toBeNull();
+  });
+
+  it('the provider\'s own uncosted reason reaches the row, not the fallback', () => {
+    // Negative control for the assertion above, and the half of #11 the note did
+    // not ask for. `NO_COST_SOURCE` is what the engine invents when the provider
+    // said nothing, so pinning only that case would still pass if
+    // costStatusReason were hardcoded to it. This line has a cost entry that
+    // exists and explains itself — costProvider.js emits NO_RECIPE, EMPTY_RECIPE,
+    // INCOMPLETE_RECIPE_LINE and INVALID_YIELD — and the row must carry that
+    // reason through, because it is what the operator reads on screen
+    // (MenuProfitability.jsx:276–278) and the four are not interchangeable.
+    const r = run([order()], costs({ costPaise: null, costStatus: 'MISSING', uncostedReason: 'NO_RECIPE' }));
+    expect(r.rows[0].costStatus).toBe('MISSING');
+    expect(r.rows[0].costStatusReason).toBe('NO_RECIPE');
+    expect(r.rows[0].cogsPaise).toBeNull();
   });
 
   it('totals cover costed lines only, and say how many they left out', () => {
