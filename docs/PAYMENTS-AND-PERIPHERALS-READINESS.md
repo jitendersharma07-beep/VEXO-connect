@@ -748,14 +748,18 @@ drawer and hold a card. Each line is a yes/no with a witness.
 | **Tested SHA** | **`c030ff2`** — 33 files, 963 tests, 0 failed, 0 skipped (§6) |
 | Delivered as | branch `x/payments-integration` on `github`, verified by `git ls-remote` rather than the local ref |
 
-**`c030ff2` is the tested SHA, and it is the last commit that changes anything
-executable.** The commit after it edits only the lines that name the SHA — this
-table's last rows, the tier-1 block in §6 and the tier-1 row in §1. No source,
-no schema, no migration, no test. A document cannot state its own commit's hash,
-so one such commit is unavoidable; testing again to record a further SHA would
-only move the same gap along by one. What is avoidable is recording a SHA that
-was never tested, and that has not been done here — the gate was re-run at every
-commit that touched code, as the table in §6 shows.
+**`c030ff2` is the tested SHA, and it is the last commit in this branch that
+changes anything executable.** Everything above it is documentation: the lines of
+this note that name the SHA and the counts, and one more docs-only merge of
+`main` (`ea04c07`) carrying a peer's own report. That is not an assertion —
+`git diff --name-only c030ff2..HEAD` returns two paths, both under `docs/`. No
+source, no schema, no migration, no test.
+
+A document cannot state its own commit's hash, so at least one such commit is
+unavoidable; testing again to record a further SHA would only move the same gap
+along by one. What is avoidable is recording a SHA that was never tested, and
+that has not been done here — the gate was re-run at every commit that touched
+code, as the table in §6 shows.
 
 **A peer moved `main` during this verification, and that was merged in rather
 than delivered around.** `main` went from `584de37` to `820a5a1` between the
