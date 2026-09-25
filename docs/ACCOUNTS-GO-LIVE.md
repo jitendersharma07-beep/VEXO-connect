@@ -28,14 +28,52 @@ a tracked file, and not by pasting the password into a chat or a terminal that
 keeps scrollback:
 
 ```
-SMTP_HOST=<provider host>
+SMTP_HOST=mail.vexoconnect.com
 SMTP_PORT=587
-SMTP_SECURITY=starttls          # or tls with port 465
-SMTP_USERNAME=<mailbox user>
-SMTP_PASSWORD=<mailbox password or app password>
+SMTP_SECURITY=starttls
+SMTP_USERNAME=<mailbox user>          # <-- OWNER INPUT
+SMTP_PASSWORD=<mailbox password>      # <-- OWNER INPUT, never into a chat
 MAIL_FROM=VEXO Connect <no-reply@vexoconnect.com>
 APP_URL=https://<production host>/pos
 ```
+
+**Why `mail.vexoconnect.com` specifically, and not ATC's mail server.** Measured
+2026-09-25, not assumed:
+
+| Fact | Value |
+|---|---|
+| `vexoconnect.com` SPF | `v=spf1 ip4:103.168.211.147 -all` |
+| `mail.vexoconnect.com` resolves to | `103.168.211.147` — the authorised IP |
+| `vexoconnect.com` MX | `mail.vexoconnect.com` |
+| Port 587 greeting | `220 ns1.atcinfocom.in ESMTP Postfix` |
+| Advertises | `STARTTLS`, `AUTH PLAIN LOGIN` — what `smtpClient.js` implements |
+| This application server | `103.168.211.243` — **not** authorised |
+
+The SPF record ends in `-all`, a hard fail, and names exactly one address. So
+mail for this domain has to be submitted **through the domain's own server**,
+authenticated: that way the outbound hop leaves `103.168.211.147`, which SPF
+authorises. `mail.atcinfocom.in` (`103.168.210.27`) is a working mail server and
+the wrong answer — a `@vexoconnect.com` sender submitted through it fails SPF at
+the far end, and the symptom is mail that this box reports as *sent* and the
+recipient never sees.
+
+Only the username and password are missing. The host, port, security and sender
+above are verified.
+
+### Then prove it, before trusting it
+
+```
+node backend/scripts/verify-mail-delivery.mjs support@vexoconnect.com
+```
+
+It sends one real message through `sendMail()` — the same function invitations
+and recovery use, outbox row included — and prints PASS/FAIL plus the provider's
+queue id. It never prints the password, so the output is safe to paste.
+
+It stops short of claiming success. **SMTP acceptance is not inbox delivery:**
+SPF, DKIM and DMARC are judged by the receiving side, after the script has
+exited 0. The script ends by naming the subject line to go and look for. Only a
+human opening the mailbox closes that gap.
 
 Notes that are enforced, not advice:
 
@@ -49,6 +87,13 @@ Notes that are enforced, not advice:
   customer.
 - The sending domain must be authorised for that sender (SPF/DKIM) or the mail
   is accepted here and dropped at the far end.
+- **`_dmarc.vexoconnect.com` is currently `v=DMARC1` with no `p=` tag.** A DMARC
+  record without a policy tag is invalid, and receivers that parse strictly
+  ignore the whole record. That does not block delivery — SPF still passes on its
+  own — but it forfeits the reputation benefit and is a plausible cause if
+  invitations land in Junk while the delivery check above reports PASS. Fixing it
+  is a DNS edit (`v=DMARC1; p=none; rua=mailto:...` to start, tightening later),
+  not a code change, and it is the owner's or the DNS host's to make.
 - `MAIL_ALLOWED_RECIPIENTS` is a non-production safety net (e.g.
   `*@vexoconnect.com`). Leave it **unset in production**; set it anywhere a
   copied-in production database could otherwise mail real customers.
@@ -162,13 +207,25 @@ person can use "Forgot password?" themselves.
 - On success, every session is revoked.
 - It works when a licence has **expired** — a lapsed renewal must not lock an
   owner out of the account they need in order to renew — and it does **not**
-  reactivate a suspended account or bypass MFA.
+  reactivate a disabled or suspended account.
+- **Recovery never issues a session.** A completed reset answers with a message
+  and nothing else: no token, no cookie. The only way in is `POST /auth/login`,
+  which is the single place in the codebase that mints a session. So recovery
+  cannot walk past any gate that lives at login — present or future.
+
+  Stated that way deliberately, because **MFA is not wired up.** The schema has
+  `TotpCredential` and `MfaRecoveryCode`, the audit enum has `MFA_LOGIN`, and
+  `src/lib/totp.js` is implemented and unit-tested — but nothing in `src/`
+  imports any of it. There is no enrolment endpoint and no second factor at
+  login. Do not read the reset flow's safety as evidence that MFA is enforced;
+  it is evidence that MFA *can* be added at login later without reopening
+  recovery as a bypass.
 
 ---
 
 ## 6. What is proven, and what is not
 
-**Proven.** 818 backend tests — the whole suite on the merged tree, not the
+**Proven.** 820 backend tests — the whole suite on the merged tree, not the
 accounts files alone — and `deploy/accounts-journey.mjs`: 46 checks
 driving the real built bundle in headless Chromium against a real backend over
 HTTP, reading mail out of a real SMTP conversation, on a fresh database. It
@@ -182,10 +239,36 @@ VITE_BASE_PATH=/pos/ npm --prefix frontend run build
 DATABASE_URL=... node deploy/accounts-journey.mjs
 ```
 
+**Proven: ordinary users cannot reach platform administration.** The `/api/atc`
+router carries `router.use(requirePosAuth, requireAtc)`, and `requireAtc` tests
+`req.user.role !== 'POS_SUPER_ADMIN'` directly. That distinction matters: a
+*permission-key* gate can be widened by granting the key through
+`customPermissions`, whereas a role comparison cannot be widened by any
+administrator action short of changing the row's role.
+
+Two tests hold it. One turns away a `CUSTOMER_OWNER` — the most senior role
+inside a tenant — on four platform endpoints, and asserts no invitation was
+created and no mail sent, so a refusal cannot have had side effects on the way.
+The second enumerates the router's own stack and asserts **every** endpoint it
+serves answers 403, which covers endpoints not yet written. That second test was
+confirmed to work by planting a route above the `router.use` line — the one
+realistic way to ship an unguarded platform endpoint — and watching it fail by
+name (`GET /api/atc/negative-control-unguarded: expected 200 to be 403`) before
+the route was removed. A guard test that has never been seen to fail is not
+evidence.
+
+**Proven: tenants cannot read each other.** Twenty cross-tenant tests across
+fourteen files, including user management (`foundationPeople`) and invitations.
+They assert the *right* refusal: another tenant's row reads as **404, identical
+to a row that does not exist**, rather than 403. A 403 would confirm the record
+exists and turn the endpoint into an existence oracle.
+
 **Not proven.** Delivery through a real provider. Every message so far has gone
 to a local sink that relays nothing. Step 1 is the gap, and after step 1 the
 first real evidence is the bootstrap invitation arriving at
-`support@vexoconnect.com`.
+`support@vexoconnect.com` — **and that address has not been confirmed by the
+owner as a mailbox they can open.** It is the address the earlier report named,
+which is not the same as confirmation.
 
 **Unblocked, but not run here.** `deploy/e2e-workflow.mjs` (the till money-path
 harness) used to seat its Cyber Hub staff from the temporary password that came

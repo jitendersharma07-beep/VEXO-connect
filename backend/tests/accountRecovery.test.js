@@ -432,6 +432,33 @@ describe('setting the new password', () => {
     expect(afterReset.status).toBe(401);
   });
 
+  it('completes without issuing a session of its own', async () => {
+    // The test above proves the OLD session dies. This one proves no NEW one is
+    // born: a reset must hand back a message, never a credential. That is what
+    // keeps recovery from being a way around whatever guards login — today the
+    // password, tomorrow a second factor. Automatically signing someone in here
+    // would be a plausible-looking UX change that quietly reopens that door.
+    await clearChallenges();
+    // Same password in as out, so this test leaves the fixtures exactly as it
+    // found them for the cases that follow.
+    const done = await fullReset('owner.a@recovery.test', PW);
+
+    expect(done.body).toEqual({ ok: true, message: expect.any(String) });
+    expect(done.headers['set-cookie']).toBeUndefined();
+    // Nothing usable by any name, in case a future refactor picks a new one.
+    for (const key of ['token', 'accessToken', 'sessionToken', 'session', 'jwt']) {
+      expect(done.body[key]).toBeUndefined();
+    }
+    expect(await prisma.posSession.count({ where: { userId: ownerA.id, revokedAt: null } })).toBe(0);
+
+    // Positive control: the assertions above are only meaningful if this probe
+    // can see a credential when one really is issued. Login issues one.
+    const real = await login('owner.a@recovery.test', PW);
+    expect(real.status).toBe(200);
+    expect(real.body.token).toEqual(expect.any(String));
+    expect(await prisma.posSession.count({ where: { userId: ownerA.id, revokedAt: null } })).toBe(1);
+  });
+
   it('preserves role, tenant and licence state', async () => {
     await clearChallenges();
     await fullReset('owner.l@recovery.test', NEW_PW);

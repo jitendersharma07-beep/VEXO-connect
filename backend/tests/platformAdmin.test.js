@@ -341,6 +341,65 @@ describe('who may reach the VEXO console at all', () => {
     expect(await prisma.userInvitation.count()).toBe(0);
     expect(sink.messages).toHaveLength(0);
   });
+
+  it('refuses a customer principal on EVERY platform endpoint, including ones added later', async () => {
+    // The test above hand-lists four paths. This one asks the router what it
+    // actually serves, because the realistic way to ship an unguarded platform
+    // endpoint is not to weaken `requireAtc` — it is to add a route ABOVE the
+    // `router.use(requirePosAuth, requireAtc)` line, where the guard never
+    // runs. Hand-written lists cannot catch that; enumeration can, and it
+    // covers endpoints nobody has written yet.
+    const { default: atcRouter } = await import('../src/api/routes/atc.js');
+    const endpoints = atcRouter.stack
+      .filter((layer) => layer.route)
+      .flatMap((layer) =>
+        Object.keys(layer.route.methods)
+          .filter((m) => m !== '_all')
+          .map((method) => ({ method, path: layer.route.path })),
+      );
+    // Guards the enumeration itself. Without this, a future Express that
+    // changes the shape of `router.stack` would yield an empty list and the
+    // loop below would vacuously pass — the worst kind of green. Anchored on
+    // paths rather than a count, so legitimately retiring an endpoint does not
+    // fail here for the wrong reason.
+    const paths = new Set(endpoints.map((e) => e.path));
+    for (const known of ['/companies', '/platform-admins', '/companies/:companyId/licenses']) {
+      expect(paths, 'router enumeration looks broken, not merely changed').toContain(known);
+    }
+
+    const company = await mkCompany();
+    await prisma.posUser.create({
+      data: {
+        email: 'owner@platform.test',
+        fullName: 'Senior Owner',
+        role: 'CUSTOMER_OWNER',
+        companyId: company.id,
+        passwordHash: await hashPassword(PW),
+      },
+    });
+    const ownerToken = await login('owner@platform.test');
+    const before = {
+      companies: await prisma.company.count(),
+      users: await prisma.posUser.count(),
+      licenses: await prisma.license.count(),
+    };
+
+    for (const { method, path } of endpoints) {
+      const url = `/api/atc${path.replace(/:[A-Za-z0-9_]+/g, 'cmugabrmq00025jywjhfhz02f')}`;
+      const pending = request(app)[method](url).set(auth(ownerToken));
+      const res = method === 'get' ? await pending : await pending.send({});
+      // 403 specifically: a 404 would mean the request got past the guard and
+      // was merely looking for a row, and a 500 would mean it got further still.
+      expect(res.status, `${method.toUpperCase()} ${url}`).toBe(403);
+    }
+
+    // Refused all the way down — nothing was written on the way to a 403.
+    expect(await prisma.company.count()).toBe(before.companies);
+    expect(await prisma.posUser.count()).toBe(before.users);
+    expect(await prisma.license.count()).toBe(before.licenses);
+    expect(await prisma.userInvitation.count()).toBe(0);
+    expect(sink.messages).toHaveLength(0);
+  });
 });
 
 describe('platform administrators', () => {

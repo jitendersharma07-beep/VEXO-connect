@@ -8,9 +8,16 @@
 node_modules/
 node_modules
 dist/
+# `.env` on its own matches that exact name and nothing else, so the two lines
+# that used to follow it (.env.local, .env.production) were an endless game of
+# naming the variants somebody might create. docs/ACCOUNTS-GO-LIVE.md §1 asks
+# the owner to put SMTP_PASSWORD in an env file, and the obvious name for it —
+# .env.staging, .env.mail, .env.live — was on none of those lines. This repo is
+# PUBLIC. So: ignore every .env variant and re-admit the one template that is
+# meant to be tracked. Checked with `git check-ignore -v`, not by eye.
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
 *.log
 
 # Provider credentials, typed at a hidden prompt by
