@@ -11,7 +11,7 @@ the fix a decision W1 takes with the evidence in hand.
 
 > **Status, 2026-09-24 — this opening no longer describes the tree.** It was
 > written as "two defects, neither fixed". The register below has since grown to
-> six, and four of them are fixed here: **D-1, D-2, D-3 and D-5**. D-4 is
+> seven, and five of them are fixed here: **D-1, D-2, D-3, D-5 and D-7**. D-4 is
 > process rather than runtime. **D-6 is pinned but deliberately unfixed**,
 > pending an owner decision that no VC-102 spec settles. One D-2 limitation
 > survives its own fix and is recorded rather than closed — see *What this does
@@ -32,8 +32,9 @@ the fix a decision W1 takes with the evidence in hand.
 | D-2 | ~~Prep capacity never counts ASAP orders~~ **FIXED 09-24**, one limitation recorded | The kitchen-full refusal was dead on the dominant path; the guard failed OPEN | High for the feature's purpose — no money impact | Fix: booked-count widened to ASAP orders by `createdAt`, `phoneOrders.js:197`. An order **reassigned after its own slot elapsed** still occupies nothing — pinned, see "What this does not settle" |
 | D-3 | ~~Phone orders cannot sell a product with a REQUIRED modifier group~~ **FIXED 09-24** | Such products were refused on the phone path with "Choose at least N"; the caller could not complete the order | Medium — failed CLOSED, so no mispricing; a catalogue subset was simply unsellable by phone | Fix: `modifierOptionIds` on `phoneOrders.js` `itemsSchema`, plus the three places that had encoded "modifiers cannot arrive here" |
 | D-4 | No VC-105 browser evidence exists for this tree, and the two QA harnesses used to overwrite each other | Process, not runtime: a VC-105 UI regression would ship unseen | Medium — no customer impact; blocks the UI acceptance row | `frontend/qa/run-all.sh`, `frontend/qa/vc105-browser-qa.mjs` |
-| D-5 | ~~The catalog API can leave a required modifier group permanently unsatisfiable~~ **FIXED 09-24** | The product became unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it was reachable by an ordinary catalogue edit | Fix: `assertSatisfiable` in `backend/src/api/routes/catalog.js`, three call sites |
+| D-5 | ~~The catalog API can leave a required modifier group permanently unsatisfiable~~ **FIXED 09-24** | The product became unsellable on **every** channel, till included, with no warning at the moment of the edit | Medium — fails CLOSED like D-3, but unlike D-3 it was reachable by an ordinary catalogue edit | Fix: `assertSatisfiable` in `backend/src/api/routes/catalog.js` — **four ways in, guarded at three call sites** (one route carries two of them) |
 | D-6 | Archiving a promotion permanently burns its code | The code cannot be republished, edited, or reused by a new promotion — the offer is unrecoverable and the till's code stops working for good | Medium — fails CLOSED, no mispricing; one code per mistake, not the catalogue | `backend/src/api/routes/promotions.js:353` with `:196`, `:229`, `:281`, `:167–172`. **Open, now pinned** by `promotions.test.js`; unfixed pending an owner decision — no VC-102 spec exists to settle intent |
+| D-7 | ~~D-5's guard is not atomic: two simultaneous edits both pass it~~ **FIXED 09-24** | Two concurrent archives left **zero** active options on an ACTIVE required group — D-5's exact unsellable product, reached *through* the guard that exists to prevent it | Medium — same blast radius as D-5, but needs two edits in the same instant, so it is rarer and not operator-visible when it happens | Fix: `FOR UPDATE` on the `ModifierGroup` row in both `PATCH` routes of `backend/src/api/routes/catalog.js`, with the counts re-read inside the transaction |
 
 §3 is the part worth reading first, and the sentence that made it worth reading
 — **the phone-order suite already built D-1's exact conditions and simply never
@@ -972,6 +973,108 @@ should happen when a required group cannot be satisfied **by a particular
 channel*** — and this fix does not answer it. A group with two active options is
 perfectly satisfiable and still unsellable by phone.
 
+---
+
+## D-7 — D-5's guard is not atomic, so two edits at once walk through it
+
+Found 09-24, while re-verifying D-5 against the requirement that an invalid edit
+must fail *atomically*. **D-5 is not wrong and the fix is not being revisited** —
+the rule it added is correct and every single-caller path it guards is still
+refused. D-7 is that the rule was evaluated against a read that another request
+could invalidate before the write landed.
+
+### What the code did
+
+Both `PATCH` routes were three statements with nothing around them:
+
+```js
+const { product, group } = await loadGroup(req);   // read
+assertSatisfiable({ …, activeOptions: countActive(group) }, …);  // decide
+await prisma.modifierOption.update({ … });         // write
+```
+
+`countActive(group)` counts the copy `loadGroup` read. Between that read and the
+write, another request can archive an option, and the first request's decision
+is then based on a number that is no longer true. Nothing serialises them: no
+transaction, no lock, and no database constraint that could catch it — the
+invariant spans two tables and a status column, so there is no unique index to
+fall back on the way D-6 has one.
+
+### Observed (before the fix)
+
+Measured against an isolated Postgres, not inferred. Two requests fired with
+`Promise.all`, on a group with `minSelect: 1` and two active options:
+
+```
+archive "Whole" ∥ archive "Skim"   →  200 / 200,  0 option(s) left active
+```
+
+Each request read "2 active", each computed `2 − 1 = 1`, each satisfied
+`minSelect ≤ 1`, and both wrote. The result is an ACTIVE group requiring one
+choice with nothing to choose — **the exact state D-5 exists to prevent, reached
+through D-5's guard.** The product stops selling on every channel.
+
+The same race crosses the two routes, which is what rules out fixing it inside
+either one:
+
+```
+PATCH group {minSelect: 2} ∥ PATCH option {status: ARCHIVED}
+                                   →  200 / 200,  minSelect 2 with 1 active
+```
+
+### The fix, as applied
+
+A `SELECT … FOR UPDATE` on the `ModifierGroup` row, taken inside a transaction,
+with every number the decision depends on re-read **after** the lock:
+
+- **The lock is on the group, not the option.** The archive/archive race is two
+  different option rows, so an option-level lock would not have serialised it.
+  Both routes taking the same group row is also what serialises the cross-route
+  pair.
+- **`loadGroup` stays outside the transaction.** The 404 for a caller from
+  another company must happen before any guard whose message names the group,
+  and a stranger must not be able to stall an owner's edit by taking a lock on
+  the way to a 404.
+- **`audit()` stays after the commit.** A rolled-back edit that still wrote an
+  audit row would be a worse record than no record.
+- **Not an optimistic version column.** That needs a migration and a retry
+  protocol at every caller, for a contention rate that on catalogue editing is
+  effectively zero. This is a correctness floor, not a hot path.
+
+### How it was verified
+
+Two tests in `catalogModifiers.test.js`, under `describe('two edits arriving at
+the same instant')`. Both were run red against the pre-fix tree; the failures are
+quoted in the file so that "it passes now" is not the whole claim.
+
+They assert the **invariant, never which caller won**. Both orderings are
+legitimate and end in *different* consistent states — archive-first leaves
+`minSelect 1` with one option, raise-first leaves `minSelect 2` with two — so the
+test reads the state that actually resulted and sells against that, rather than
+against the one it would have preferred. An earlier draft hard-coded the
+archive-winner and failed on a correct outcome.
+
+Each runs six rounds, because a race is a probabilistic detector and one round is
+a coin flip. Measured: with the lock weakened to a plain `SELECT` inside the
+transaction, a single archive/archive round caught it in **2 runs out of 5**.
+Repetition can only add failures, never mask one.
+
+### What this does not settle
+
+**The same shape is live elsewhere and is not fixed here.** The phone-order
+capacity check reads `booked`, compares it to the cap, and writes, with no
+transaction — two submits into the last free slot both pass. That is recorded
+under D-2 as pre-existing and unchanged, and it belongs to the session that owns
+that file. D-7 is evidence the pattern is worth a sweep, not evidence that this
+was the only instance.
+
+**Nothing here guards `prisma.*.create` callers.** Every test in this repository
+that builds modifier groups does so directly through Prisma, bypassing the
+routes and therefore the lock. The invariant lives in the route layer only; a
+future job or import that writes these tables directly can still break it.
+
+---
+
 ### Note on how this went unnoticed
 
 `grep -rn "modifier-groups" frontend/src/` returns nothing. **There is no
@@ -1196,6 +1299,72 @@ behaviour is pinned by tests, the reasoning is here, and nothing in the database
 has been changed: no code renamed, no archived campaign deleted, no redemption
 counter reset, no historical bill rewritten.
 
+### The decision, stated as one question
+
+Three options and an undesigned fourth is a menu, not a decision. Reduced to what
+actually has to be answered:
+
+> **When a promotion is archived, does its code go back into the pool?**
+
+Everything else follows from that answer, and one piece of work is worth doing
+whichever way it goes.
+
+**Ship regardless, under either answer: option (3), the honest refusal.** Today
+an operator retyping `DIWALI20` is told the code already exists, which is true
+and useless — the promotion holding it is archived and invisible in every list
+they can see. Naming the cause ("code `DIWALI20` belongs to an archived
+promotion and cannot be reused") is correct whether or not the code is later
+freed; if it is freed, the message simply stops being reachable. It is a message
+change in `promotions.js:167–172`, it pairs with the `publishd` typo at `:332`,
+and it is the only part of D-6 that carries no policy in it. **Not done here**
+because `promotions.js` and its pinned tests belong to another session, and a
+message change would break assertions that deliberately record current text.
+
+**Recommendation on the question itself: YES, free the code — option (1), whole.**
+The reasoning, so it can be disagreed with:
+
+- Permanent reservation is not a designed behaviour. It is the side-effect of
+  `@@unique([companyId, code])` being total, written before archiving existed.
+  Nothing in the tree argues for it; there is simply nothing that argues at all.
+- The cost falls on exactly the codes worth reusing. Seasonal codes are the ones
+  an operator wants back — `DIWALI20`, `SUMMER10` — and they are the ones
+  printed on things. Each mistake burns one, permanently, once per year.
+- It fails in the expensive direction. The operator cannot discover the cause,
+  cannot undo it, and support cannot fix it without a database write.
+
+**What YES costs, stated plainly.** A migration replacing the index with a
+partial unique index (`WHERE status <> 'ARCHIVED'`) **and** the matching filter
+at `:167`, shipped together — the route change alone turns a clean 409 into a
+500, which is measured above, not predicted. After it, one code may belong to
+several promotions across time, so any report or lookup that groups by `code`
+must group by `id`; the codes that survive archiving are exactly the ones most
+likely to be looked up, so this is not hypothetical. Migration number to be
+allocated against the tree's current highest.
+
+**What NO costs.** Option (3) plus a line in the promotions documentation and,
+eventually, a confirmation on the archive action that says the code will not
+come back. That is a smaller change than YES, and it is the correct answer if
+codes are treated as permanent identifiers in any external system — printed
+vouchers already issued, a loyalty integration, an accounting reference. **Only
+the owner knows whether such a system exists**; nothing in this repository does.
+
+**What happens if neither is chosen.** The behaviour stays as it is, pinned by
+`promotions.test.js` so it cannot drift silently, and the operator keeps hitting
+a dead end with a misleading message. That is a tolerable holding position — it
+is failing closed, no money is at risk, and no history is being rewritten — but
+it is a holding position, not a resolution, and the misleading message is the
+part of it that is costing something today.
+
+The fourth possibility — **restore an archived campaign to DRAFT** under its own
+identity, keeping code, `redemptionCount` and redemption history — is the one
+that most operators would actually ask for, and it is deliberately still
+undesigned. It is a lifecycle capability rather than a constraint change, no
+other entity in this codebase has an unarchive route, and adding the first one
+sets a precedent that should be set on purpose. **It is not an answer to the
+question above** and choosing it does not remove the need to answer it: a
+restored campaign still has to decide what happens to codes of campaigns that
+are never restored.
+
 ---
 
 ## 3. Why the phone-order suite stayed green on both
@@ -1362,11 +1531,31 @@ that is where 11 of those tests came from. A twelfth was added to
 `phase2.test.js` because the negative control showed the till shared the same
 unpinned merge key.
 
-D-4 is half fixed: the evidence files no longer overwrite each other, but no
-VC-105 browser run has been executed against this tree, so that row of the UI
-acceptance table is **OWED, not passed**. The 48/48 that appeared on `main`
-later on 09-24 does not change that — see the update under D-4 for why the
-missing `at` field settles its provenance.
+D-4 is **CLOSED** as filed (09-24). The paragraph that stood here called it half
+fixed and the VC-105 row **OWED** — that was true when written and is no longer:
+`run-all.sh` now drives both harnesses against this tree's own backend, both
+artifacts carry a self-derived tree stamp, and both were produced here. It is
+left recorded rather than deleted because the reason it was owed is the reason
+the stamp exists.
+
+What the stamp does **not** yet settle is named here so it is not mistaken for
+settled. It reports the checkout the *harness module* sits in — its own
+directory's git root — which is the right answer to "which lane wrote this
+file" and not an answer to "which backend did it exercise". Two gaps follow
+from that, both open:
+
+- **`baseSha` plus `dirty: true` does not identify what was tested.** The
+  19:15 run stamps `baseSha d5b1cb0` with `dirty: true`, and the D-1/D-2 fixes
+  it exercised were uncommitted at the time; they became `2160936` afterwards.
+  Anyone reading that artifact later cannot recover the content from the stamp.
+  A tested-content digest, not a HEAD pointer, is what closes this.
+- **Nothing in the artifact names the runtime.** The backend's own directory,
+  the scratch database, and the migration state it was at are all absent, so a
+  run against a stale generated Prisma client or a half-migrated database would
+  look identical to a good one. The runner knows these facts, but a value the
+  runner supplies is stamped correctly by the runner that was already correct —
+  which is the failure mode the stamp exists to catch. It has to be derived
+  from the connection under test.
 
 D-5 is **FIXED** (09-24, owner's instruction, option 1). It is also the only
 entry here whose history can be read off the test file: it was pinned by two
@@ -1385,6 +1574,15 @@ remains, and says so at the assertion. The D-5 fix has a **workflow cost** that
 no test can judge: creating a required modifier group is now three API calls
 instead of one, and if that turns out to be wrong for real menu maintenance, it
 is option 3 in the D-5 section that should be revisited, not this guard.
+
+D-7 is **FIXED** (09-24) and is the reason the D-5 paragraph above should be read
+as "the four paths are refused *one caller at a time*". It was found by asking
+what the guard does with two callers rather than one, and the answer was that
+D-5's own end state was reachable through it. Worth separating from D-5 rather
+than folding into it: D-5 was a missing rule, D-7 was the right rule applied to
+a stale read, and the second is not fixed by getting the first more right. The
+same shape is live elsewhere in this tree — the phone-order capacity check reads
+`booked` and writes without a lock — and is recorded under D-2 as unchanged.
 
 D-6 is **unfixed, but no longer unpinned**. It was the one entry here with no
 test of any kind behind it; it is now reproduced over HTTP by five tests in
@@ -1428,3 +1626,36 @@ backend/tests/` and its five siblings all return nothing — plus `POST
 /tables/:id`. This is a real coverage hole and the larger one by route count; it
 is recorded here rather than filed as a defect because none of it is a *defect*
 — no unguarded state was found in any of it, and browser QA can reach all of it.
+
+### The axis this sweep did not run on
+
+Everything above sweeps for **discoverability** — a route no screen calls and no
+test hits. D-7 was not found that way and would not have been: `catalog.js` had
+57 tests over it and the guard was the thing under test. D-7 is a failure of
+**atomicity**, and *that* sweep has not been done. Recording it here so the
+section title is not read as a bigger claim than it is.
+
+Its size, measured rather than guessed — these are **candidates, not findings**:
+
+| | |
+|---|---|
+| route files | 26 |
+| ever open a `$transaction` | 13 |
+| take a row lock (`FOR UPDATE`) | 3 — `phoneOrders.js`, `catalog.js`, `orders.js` |
+| never open a transaction, yet both read and write | 9 — `atc.js`, `auth.js`, `discountPolicies.js`, `display.js`, `gstRegistrations.js`, `legalEntities.js`, `regions.js`, `tables.js`, `terminals.js` |
+
+That last row is a grep for a *shape*, not a defect list. A file only matters
+here if a read **decides** a write — most of these read to scope or to 404, and
+a stale answer to "does this exist" is harmless. Sizing it is the point: it is
+nine files to read, not the whole tree.
+
+The sharpest argument for doing it is in `phoneOrders.js`, which contains both
+halves. Its accept and reject routes take `SELECT … FOR UPDATE` on the
+`PhoneOrder` row with the comment "that is what makes *exactly one accepting
+store* a database outcome, not a hope" — correct, deliberate, and exactly the
+pattern D-7 needed. Its capacity check, forty lines earlier, is a bare
+`prisma.phoneOrder.count(...)` outside any transaction. **The technique was
+already known in the file where the race survives.** So the sweep is not asking
+anyone to learn something new; it is asking where else the thing already being
+done correctly was skipped — which is a much cheaper question, and the reason
+this belongs on a list rather than in a backlog.
