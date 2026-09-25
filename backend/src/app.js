@@ -6,6 +6,7 @@ import pinoHttp from 'pino-http';
 
 import { env, gatewayEnabled } from './config/env.js';
 import { logger, resSerializer } from './lib/logger.js';
+import { originNotAllowed } from './lib/errors.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { notFoundHandler, errorHandler } from './middleware/error.js';
 
@@ -78,9 +79,17 @@ export const createApp = () => {
   app.use(
     cors({
       origin: (origin, callback) => {
+        // No Origin header is not a browser: server-to-server calls, health
+        // probes and every curl command. Waved through deliberately — CORS is a
+        // browser mechanism and cannot be a security boundary for clients that
+        // simply omit the header. It is also why a CORS misconfiguration passes
+        // every command-line probe and fails only a real sign-in.
         if (!origin) return callback(null, true);
         if (allowedOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error('Not allowed by CORS'));
+        // Named refusal rather than a bare Error, so this leaves as 403
+        // POS_ORIGIN_NOT_ALLOWED naming the origin instead of an opaque 500.
+        // See originNotAllowed in lib/errors.js for what that cost once.
+        return callback(originNotAllowed(origin));
       },
       credentials: true,
     }),
