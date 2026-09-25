@@ -5,10 +5,16 @@ import {
   BadgeCheck,
   BadgePercent,
   BarChart3,
+  Boxes,
   Building2,
   CalendarCheck,
+  CalendarClock,
+  ChefHat,
+  ClipboardCheck,
+  CookingPot,
   KeyRound,
   Landmark,
+  Layers,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -16,21 +22,26 @@ import {
   Menu,
   MonitorSmartphone,
   Package,
+  PackagePlus,
   PhoneCall,
   ReceiptText,
   ScrollText,
+  Settings2,
   ShieldCheck,
   ShoppingCart,
   Store,
   Tags,
   TrendingUp,
+  Truck,
   Users,
+  Warehouse,
   X,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
 import { usePermissions } from '../lib/permissions.jsx';
 import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope, isManagerUp } from '../lib/pos.js';
+import { canUseInventory } from '../lib/inventory.js';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
@@ -63,7 +74,7 @@ function NavItem({ to, icon: Icon, label, end = false }) {
 // atcScope). A second hand-maintained copy would drift, and the way it drifts
 // is that the drawer shows a cashier the owner's links. Render this; never
 // retype it.
-function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
+function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }) {
   const { can, canAny } = usePermissions();
   // LANE foundation — the organisation group, shown by held ACTION so the
   // list matches what the server will actually answer: Finance reaches Legal
@@ -177,6 +188,44 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
           ) : null}
           {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
+          {/* ==== LANE inventory ==== (spec Part B §8)
+              One condition for the whole section, matching the route gate in
+              App.jsx and the server's INVENTORY_ACTIONS map. Setup is listed
+              for a manager too: it is where they see which stock location
+              their own sales come out of, and every control on it is the
+              owner's and refused server-side for anyone else.
+
+              Note these are links, not permissions. Removing one hides a
+              screen; it does not close an endpoint.
+
+              The licence is part of the condition now, not only the role: a
+              company whose licence does not include the INVENTORY module is
+              refused at the API with POS_MODULE_NOT_LICENSED whatever the
+              role, so showing the section would be showing twelve screens that
+              can only fill with the same refusal. Typing the URL still reaches
+              the route — the route gate is roles, as it was — and the screen
+              then shows the server's own sentence about the licence, which is
+              the accurate one. */}
+          {canUseInventory(user, license) ? (
+            <>
+              <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                Inventory
+              </div>
+              <NavItem to="/inventory" icon={Boxes} label="Overview" end />
+              <NavItem to="/inventory/stock" icon={Warehouse} label="Stock on hand" />
+              <NavItem to="/inventory/batches" icon={Layers} label="Batches & expiry" />
+              <NavItem to="/inventory/requests" icon={ClipboardCheck} label="Store requests" />
+              <NavItem to="/inventory/transfers" icon={Truck} label="Transfers" />
+              <NavItem to="/inventory/planning" icon={CalendarClock} label="Planning & reminders" />
+              <NavItem to="/inventory/receiving" icon={PackagePlus} label="Receiving" />
+              <NavItem to="/inventory/adjustments" icon={ListChecks} label="Counts & wastage" />
+              <NavItem to="/inventory/recipes" icon={ChefHat} label="Recipes & food cost" />
+              <NavItem to="/inventory/production" icon={CookingPot} label="Central kitchen" />
+              <NavItem to="/inventory/ledger" icon={ScrollText} label="Stock ledger" />
+              <NavItem to="/inventory/setup" icon={Settings2} label="Inventory setup" />
+            </>
+          ) : null}
+          {/* ==== /LANE inventory ==== */}
           {orgGroup}
         </>
       )}
@@ -317,7 +366,11 @@ export default function Layout() {
     navigate('/atc/companies');
   };
 
-  const navProps = { user, isAtc, isOwner, atcScope, onExitAtcScope: exitAtcScope };
+  // license travels with user: the inventory section is gated on the module
+  // being licensed as well as on the role, and both sidebars render the same
+  // SidebarBody, so passing it here is what keeps the drawer and the sidebar
+  // from disagreeing about what exists.
+  const navProps = { user, license, isAtc, isOwner, atcScope, onExitAtcScope: exitAtcScope };
 
   return (
     <div className="flex min-h-screen">

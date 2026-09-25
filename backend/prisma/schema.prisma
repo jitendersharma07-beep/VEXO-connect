@@ -96,6 +96,12 @@ model Company {
 
   discountPolicies DiscountPolicy[]
 
+  // LANE inventory
+  inventoryLocations InventoryLocation[]
+  inventoryItems     InventoryItem[]
+  suppliers          Supplier[]
+  recipes            Recipe[]
+
   // LANE foundation
   legalEntities     LegalEntity[]
   gstRegistrations  GstRegistration[]
@@ -191,6 +197,9 @@ model Branch {
   phoneOrdersRouted   PhoneOrder[]        @relation("PhoneOrderRouted")
   phoneOrdersAccepted PhoneOrder[]        @relation("PhoneOrderAccepted")
 
+  // LANE inventory
+  inventoryLocations InventoryLocation[]
+
   @@unique([companyId, code])
   // Referenced by everything that happens AT a store — terminals, devices,
   // orders, assignments — so that each of those carries the tenant and has it
@@ -266,6 +275,9 @@ model PosUser {
 
   discountPolicies  DiscountPolicy[] @relation("DiscountPolicySubject")
   discountsApproved Order[]          @relation("OrderDiscountApprovedBy")
+
+  // LANE inventory
+  inventoryLocationAccess InventoryLocationAccess[]
 
   // ---- LANE foundation ----------------------------------------------------
   // A REGIONAL_MANAGER is scoped by region, not by a single branch, so it
@@ -582,6 +594,8 @@ model Product {
   modifierGroups ModifierGroup[]
   orderItems     OrderItem[]
   promotionRules PromotionItemRule[]
+  // LANE inventory
+  recipeLinks    RecipeProductLink[]
 
   @@unique([companyId, sku])
   // Referenced by PromotionItemRule — same rule as Category.
@@ -601,6 +615,8 @@ model ProductVariant {
   updatedAt DateTime      @updatedAt
 
   orderItems OrderItem[]
+  // LANE inventory
+  recipeLinks RecipeProductLink[]
 
   @@index([productId])
 }
@@ -1094,6 +1110,1628 @@ model DayClose {
   @@index([branchId, businessDate])
 }
 
+// ==== LANE inventory ====
+// ---------------------------------------------------------------------------
+// Inventory, purchasing, recipes and THE stock ledger (VC-105 reads it).
+// Design notes live in docs/lanes/INVENTORY.md; the rules that matter most:
+//
+// * StockMovement is the only record of stock. It is append-only — no route
+//   updates or deletes a row — and every figure an owner sees (on hand, value,
+//   average cost, the cost of a sale) is either read from it or from
+//   StockBalance, a cache that is written in the same transaction as the
+//   movement and can be rebuilt from the ledger at any time.
+// * Quantities are stored in the item's BASE unit (g, ml or pcs) at 3
+//   decimals and handled in code as integer thousandths ("milli"), the same
+//   way money is handled as integer paise. Values are integer paise (BigInt,
+//   because a warehouse's stock value can pass the 32-bit ceiling of ₹2.1 cr).
+// * Costing method: perpetual WEIGHTED AVERAGE per location per item. See
+//   src/lib/inventory/ledger.js for the issue rule and negative-stock policy.
+// * Core models are referenced by FK only where integrity is worth a shared
+//   schema edit (tenant, store, product). Users and source documents are plain
+//   ids: a movement's source is polymorphic (GRN line, order line, count line)
+//   and Postgres cannot put one foreign key on that anyway.
+// ---------------------------------------------------------------------------
+
+enum InventoryLocationKind {
+  STORE
+  WAREHOUSE
+  CENTRAL_KITCHEN
+}
+
+enum InventoryItemKind {
+  RAW
+  SEMI_FINISHED
+  FINISHED
+  // Cups, lids, boxes, sleeves. Bought, stored, counted and consumed by recipe
+  // exactly like an ingredient, but never an edible input — food-cost reports
+  // separate it so packaging does not inflate a dish's ingredient cost.
+  PACKAGING
+}
+
+// What a location physically is, for items whose storage conditions matter.
+// Independent of InventoryLocationKind: a store has a freezer and a bar, a
+// warehouse has dry storage and a cold room.
+enum InventoryStorageKind {
+  AMBIENT
+  DRY
+  CHILLED
+  FROZEN
+  KITCHEN
+  BAR
+}
+
+// Whether a batch may be issued at all. Expiry is NOT a state here — it is
+// derived from expiryDate at the moment of every eligibility check, so expired
+// stock is refused even when no scheduler has run for a week.
+enum StockBatchState {
+  AVAILABLE
+  QUARANTINED
+  RECALLED
+}
+
+// The unit every quantity of an item is stored in. Three, because every
+// conversion a kitchen makes (kg→g, l→ml, dozen→pcs, box→pcs) lands on one of
+// them, and a ledger in one unit per item is one that can be summed.
+enum InventoryBaseUnit {
+  G
+  ML
+  PCS
+}
+
+enum InventoryStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// For a SEMI_FINISHED item: BATCH is made ahead (a sauce, a cold-brew
+// concentrate) and sold out of stock; MADE_TO_ORDER is made per portion (an
+// espresso shot) and exploded into its own recipe's ingredients at sale.
+enum InventoryProductionMode {
+  BATCH
+  MADE_TO_ORDER
+}
+
+enum StockMovementType {
+  GRN
+  PURCHASE_RETURN
+  SALE_CONSUMPTION
+  SALE_REVERSAL
+  WASTAGE
+  COUNT_ADJUSTMENT
+  TRANSFER_OUT
+  TRANSFER_IN
+  PRODUCTION_IN
+  PRODUCTION_OUT
+}
+
+// How much the value on a movement can be trusted.
+//   ACTUAL    — issued out of recorded stock at its weighted average.
+//   ESTIMATED — some or all of it was issued beyond what the ledger held, and
+//               that part was valued at the last known average: a stale cost.
+//   MISSING   — nothing was ever received at this location with a value, so
+//               there is no cost to use. The value is 0 and must never be read
+//               as "free".
+enum StockCostStatus {
+  ACTUAL
+  ESTIMATED
+  MISSING
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  APPROVED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum StockTransferStatus {
+  REQUESTED
+  DISPATCHED
+  RECEIVED
+  CANCELLED
+}
+
+enum WastageReason {
+  EXPIRED
+  SPOILED
+  DAMAGED
+  PREP_ERROR
+  OTHER
+}
+
+enum RecipeVersionStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+enum SaleConsumptionStatus {
+  POSTED
+  UNCOSTED
+}
+
+enum LandedCostBasis {
+  VALUE
+  QUANTITY
+}
+
+model InventoryLocation {
+  id        String                @id @default(cuid())
+  companyId String
+  company   Company               @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  // Optional: a warehouse or central kitchen need not belong to any store.
+  branchId  String?
+  branch    Branch?               @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  kind      InventoryLocationKind
+  name      String
+  code      String
+  status    InventoryStatus       @default(ACTIVE)
+  // The one location a store's sales consume from, written as the branch id
+  // so the unique index can hold it to one per store (NULLs are distinct, so
+  // every other location leaves it null). A store with no such location sells
+  // exactly as before — its lines are reported as uncosted, never blocked.
+  saleSourceBranchId String?      @unique
+  // A sublocation: the freezer inside a store, dry storage inside a warehouse.
+  // One level only — a shelf inside a freezer is a labelling problem, not a
+  // stock one, and nesting turns every balance query into a recursive CTE.
+  // A sublocation inherits kind and branchId from its parent; the routes
+  // enforce that rather than duplicating the columns' meaning.
+  parentId  String?
+  parent    InventoryLocation?    @relation("LocationParent", fields: [parentId], references: [id], onDelete: Restrict)
+  children  InventoryLocation[]   @relation("LocationParent")
+  storageKind InventoryStorageKind @default(AMBIENT)
+  // What this location can physically hold, in base units, for the capacity
+  // check a replenishment suggestion makes. Null means "not modelled" and the
+  // check is skipped — never silently treated as zero.
+  capacityBaseQty Decimal?         @db.Decimal(18, 3)
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  movements     StockMovement[]
+  balances      StockBalance[]
+  batchBalances StockBatchBalance[]
+  reservations  StockReservation[]
+  reorderRules  StockReorderRule[]
+  purchaseOrders PurchaseOrder[]
+  goodsReceipts GoodsReceipt[]
+  counts        StockCount[]
+  wastages      StockWastage[]
+  transfersOut  StockTransfer[]   @relation("TransferFrom")
+  transfersIn   StockTransfer[]   @relation("TransferTo")
+  productions   ProductionBatch[]
+  batchOpenings StockBatchOpening[]
+  requestsFrom  StoreRequest[]    @relation("RequestDestination")
+  requestsTo    StoreRequest[]    @relation("RequestSource")
+  plansTo       ReplenishmentPlan[] @relation("PlanDestination")
+  plansFrom     ReplenishmentPlan[] @relation("PlanSource")
+  accessGrants  InventoryLocationAccess[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([branchId])
+  @@index([parentId])
+}
+
+model InventoryItem {
+  id             String                  @id @default(cuid())
+  companyId      String
+  company        Company                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  kind           InventoryItemKind
+  name           String
+  sku            String?
+  baseUnit       InventoryBaseUnit
+  status         InventoryStatus         @default(ACTIVE)
+  trackBatches   Boolean                 @default(false)
+  trackExpiry    Boolean                 @default(false)
+  productionMode InventoryProductionMode @default(BATCH)
+  // A whole chicken, a wheel of cheese: the pack is a piece but what it weighs
+  // has to be measured, not assumed. Receipts and issues of such an item carry
+  // an actual weight and the ledger records THAT, never a nominal pack size.
+  variableWeight Boolean                 @default(false)
+  // The base unit the measured weight of a variable-weight item is given in.
+  // Separate from baseUnit, which stays PCS so a count still counts birds.
+  weightUnit     InventoryBaseUnit?
+  // Refuse a receipt whose batch has less than this much life left. Null means
+  // no rule; 0 means "anything not already expired".
+  minShelfLifeDaysAtReceipt Int?
+  // Once a container is opened it spoils on its own clock. Null disables the
+  // whole mechanism for this item. Opening a container NEVER moves the batch's
+  // own expiry date — the two run side by side.
+  openedShelfLifeHours      Int?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  units          InventoryItemUnit[]
+  batches        StockBatch[]
+  movements      StockMovement[]
+  balances       StockBalance[]
+  batchBalances  StockBatchBalance[]
+  reservations   StockReservation[]
+  reorderRules   StockReorderRule[]
+  supplierPrices SupplierItemPrice[]
+  poLines        PurchaseOrderLine[]
+  grnLines       GoodsReceiptLine[]
+  recipeLines    RecipeLine[]
+  producedBy     Recipe?                 @relation("RecipeOutput")
+  modifierAdjustments RecipeModifierAdjustment[]
+  countLines     StockCountLine[]
+  wastageLines   StockWastageLine[]
+  transferLines  StockTransferLine[]
+  productions    ProductionBatch[]
+  requestLines   StoreRequestLine[]
+  planLines      ReplenishmentPlanLine[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, sku])
+  @@index([companyId, kind])
+}
+
+// An item-specific unit: a "box" of 12 pcs, a "bag" of 25 kg, a "cup" of
+// 120 g of flour. Standard units (g/kg, ml/l, pcs/dozen) are code, not rows.
+// Never edited or deleted once written: a PO line or recipe line entered in
+// "box" has to mean the same number of pcs tomorrow.
+model InventoryItemUnit {
+  id          String        @id @default(cuid())
+  itemId      String
+  item        InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  // Lower-case, so "Box" and "box" cannot become two different sizes.
+  name        String
+  // Base-unit thousandths in ONE of this unit: box of 12 pcs = 12000.
+  factorMilli Int
+  createdAt   DateTime      @default(now())
+
+  @@unique([itemId, name])
+}
+
+// Company-wide per item: the same batch keeps its code and expiry wherever a
+// transfer takes it. On-hand per batch is derived from the ledger.
+model StockBatch {
+  id         String        @id @default(cuid())
+  companyId  String
+  itemId     String
+  item       InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  batchCode  String
+  expiryDate DateTime?     @db.Date
+  // The supplier's or manufacturer's own number for the same goods, kept
+  // beside ours because a recall notice quotes theirs, not ours.
+  supplierBatchCode String?
+  manufacturedOn    DateTime? @db.Date
+  receivedAt        DateTime?
+  supplierId        String?
+  supplier          Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  // AVAILABLE / QUARANTINED / RECALLED. Expiry is deliberately NOT in here:
+  // see the enum's comment.
+  state             StockBatchState @default(AVAILABLE)
+  stateReason       String?
+  stateChangedAt    DateTime?
+  stateChangedById  String?
+  createdAt  DateTime      @default(now())
+
+  movements      StockMovement[]
+  balances       StockBatchBalance[]
+  openings       StockBatchOpening[]
+  reservationLines StockReservationLine[]
+  transferLines  StockTransferLineBatch[]
+
+  @@unique([itemId, batchCode])
+  @@index([companyId, expiryDate])
+  @@index([companyId, state])
+}
+
+// On-hand per location PER BATCH — quantity only. Value stays on StockBalance
+// because the costing method is weighted average per location+item, and
+// splitting value per batch would quietly turn it into specific identification.
+// FEFO reads this; valuation never does. Written in the same transaction as
+// the movement, and rebuildable from the ledger exactly like StockBalance.
+model StockBatchBalance {
+  id         String            @id @default(cuid())
+  companyId  String
+  locationId String
+  location   InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  itemId     String
+  item       InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  batchId    String
+  batch      StockBatch        @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  qty        Decimal           @default(0) @db.Decimal(18, 3)
+  updatedAt  DateTime          @updatedAt
+
+  @@unique([locationId, itemId, batchId])
+  @@index([companyId, itemId])
+}
+
+// A container of a batch that has been opened at a location. Its useByAt runs
+// on its own clock and does NOT touch the batch's expiryDate — an opened 5 l
+// carton going off in 48 hours must not condemn the four unopened ones beside
+// it. Quantity is what is left inside the opened container.
+model StockBatchOpening {
+  id         String            @id @default(cuid())
+  companyId  String
+  locationId String
+  location   InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  batchId    String
+  batch      StockBatch        @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  openedAt   DateTime          @default(now())
+  useByAt    DateTime
+  qty        Decimal           @db.Decimal(18, 3)
+  closedAt   DateTime?
+  openedById String?
+  note       String?
+
+  @@index([companyId, useByAt])
+  @@index([locationId, batchId])
+}
+
+// THE stock ledger. Append-only. See the note at the top of this block.
+model StockMovement {
+  id             String            @id @default(cuid())
+  // Total posting order, so a replay of the ledger is deterministic even when
+  // two rows share a timestamp.
+  seq            BigInt            @default(autoincrement())
+  companyId      String
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  itemId         String
+  item           InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  batchId        String?
+  batch          StockBatch?       @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  type           StockMovementType
+  // Signed, base units: positive into this location, negative out of it.
+  qty            Decimal           @db.Decimal(18, 3)
+  // Signed integer paise, same sign as qty. This — not unitCostPaise — is the
+  // authoritative value; the unit cost is the same fact divided out for people.
+  valuePaise     BigInt
+  // Paise per BASE unit at the time (sugar at ₹45/kg is 0.045000). Null only
+  // when the cost is MISSING.
+  unitCostPaise  Decimal?          @db.Decimal(20, 6)
+  costStatus     StockCostStatus
+  // When the average this movement was valued at was last refreshed by a
+  // valued receipt. Frozen here so "was this cost stale when it was used" has
+  // the same answer next year as today.
+  costBasisAt    DateTime?
+  // The location+item position straight after this row. Lets anyone check the
+  // ledger against itself without trusting the balance cache.
+  balanceQtyAfter   Decimal        @db.Decimal(18, 3)
+  balanceValueAfter BigInt
+  // What caused it: 'GRN' | 'PURCHASE_RETURN' | 'ORDER_ITEM' | 'SALE_RETURN'
+  // | 'WASTAGE' | 'STOCK_COUNT' | 'TRANSFER' | 'PRODUCTION'.
+  sourceType     String
+  sourceId       String
+  sourceLineId   String?
+  // Deterministic per source line, so a retried post can never write twice.
+  idempotencyKey String            @unique
+  // Business time (a sale's billedAt). postedAt is server time and is what
+  // as-of valuation reads, so a valuation taken at 18:00 is reproducible.
+  occurredAt     DateTime
+  postedAt       DateTime          @default(now())
+  createdById    String?
+  // B§3.1 p6: transactions carry terminal/device attribution where operationally
+  // relevant, and a stock movement is named there explicitly. Null stays the
+  // honest answer for a posting no till caused — a scheduler pass, a goods
+  // receipt, a back-office correction — which is most of this table.
+  //
+  // For a sale it is the ORDER's till, not whichever till pressed "bill".
+  // Order.terminalId is what the day's takings are attributed to; a ledger that
+  // named a different till for the same sale would make the sales report and
+  // the stock report disagree about one event with nothing to say which was
+  // right. The two are the same till in the ordinary case anyway, because a
+  // device may only touch an order in its own store.
+  //
+  // Paired with companyId rather than referencing a bare id, the way Order and
+  // Device pair it with branchId: the denormalised companyId on this row is
+  // only worth something if the database checks it, and this is that check — a
+  // till belonging to another tenant cannot be stamped on this tenant's ledger.
+  // The pair is MATCH SIMPLE, so a movement with no till still writes.
+  terminalId     String?
+  terminal       Terminal?         @relation(fields: [terminalId, companyId], references: [id, companyId], onDelete: Restrict)
+  note           String?
+
+  @@index([companyId, locationId, itemId, seq])
+  @@index([companyId, type, occurredAt])
+  @@index([companyId, postedAt])
+  @@index([sourceType, sourceId])
+  @@index([locationId, itemId, batchId])
+}
+
+// Cache of Σ ledger per location+item, updated under a row lock in the same
+// transaction as the movement. GET /api/inventory/ledger/verify proves it
+// equals the ledger; POST /api/inventory/ledger/rebuild rewrites it from there.
+model StockBalance {
+  id                String            @id @default(cuid())
+  companyId         String
+  locationId        String
+  location          InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  itemId            String
+  item              InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  qty               Decimal           @default(0) @db.Decimal(18, 3)
+  valuePaise        BigInt            @default(0)
+  // The weighted average the last time this position held stock. Used only to
+  // value an issue that goes beyond what the ledger holds (ESTIMATED).
+  lastUnitCostPaise Decimal?          @db.Decimal(20, 6)
+  costBasisAt       DateTime?
+  lastSeq           BigInt?
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([locationId, itemId])
+  @@index([companyId])
+}
+
+model StockReorderRule {
+  id          String            @id @default(cuid())
+  companyId   String
+  locationId  String
+  location    InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  itemId      String
+  item        InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  // Base units. At or below minQty the item is on the alert list; reorderQty
+  // is what the alert suggests ordering.
+  minQty      Decimal           @db.Decimal(18, 3)
+  reorderQty  Decimal           @db.Decimal(18, 3)
+  updatedById String?
+  updatedAt   DateTime          @updatedAt
+
+  @@unique([locationId, itemId])
+  @@index([companyId])
+}
+
+// Per-company inventory policy. Absent row = the defaults below.
+model InventorySettings {
+  companyId         String   @id
+  // Whether GST paid on purchases is part of what stock costs. TRUE by default
+  // because a restaurant on 5% GST without input tax credit cannot recover it,
+  // and leaving it out would understate every cost and overstate every margin.
+  // INTEGRATION(foundation): derive from the GST registration's ITC status.
+  purchaseTaxIsCost Boolean  @default(true)
+  // A cost basis older than this at the time of a sale is reported as stale.
+  staleCostDays     Int      @default(90)
+  updatedById       String?
+  updatedAt         DateTime @updatedAt
+}
+
+// Per-company, per-document-type, per-FY counter — PO/26-27/0001 etc.
+model InventoryDocCounter {
+  id         String @id @default(cuid())
+  companyId  String
+  docType    String
+  fyLabel    String
+  lastNumber Int    @default(0)
+
+  @@unique([companyId, docType, fyLabel])
+}
+
+model Supplier {
+  id               String          @id @default(cuid())
+  companyId        String
+  company          Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name             String
+  code             String?
+  // INTEGRATION(foundation): validate against the GST registration model.
+  gstin            String?
+  contactName      String?
+  phone            String?
+  email            String?
+  address          String?
+  paymentTermsDays Int?
+  status           InventoryStatus @default(ACTIVE)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  prices         SupplierItemPrice[]
+  purchaseOrders PurchaseOrder[]
+  goodsReceipts  GoodsReceipt[]
+  batches        StockBatch[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+// Append-only price history. The current price is the latest effectiveFrom
+// at or before now; nothing is edited, so a PO can always be traced to the
+// price that was on file when it was raised.
+model SupplierItemPrice {
+  id            String        @id @default(cuid())
+  companyId     String
+  supplierId    String
+  supplier      Supplier      @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  itemId        String
+  item          InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  unit          String
+  // Integer paise per ONE purchase unit, ex-tax.
+  pricePaise    Int
+  taxPctMilli   Int           @default(0)
+  effectiveFrom DateTime      @default(now())
+  createdById   String?
+  createdAt     DateTime      @default(now())
+
+  @@index([supplierId, itemId, effectiveFrom])
+}
+
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  companyId    String
+  number       String
+  supplierId   String
+  supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  // Deliver-to location; the store/warehouse whose manager may raise it.
+  locationId   String
+  location     InventoryLocation   @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  status       PurchaseOrderStatus @default(DRAFT)
+  expectedAt   DateTime?
+  note         String?
+  subtotalPaise BigInt             @default(0)
+  taxPaise     BigInt              @default(0)
+  totalPaise   BigInt              @default(0)
+  createdById  String
+  approvedById String?
+  approvedAt   DateTime?
+  closedById   String?
+  closedAt     DateTime?
+  closeReason  String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  lines         PurchaseOrderLine[]
+  goodsReceipts GoodsReceipt[]
+
+  @@unique([companyId, number])
+  @@index([companyId, status])
+  @@index([locationId])
+}
+
+model PurchaseOrderLine {
+  id              String        @id @default(cuid())
+  poId            String
+  po              PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Restrict)
+  lineNo          Int
+  itemId          String
+  item            InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  unit            String
+  qty             Decimal       @db.Decimal(18, 3)
+  qtyBase         Decimal       @db.Decimal(18, 3)
+  unitPricePaise  Int
+  taxPctMilli     Int           @default(0)
+  linePaise       BigInt
+  taxPaise        BigInt
+  // Σ base qty received by GRNs, maintained under the PO row lock.
+  receivedQtyBase Decimal       @default(0) @db.Decimal(18, 3)
+
+  grnLines GoodsReceiptLine[]
+
+  @@unique([poId, lineNo])
+}
+
+// A goods receipt is posted once and never edited; a mistake is corrected by
+// a purchase return (and, for a shortfall, by closing the PO short).
+model GoodsReceipt {
+  id                  String            @id @default(cuid())
+  companyId           String
+  number              String
+  poId                String?
+  po                  PurchaseOrder?    @relation(fields: [poId], references: [id], onDelete: Restrict)
+  supplierId          String
+  supplier            Supplier          @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  locationId          String
+  location            InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  supplierInvoiceNo   String?
+  supplierInvoiceDate DateTime?         @db.Date
+  note                String?
+  // Integer paise. goods = Σ qty × price ex-tax; stockValue is what entered
+  // the ledger (goods + landed + tax when tax is a cost).
+  goodsPaise          BigInt
+  taxPaise            BigInt
+  landedCostPaise     BigInt            @default(0)
+  stockValuePaise     BigInt
+  taxIsCost           Boolean
+  idempotencyKey      String?
+  receivedById        String
+  receivedAt          DateTime          @default(now())
+
+  lines       GoodsReceiptLine[]
+  landedCosts GoodsReceiptLandedCost[]
+  returns     PurchaseReturn[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, receivedAt])
+  @@index([poId])
+}
+
+model GoodsReceiptLine {
+  id                 String             @id @default(cuid())
+  grnId              String
+  grn                GoodsReceipt       @relation(fields: [grnId], references: [id], onDelete: Restrict)
+  lineNo             Int
+  poLineId           String?
+  poLine             PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
+  itemId             String
+  item               InventoryItem      @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  unit               String
+  qty                Decimal            @db.Decimal(18, 3)
+  qtyBase            Decimal            @db.Decimal(18, 3)
+  unitPricePaise     Int
+  // Variance against the PO, frozen at receipt. Null on a receipt with no PO.
+  poUnitPricePaise   Int?
+  outstandingQtyBase Decimal?           @db.Decimal(18, 3)
+  qtyVarianceBase    Decimal?           @db.Decimal(18, 3)
+  priceVariancePaise BigInt?
+  taxPctMilli        Int                @default(0)
+  goodsPaise         BigInt
+  taxPaise           BigInt
+  landedCostPaise    BigInt             @default(0)
+  valuePaise         BigInt
+  batchId            String?
+  returnedQtyBase    Decimal            @default(0) @db.Decimal(18, 3)
+
+  returnLines PurchaseReturnLine[]
+
+  @@unique([grnId, lineNo])
+}
+
+model GoodsReceiptLandedCost {
+  id          String          @id @default(cuid())
+  grnId       String
+  grn         GoodsReceipt    @relation(fields: [grnId], references: [id], onDelete: Restrict)
+  kind        String
+  description String?
+  amountPaise BigInt
+  basis       LandedCostBasis @default(VALUE)
+}
+
+model PurchaseReturn {
+  id              String       @id @default(cuid())
+  companyId       String
+  number          String
+  grnId           String
+  grn             GoodsReceipt @relation(fields: [grnId], references: [id], onDelete: Restrict)
+  supplierId      String
+  locationId      String
+  reason          String
+  // What the supplier owes back (at the receipt's cost) vs what left the
+  // ledger (at today's weighted average). The difference is recorded, not
+  // hidden in the average.
+  creditPaise     BigInt
+  stockValuePaise BigInt
+  idempotencyKey  String?
+  createdById     String
+  createdAt       DateTime     @default(now())
+
+  lines PurchaseReturnLine[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, idempotencyKey])
+}
+
+model PurchaseReturnLine {
+  id              String           @id @default(cuid())
+  returnId        String
+  return          PurchaseReturn   @relation(fields: [returnId], references: [id], onDelete: Restrict)
+  grnLineId       String
+  grnLine         GoodsReceiptLine @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
+  itemId          String
+  qtyBase         Decimal          @db.Decimal(18, 3)
+  creditPaise     BigInt
+  stockValuePaise BigInt
+}
+
+// A recipe makes either a menu item (linked through RecipeProductLink, output
+// one portion) or an inventory item (outputItemId: a semi-finished sauce, a
+// finished packaged good). Its content lives in versions.
+model Recipe {
+  id           String          @id @default(cuid())
+  companyId    String
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name         String
+  outputItemId String?         @unique
+  outputItem   InventoryItem?  @relation("RecipeOutput", fields: [outputItemId], references: [id], onDelete: Restrict)
+  status       InventoryStatus @default(ACTIVE)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  versions            RecipeVersion[]
+  productLinks        RecipeProductLink[]
+  modifierAdjustments RecipeModifierAdjustment[]
+
+  @@unique([companyId, name])
+}
+
+// Immutable once ACTIVE. Changing a recipe is a new version, so the version a
+// sale consumed is still exactly what it was when the sale is read back.
+model RecipeVersion {
+  id            String              @id @default(cuid())
+  recipeId      String
+  recipe        Recipe              @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  version       Int
+  status        RecipeVersionStatus @default(DRAFT)
+  // Share of the nominal output actually obtained, 3dp. 80 = trim/cook loss
+  // of a fifth, so every input is divided by 0.8.
+  yieldPercent  Decimal             @default(100) @db.Decimal(6, 3)
+  // Nominal output in the output item's base unit; 1 for a menu portion.
+  outputQty     Decimal             @default(1) @db.Decimal(18, 3)
+  note          String?
+  createdById   String?
+  createdAt     DateTime            @default(now())
+  activatedById String?
+  activatedAt   DateTime?
+  retiredAt     DateTime?
+
+  lines       RecipeLine[]
+  productions ProductionBatch[]
+
+  @@unique([recipeId, version])
+  @@index([recipeId, status])
+}
+
+model RecipeLine {
+  id        String        @id @default(cuid())
+  versionId String
+  version   RecipeVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  lineNo    Int
+  itemId    String
+  item      InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  qty       Decimal       @db.Decimal(18, 3)
+  unit      String
+  qtyBase   Decimal       @db.Decimal(18, 3)
+
+  @@unique([versionId, lineNo])
+}
+
+// Menu item → recipe. variantKey is variantId or '' so the unique index can
+// hold "one recipe per product" and "one per variant" at once (NULLs would be
+// distinct). A variant's own link wins over its product's.
+model RecipeProductLink {
+  id         String          @id @default(cuid())
+  companyId  String
+  productId  String
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId  String?
+  variant    ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  variantKey String
+  recipeId   String
+  recipe     Recipe          @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  createdAt  DateTime        @default(now())
+
+  @@unique([productId, variantKey])
+  @@index([companyId])
+  @@index([recipeId])
+}
+
+// INTEGRATION(promotions): catalog modifiers are the promotions lane's model.
+// This maps a modifier id (no FK until that model lands) to a change in what
+// a sale consumes: "extra shot" +1 espresso, "oat milk" −150 ml milk and
+// +150 ml oat milk. recipeKey is recipeId or '' ('' = whatever recipe the
+// modifier is sold with), for the same NULL-distinct reason as variantKey.
+model RecipeModifierAdjustment {
+  id         String        @id @default(cuid())
+  companyId  String
+  modifierId String
+  recipeId   String?
+  recipe     Recipe?       @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  recipeKey  String
+  itemId     String
+  item       InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  // Signed, base units per portion.
+  qtyDelta   Decimal       @db.Decimal(18, 3)
+  createdAt  DateTime      @default(now())
+
+  @@unique([companyId, modifierId, recipeKey, itemId])
+}
+
+// One row per sold order line, written by the bill hook (or the sync). The
+// unique orderItemId is what makes the hook idempotent: a retried or doubled
+// hook finds this row and posts nothing.
+model SaleConsumption {
+  id              String                @id @default(cuid())
+  companyId       String
+  branchId        String
+  orderId         String
+  orderItemId     String                @unique
+  locationId      String?
+  recipeVersionId String?
+  status          SaleConsumptionStatus
+  // NO_STOCK_LOCATION | NO_RECIPE | NO_ACTIVE_VERSION | EMPTY_RECIPE
+  uncostedReason  String?
+  qtySold         Int
+  // −Σ valuePaise of this line's SALE_CONSUMPTION movements.
+  costPaise       BigInt                @default(0)
+  // Worst of its movements; MISSING when uncosted.
+  costStatus      StockCostStatus
+  costBasisAt     DateTime?
+  returnedQty     Int                   @default(0)
+  occurredAt      DateTime
+  postedAt        DateTime              @default(now())
+
+  returns SaleStockReturn[]
+
+  @@index([companyId, occurredAt])
+  @@index([orderId])
+}
+
+// The explicit "returned to stock" action. A refund never returns stock on
+// its own — a refunded coffee has been drunk.
+model SaleStockReturn {
+  id                String          @id @default(cuid())
+  companyId         String
+  saleConsumptionId String
+  saleConsumption   SaleConsumption @relation(fields: [saleConsumptionId], references: [id], onDelete: Restrict)
+  qty               Int
+  reason            String
+  valuePaise        BigInt
+  idempotencyKey    String
+  createdById       String
+  createdAt         DateTime        @default(now())
+
+  @@unique([saleConsumptionId, idempotencyKey])
+}
+
+// A count sheet. The variance is frozen when it is SUBMITTED (counted minus
+// the ledger at that moment) and posted only when someone else APPROVES it,
+// so sales made between the two can never be counted as a variance.
+model StockCount {
+  id            String            @id @default(cuid())
+  companyId     String
+  number        String
+  locationId    String
+  location      InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  status        StockCountStatus  @default(DRAFT)
+  note          String?
+  createdById   String
+  createdAt     DateTime          @default(now())
+  submittedById String?
+  submittedAt   DateTime?
+  approvedById  String?
+  approvedAt    DateTime?
+  rejectedById  String?
+  rejectedAt    DateTime?
+  rejectReason  String?
+  updatedAt     DateTime          @updatedAt
+
+  lines StockCountLine[]
+
+  @@unique([companyId, number])
+  @@index([companyId, status])
+}
+
+model StockCountLine {
+  id               String           @id @default(cuid())
+  countId          String
+  count            StockCount       @relation(fields: [countId], references: [id], onDelete: Restrict)
+  itemId           String
+  item             InventoryItem    @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  enteredQty       Decimal?         @db.Decimal(18, 3)
+  enteredUnit      String?
+  countedQty       Decimal?         @db.Decimal(18, 3)
+  systemQty        Decimal?         @db.Decimal(18, 3)
+  varianceQty      Decimal?         @db.Decimal(18, 3)
+  // Paise per base unit, entered by the counter for a surplus at a location
+  // that has never held this item with a value (the opening count).
+  unitCostPaise    Decimal?         @db.Decimal(20, 6)
+  postedValuePaise BigInt?
+  costStatus       StockCostStatus?
+
+  @@unique([countId, itemId])
+}
+
+model StockWastage {
+  id              String            @id @default(cuid())
+  companyId       String
+  number          String
+  locationId      String
+  location        InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  reason          WastageReason
+  note            String?
+  totalValuePaise BigInt
+  idempotencyKey  String
+  createdById     String
+  createdAt       DateTime          @default(now())
+
+  lines StockWastageLine[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, createdAt])
+}
+
+model StockWastageLine {
+  id          String          @id @default(cuid())
+  wastageId   String
+  wastage     StockWastage    @relation(fields: [wastageId], references: [id], onDelete: Restrict)
+  itemId      String
+  item        InventoryItem   @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  enteredQty  Decimal         @db.Decimal(18, 3)
+  enteredUnit String
+  qtyBase     Decimal         @db.Decimal(18, 3)
+  batchId     String?
+  valuePaise  BigInt
+  costStatus  StockCostStatus
+}
+
+// Indent → dispatch → receipt. Between dispatch and receipt the goods are in
+// transit: gone from the source, not yet at the destination, and valued at
+// what they left the source at.
+model StockTransfer {
+  id             String              @id @default(cuid())
+  companyId      String
+  number         String
+  fromLocationId String
+  fromLocation   InventoryLocation   @relation("TransferFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  toLocationId   String
+  toLocation     InventoryLocation   @relation("TransferTo", fields: [toLocationId], references: [id], onDelete: Restrict)
+  status         StockTransferStatus @default(REQUESTED)
+  note           String?
+  // The store request this dispatch serves, when there is one. A request may
+  // be served by several transfers (partial dispatch); a transfer may exist
+  // with no request at all (a warehouse pushing stock out). Keeping the link
+  // optional and one-way is what lets request quantities and transfer
+  // quantities be reconciled against each other instead of assumed equal.
+  storeRequestId String?
+  storeRequest   StoreRequest?       @relation(fields: [storeRequestId], references: [id], onDelete: Restrict)
+  requestedById  String
+  requestedAt    DateTime            @default(now())
+  dispatchedById String?
+  dispatchedAt   DateTime?
+  receivedById   String?
+  receivedAt     DateTime?
+  cancelledById  String?
+  cancelledAt    DateTime?
+  cancelReason   String?
+  updatedAt      DateTime            @updatedAt
+  // Deterministic per dispatch attempt, so a retried dispatch cannot send the
+  // goods twice.
+  idempotencyKey String?
+
+  lines StockTransferLine[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, status])
+  @@index([fromLocationId])
+  @@index([toLocationId])
+  @@index([storeRequestId])
+}
+
+model StockTransferLine {
+  id                 String        @id @default(cuid())
+  transferId         String
+  transfer           StockTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  itemId             String
+  item               InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  // The request line this serves, so "asked 10, sent 6, arrived 5" is three
+  // separately stored numbers rather than one that keeps being overwritten.
+  storeRequestLineId String?
+  storeRequestLine   StoreRequestLine? @relation(fields: [storeRequestLineId], references: [id], onDelete: Restrict)
+  requestedQty       Decimal       @db.Decimal(18, 3)
+  dispatchedQty      Decimal?      @db.Decimal(18, 3)
+  dispatchValuePaise BigInt?
+  // What the destination took into good stock. NOT the same as dispatched:
+  // the difference is split below, never rolled into one "variance".
+  acceptedQty        Decimal?      @db.Decimal(18, 3)
+  acceptedValuePaise BigInt?
+  // Arrived, but broken or spoiled. Physically present, so it is received and
+  // then written off at the destination — it does not vanish from the ledger.
+  damagedQty         Decimal?      @db.Decimal(18, 3)
+  damagedValuePaise  BigInt?
+  // Dispatched and never arrived. Written off at the SOURCE's value, because
+  // it never reached the destination to be worth anything there.
+  shortageQty        Decimal?      @db.Decimal(18, 3)
+  shortageValuePaise BigInt?
+
+  batches StockTransferLineBatch[]
+
+  @@index([storeRequestLineId])
+}
+
+// Which batches a transfer line carried. Without this a batch's identity and
+// expiry die at the loading bay: the destination would receive an anonymous
+// quantity and traceability would stop at dispatch.
+model StockTransferLineBatch {
+  id             String            @id @default(cuid())
+  transferLineId String
+  transferLine   StockTransferLine @relation(fields: [transferLineId], references: [id], onDelete: Restrict)
+  batchId        String
+  batch          StockBatch        @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  dispatchedQty  Decimal           @db.Decimal(18, 3)
+  acceptedQty    Decimal?          @db.Decimal(18, 3)
+  damagedQty     Decimal?          @db.Decimal(18, 3)
+  shortageQty    Decimal?          @db.Decimal(18, 3)
+
+  @@unique([transferLineId, batchId])
+  @@index([batchId])
+}
+
+// A batch of a semi-finished or finished item made from its recipe. Inputs
+// leave as PRODUCTION_OUT, the output arrives as PRODUCTION_IN carrying their
+// exact value, so cost flows through a sub-recipe unchanged.
+model ProductionBatch {
+  id              String            @id @default(cuid())
+  companyId       String
+  number          String
+  locationId      String
+  location        InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  recipeVersionId String
+  recipeVersion   RecipeVersion     @relation(fields: [recipeVersionId], references: [id], onDelete: Restrict)
+  outputItemId    String
+  outputItem      InventoryItem     @relation(fields: [outputItemId], references: [id], onDelete: Restrict)
+  // What came out, and what the run was set up to make. Both are kept because
+  // the difference between them is the yield variance, and the ingredients
+  // were charged against the second one — so a reader shown only outputQty is
+  // shown a cost per unit with no way to see why it is high. It cannot be
+  // recovered later either: the inputs were scaled through a rounding
+  // division, so inverting them approximates the planned size rather than
+  // returning it. Nullable, because runs recorded before the column existed do
+  // not know, and NULL says so rather than claiming they went to plan.
+  outputQty       Decimal           @db.Decimal(18, 3)
+  plannedQty      Decimal?          @db.Decimal(18, 3)
+  inputValuePaise BigInt
+  batchId         String?
+  note            String?
+  idempotencyKey  String
+  createdById     String
+  createdAt       DateTime          @default(now())
+
+  @@unique([companyId, number])
+  @@unique([companyId, idempotencyKey])
+}
+
+// A valuation frozen at a moment. Recomputing it later from the ledger must
+// give the same numbers — that is what makes a period-end stock figure
+// evidence rather than a claim. GET .../verify does the recomputation.
+model StockValuationSnapshot {
+  id              String   @id @default(cuid())
+  companyId       String
+  locationId      String?
+  asOf            DateTime
+  totalValuePaise BigInt
+  lineCount       Int
+  // sha256 over the sorted lines, so a verify can say "identical" in one line.
+  digest          String
+  takenById       String
+  takenAt         DateTime @default(now())
+
+  lines StockValuationSnapshotLine[]
+
+  @@index([companyId, asOf])
+}
+
+model StockValuationSnapshotLine {
+  id         String                 @id @default(cuid())
+  snapshotId String
+  snapshot   StockValuationSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  locationId String
+  itemId     String
+  qty        Decimal                @db.Decimal(18, 3)
+  valuePaise BigInt
+
+  @@index([snapshotId])
+}
+// ---- store replenishment: reservations, requests, plans, reminders ---------
+//
+// The ledger above answers "what is physically here". This section answers the
+// three questions a multi-store operation actually asks: what of it is spoken
+// for, what has been asked for and not yet delivered, and who has to do
+// something about it before it is too late.
+//
+// Six quantities are kept apart on purpose, because collapsing any two of them
+// is how stock gets sold twice:
+//   physical    Σ ledger at the location. What a person would find on a shelf.
+//   blocked     physical held in an expired, quarantined or recalled batch.
+//   usable      physical − blocked.
+//   reserved    usable committed to an approved request, not yet dispatched.
+//   available   usable − reserved. The only figure an allocation may spend.
+//   in transit  dispatched and not yet settled at the destination. Belongs to
+//               neither location's physical figure and is derived from open
+//               transfers, never stored as a balance.
+
+enum StockReservationState {
+  HELD
+  CONSUMED
+  RELEASED
+}
+
+enum StoreRequestStatus {
+  DRAFT
+  SUBMITTED
+  PARTIALLY_APPROVED
+  APPROVED
+  REJECTED
+  IN_FULFILMENT
+  FULFILLED
+  // Fulfilled short and explicitly signed off. A request NEVER reaches a
+  // terminal state with an outstanding quantity that nobody has decided about.
+  CLOSED_SHORT
+  CANCELLED
+}
+
+enum StoreRequestPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum StoreRequestIssueKind {
+  SHORTAGE
+  DAMAGE
+}
+
+enum StoreRequestIssueResolution {
+  REPLACED
+  CREDITED
+  WRITTEN_OFF
+  CANCELLED
+}
+
+enum ReplenishmentPlanStatus {
+  ACTIVE
+  PAUSED
+}
+
+enum InventoryReminderKind {
+  SUBMISSION_CUTOFF
+  PENDING_APPROVAL
+  DISPATCH_DUE
+  DELIVERY_OVERDUE
+  RECEIPT_PENDING
+  UNRESOLVED_SHORTAGE
+  BATCH_EXPIRING
+  OPENED_CONTAINER_EXPIRING
+}
+
+enum InventoryReminderState {
+  PENDING
+  NOTIFIED
+  ESCALATED
+  ACKNOWLEDGED
+  // The thing it was about happened. Obsolete reminders are never notified
+  // again and are kept, not deleted, so "why did nobody chase this" has an
+  // answer.
+  OBSOLETE
+}
+
+enum InventoryNotificationState {
+  QUEUED
+  DELIVERED
+  FAILED
+  // FAILED means "did not arrive, and we will try again". UNDELIVERABLE means
+  // "did not arrive, and trying again cannot help" — the address does not
+  // exist, the recipient has opted out. They are kept apart because the
+  // scheduler must stop on one and not on the other, and because a portal
+  // that says "still trying" about a message that will never arrive is worse
+  // than one that admits it gave up.
+  UNDELIVERABLE
+  READ
+}
+
+// Usable stock committed to something that has not taken it yet. Held against
+// a location+item, and against specific batches on the lines so an allocation
+// made under FEFO still ships the batch it promised.
+model StockReservation {
+  id         String                @id @default(cuid())
+  companyId  String
+  locationId String
+  location   InventoryLocation     @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  itemId     String
+  item       InventoryItem         @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  qty        Decimal               @db.Decimal(18, 3)
+  state      StockReservationState @default(HELD)
+  // 'STORE_REQUEST_LINE' today; the column exists so a future caller does not
+  // have to widen the model.
+  sourceType String
+  sourceId   String
+  // One reservation per source, enforced. A double-clicked approval finds the
+  // row and reserves nothing further.
+  idempotencyKey String            @unique
+  heldById   String?
+  heldAt     DateTime              @default(now())
+  settledAt  DateTime?
+  note       String?
+
+  lines StockReservationLine[]
+
+  @@index([companyId, state])
+  @@index([locationId, itemId, state])
+  @@index([sourceType, sourceId])
+}
+
+model StockReservationLine {
+  id            String           @id @default(cuid())
+  reservationId String
+  reservation   StockReservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  batchId       String
+  batch         StockBatch       @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  qty           Decimal          @db.Decimal(18, 3)
+
+  @@unique([reservationId, batchId])
+  @@index([batchId])
+}
+
+// A store asking a warehouse for goods. Deliberately NOT the same entity as
+// the transfer that answers it: one request can be served by several partial
+// dispatches, and the quantity asked for has to stay readable after the
+// quantity sent has changed three times.
+model StoreRequest {
+  id              String               @id @default(cuid())
+  companyId       String
+  number          String
+  // Where the goods are going — a store's stock location.
+  destinationLocationId String
+  destinationLocation   InventoryLocation @relation("RequestDestination", fields: [destinationLocationId], references: [id], onDelete: Restrict)
+  // Where they are being asked from. Null on a request raised before anyone
+  // decided which warehouse serves it.
+  sourceLocationId String?
+  sourceLocation   InventoryLocation? @relation("RequestSource", fields: [sourceLocationId], references: [id], onDelete: Restrict)
+  status          StoreRequestStatus   @default(DRAFT)
+  priority        StoreRequestPriority @default(NORMAL)
+  // Store-local wall time the goods are needed by, stored as an instant. The
+  // plan that generated it carries the timezone that produced this instant.
+  requiredBy      DateTime
+  reason          String?
+  note            String?
+  // Who must decide. Null means "anyone with the approval right at the source".
+  assignedApproverId String?
+  raisedById      String
+  raisedAt        DateTime             @default(now())
+  submittedAt     DateTime?
+  decidedById     String?
+  decidedAt       DateTime?
+  decisionNote    String?
+  closedById      String?
+  closedAt        DateTime?
+  closeReason     String?
+  cancelledById   String?
+  cancelledAt     DateTime?
+  cancelReason    String?
+  // Set when a replenishment plan raised this rather than a person.
+  originPlanId    String?
+  originPlan      ReplenishmentPlan?   @relation(fields: [originPlanId], references: [id], onDelete: Restrict)
+  originRunId     String?
+  originRun       ReplenishmentRun?    @relation(fields: [originRunId], references: [id], onDelete: Restrict)
+  // Identifies the requirement this request covers — plan, destination and
+  // delivery cycle. Unique per company, which is what stops a scheduler retry,
+  // a restarted process and an impatient manager from raising the same
+  // Tuesday order three times.
+  requirementKey  String?
+  idempotencyKey  String?
+  updatedAt       DateTime             @updatedAt
+
+  lines       StoreRequestLine[]
+  attachments StoreRequestAttachment[]
+  issues      StoreRequestIssue[]
+  events      StoreRequestEvent[]
+  transfers   StockTransfer[]
+  reminders   InventoryReminder[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, requirementKey])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, status])
+  @@index([destinationLocationId, status])
+  @@index([sourceLocationId, status])
+  @@index([companyId, requiredBy])
+}
+
+// Every quantity on this line is stored separately and none is derived from
+// another by subtraction at read time. "Asked 10, approved 8, reserved 8,
+// sent 6, took 5, one broken, one never arrived" is seven facts, and a report
+// that recomputes any of them from the others will disagree with the ledger
+// the first time a partial dispatch is followed by a partial receipt.
+model StoreRequestLine {
+  id           String       @id @default(cuid())
+  requestId    String
+  request      StoreRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  // What the store typed and in which unit, kept verbatim beside the base
+  // quantity it converted to. The factor used is frozen on the line, so
+  // re-reading this request in a year does not re-run today's conversion.
+  enteredQty   Decimal      @db.Decimal(18, 3)
+  enteredUnit  String
+  enteredFactorMilli Int
+  requestedQty Decimal      @db.Decimal(18, 3)
+  approvedQty  Decimal?     @db.Decimal(18, 3)
+  allocatedQty Decimal      @default(0) @db.Decimal(18, 3)
+  dispatchedQty Decimal     @default(0) @db.Decimal(18, 3)
+  acceptedQty  Decimal      @default(0) @db.Decimal(18, 3)
+  damagedQty   Decimal      @default(0) @db.Decimal(18, 3)
+  shortageQty  Decimal      @default(0) @db.Decimal(18, 3)
+  // approved − accepted, minus anything explicitly written off. The request
+  // cannot be closed while this is non-zero unless someone says so in writing.
+  outstandingQty Decimal    @default(0) @db.Decimal(18, 3)
+  rejectedReason String?
+  note         String?
+
+  transferLines StockTransferLine[]
+  issues        StoreRequestIssue[]
+
+  @@unique([requestId, itemId])
+  @@index([itemId])
+}
+
+// Metadata only. The binary lives wherever the URL points; this product has no
+// file store of its own yet, so nothing here pretends to hold one.
+model StoreRequestAttachment {
+  id           String       @id @default(cuid())
+  requestId    String
+  request      StoreRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  filename     String
+  contentType  String?
+  byteSize     Int?
+  url          String
+  uploadedById String?
+  uploadedAt   DateTime     @default(now())
+
+  @@index([requestId])
+}
+
+// A shortage or a damage that somebody still has to decide about. Created when
+// a receipt records one and closed only by an explicit resolution — which is
+// what "explicitly resolved" means in practice.
+model StoreRequestIssue {
+  id           String                @id @default(cuid())
+  companyId    String
+  requestId    String
+  request      StoreRequest          @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  requestLineId String
+  requestLine  StoreRequestLine      @relation(fields: [requestLineId], references: [id], onDelete: Cascade)
+  kind         StoreRequestIssueKind
+  qty          Decimal               @db.Decimal(18, 3)
+  valuePaise   BigInt
+  note         String?
+  raisedAt     DateTime              @default(now())
+  raisedById   String?
+  resolution   StoreRequestIssueResolution?
+  resolutionNote String?
+  resolvedById String?
+  resolvedAt   DateTime?
+  // The replacement request raised to cover it, when the resolution was
+  // REPLACED.
+  replacementRequestId String?
+
+  reminders InventoryReminder[]
+
+  @@index([companyId, resolvedAt])
+  @@index([requestId])
+}
+
+// The workflow's own history. The audit log records that a route was called;
+// this records what the request looked like on either side of it, which is
+// what an operations manager actually asks for.
+model StoreRequestEvent {
+  id        String       @id @default(cuid())
+  requestId String
+  request   StoreRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  action    String
+  fromStatus StoreRequestStatus?
+  toStatus   StoreRequestStatus?
+  actorId   String?
+  actorRole String?
+  detail    Json?
+  createdAt DateTime     @default(now())
+
+  @@index([requestId, createdAt])
+}
+
+// A standing arrangement: this store is served from that warehouse, on these
+// days, ordering by this time, for delivery by that time.
+model ReplenishmentPlan {
+  id             String                  @id @default(cuid())
+  companyId      String
+  name           String
+  destinationLocationId String
+  destinationLocation   InventoryLocation @relation("PlanDestination", fields: [destinationLocationId], references: [id], onDelete: Restrict)
+  sourceLocationId String
+  sourceLocation   InventoryLocation     @relation("PlanSource", fields: [sourceLocationId], references: [id], onDelete: Restrict)
+  status         ReplenishmentPlanStatus @default(ACTIVE)
+  // IANA name, e.g. Asia/Kolkata. The store's clock, not the server's: a
+  // cutoff of 18:00 means six in the evening where the store is, and a server
+  // in another zone must not move it.
+  timezone       String                  @default("Asia/Kolkata")
+  // ISO weekday numbers, 1 = Monday. Deliveries happen only on these days.
+  deliveryDays   Int[]
+  // Local time of day, minutes past midnight in the plan's timezone.
+  cutoffMinute   Int
+  requiredByMinute Int
+  leadTimeDays   Int                     @default(1)
+  // Cover this many days of expected consumption when suggesting quantities.
+  coverDays      Int                     @default(7)
+  // Auto-submit a generated request, or leave it in DRAFT for a person. False
+  // by default: a plan that files its own orders without anyone looking is how
+  // a mis-set target quantity becomes a truckload.
+  autoSubmit     Boolean                 @default(false)
+  status_note    String?
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdById    String?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  lines    ReplenishmentPlanLine[]
+  runs     ReplenishmentRun[]
+  requests StoreRequest[]
+
+  @@unique([companyId, name])
+  @@index([companyId, status])
+  @@index([status, nextRunAt])
+}
+
+model ReplenishmentPlanLine {
+  id        String            @id @default(cuid())
+  planId    String
+  plan      ReplenishmentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  itemId    String
+  item      InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  // Base units. A store with no consumption history is driven by these two
+  // alone — the suggestion engine never invents a rate it has not measured.
+  minQty    Decimal           @db.Decimal(18, 3)
+  targetQty Decimal           @db.Decimal(18, 3)
+  safetyQty Decimal           @default(0) @db.Decimal(18, 3)
+  // Skip this item without deleting the line and losing its numbers.
+  active    Boolean           @default(true)
+
+  @@unique([planId, itemId])
+  @@index([itemId])
+}
+
+// One firing of a plan. Persisted before any request is raised, so a process
+// that dies halfway through resumes instead of starting again.
+model ReplenishmentRun {
+  id        String            @id @default(cuid())
+  companyId String
+  planId    String
+  plan      ReplenishmentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  // The delivery cycle this run covers, as a local date in the plan's
+  // timezone. Unique per plan: a restarted scheduler recognises the cycle it
+  // already handled instead of raising the order a second time.
+  cycleDate DateTime          @db.Date
+  startedAt DateTime          @default(now())
+  finishedAt DateTime?
+  // COMPLETED | FAILED | SKIPPED_NOTHING_NEEDED | SKIPPED_ALREADY_COVERED
+  outcome   String?
+  detail    Json?
+  attempts  Int               @default(1)
+  lastError String?
+
+  requests StoreRequest[]
+
+  @@unique([planId, cycleDate])
+  @@index([companyId, startedAt])
+}
+
+// Something that has to happen by a time, and who has to do it. Reminders are
+// derived state: the scheduler recreates the set on every tick and marks the
+// ones whose subject has moved on as OBSOLETE, so a status change silently
+// stops the chasing without anyone having to remember to cancel it.
+model InventoryReminder {
+  id         String                 @id @default(cuid())
+  companyId  String
+  kind       InventoryReminderKind
+  // Stable per (kind, subject, due window). The unique index is what makes
+  // "recreate on every tick" safe to run every minute for a year.
+  dedupeKey  String
+  subjectType String
+  subjectId  String
+  storeRequestId String?
+  storeRequest   StoreRequest?      @relation(fields: [storeRequestId], references: [id], onDelete: Cascade)
+  issueId    String?
+  issue      StoreRequestIssue?     @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  locationId String?
+  dueAt      DateTime
+  state      InventoryReminderState @default(PENDING)
+  assigneeId String?
+  // 0 = the assignee. Each step up notifies one rung higher and is recorded,
+  // so "nobody told me" is answerable.
+  escalationLevel Int               @default(0)
+  escalateAt DateTime?
+  title      String
+  body       String
+  firstSeenAt DateTime              @default(now())
+  lastNotifiedAt DateTime?
+  acknowledgedById String?
+  acknowledgedAt DateTime?
+  obsoletedAt DateTime?
+  obsoleteReason String?
+  updatedAt  DateTime               @updatedAt
+
+  notifications InventoryNotification[]
+
+  @@unique([companyId, dedupeKey])
+  @@index([companyId, state, dueAt])
+  @@index([assigneeId, state])
+  @@index([state, escalateAt])
+}
+
+// A message to a person. Delivery is a recorded fact with its own state,
+// because a reminder nobody received must not look like one that was ignored.
+//
+// The seam an external transport attaches to is src/lib/inventory/
+// notifyTransport.js. No email or WhatsApp adapter is written: the transports
+// that exist are in-app, where the row is itself the message, and a test one
+// that never leaves the process. Nothing this product does today sends
+// anything to anybody outside it.
+model InventoryNotification {
+  id         String                     @id @default(cuid())
+  companyId  String
+  reminderId String?
+  reminder   InventoryReminder?         @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+  recipientId String
+  channel    String                     @default("INAPP")
+  title      String
+  body       String
+  state      InventoryNotificationState @default(QUEUED)
+  attempts   Int                        @default(0)
+  lastError  String?
+  // The transport's own id for the message. It is what lets "we delivered it"
+  // be checked against the provider later instead of only asserted from this
+  // row — the same job the charge reference does on a payment. Null for
+  // in-app, where the row is the message and there is no provider to ask.
+  providerRef String?
+  deliveredAt DateTime?
+  readAt     DateTime?
+  createdAt  DateTime                   @default(now())
+
+  @@index([recipientId, state, createdAt])
+  @@index([companyId, state])
+}
+
+// Which inventory locations a user may act on, and how.
+//
+// PosUser.branchId cannot express this. A warehouse usually belongs to no
+// branch at all, so a branch-pinned manager can never reach one through the
+// branch scope — yet "warehouse operators see their assigned warehouses" is a
+// requirement. This grant is the missing edge, and it is additive: it can only
+// widen a principal within its own company, never across companies, and the
+// routes still apply the role check first.
+//
+// INTEGRATION(foundation): when the permission foundation lands, this becomes
+// the scope half of its action/scope model. The action half already lives in
+// src/lib/inventory/permissions.js as one exported map.
+model InventoryLocationAccess {
+  id         String            @id @default(cuid())
+  companyId  String
+  userId     String
+  user       PosUser           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  locationId String
+  location   InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  // Read is implied by the row existing. These three are the actions that
+  // move or commit stock, and each is granted separately because the person
+  // who loads a van is rarely the person who approves what goes in it.
+  canDispatch Boolean          @default(false)
+  canReceive  Boolean          @default(false)
+  canApprove  Boolean          @default(false)
+  grantedById String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@unique([userId, locationId])
+  @@index([companyId])
+  @@index([locationId])
+}
+
+// One row per named background job. Holds the lease that keeps two processes
+// from ticking the same job at once, and the cursor that lets a restarted
+// process pick up where the last one stopped rather than replaying from zero.
+model InventorySchedulerState {
+  name        String    @id
+  lastTickAt  DateTime?
+  lastOkAt    DateTime?
+  cursorAt    DateTime?
+  lockedBy    String?
+  lockedUntil DateTime?
+  runCount    Int       @default(0)
+  failCount   Int       @default(0)
+  lastError   String?
+  updatedAt   DateTime  @updatedAt
+}
+
+// ==== END LANE inventory ====
+
 // ===========================================================================
 // LANE foundation — Expansion Phase 1: organisation, identity, terminals,
 // devices and the permission/scope layer. Spec Part A §7, Part B §3/§5/§11.
@@ -1291,12 +2929,20 @@ model Terminal {
   devices  Device[]
   orders   Order[]
   payments Payment[]
+  stockMovements StockMovement[]
 
   @@unique([branchId, code])
   // So a device, an order or a payment can name (terminalId, branchId) and
   // have the pairing enforced — a till from another store can never be
   // attributed to this store's takings.
   @@unique([id, branchId])
+  // The same guarantee one level up, for rows that carry companyId but not
+  // branchId. A stock movement's store is its location's, and a location may
+  // have none at all — a central kitchen or a warehouse belongs to the company
+  // and to no store — so (id, branchId) is not a pairing the ledger can name.
+  // (id, companyId) is, and it is the one that matters there: the ledger's
+  // tenant boundary.
+  @@unique([id, companyId])
   @@index([companyId])
   @@index([branchId])
 }

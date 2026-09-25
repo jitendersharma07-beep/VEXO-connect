@@ -687,12 +687,34 @@ describe('VC-105 endpoint', () => {
     expect(res.body.reconciliation.orderCount).toBe(2); // the August order is out
   });
 
-  it('states that costing is blocked and reports no cost at all', async () => {
+  // This test used to assert the opposite — "costing is blocked" — and it was
+  // right when it was written: resolveCostProvider falls through to NONE unless
+  // prisma.saleConsumption exists, and it did not. The inventory lane merging is
+  // what ended that. SaleConsumption is now a real model, so the real prisma
+  // client the endpoint holds satisfies the LIVE branch and the endpoint reports
+  // AVAILABLE. The provider-contract tests above still cover the blocked state
+  // directly, by handing resolveCostProvider a `prisma: {}` that has no such
+  // model; that is the right place for it, because it does not depend on which
+  // lanes happen to be merged.
+  it('reports costing as live, yet still refuses to cost lines it has no cost for', async () => {
     const res = await get(tokens.ownerA, WINDOW);
-    expect(res.body.meta.costing.dependency).toBe('BLOCKED');
-    expect(res.body.meta.costing.source).toBe('NONE');
-    expect(res.body.meta.costing.methodStatus).toBe('DECLARED_NOT_IMPLEMENTED');
-    expect(res.body.meta.costing.missingCapabilities).toContain('recipe_versions');
+    expect(res.body.meta.costing.dependency).toBe('AVAILABLE');
+    expect(res.body.meta.costing.source).toBe('LIVE');
+    expect(res.body.meta.costing.methodStatus).toBe('IMPLEMENTED');
+    expect(res.body.meta.costing.method).toBe('WEIGHTED_AVERAGE');
+    // Not merely "does not contain recipe_versions": the whole list must be
+    // empty. A payload that says IMPLEMENTED in one field and names a missing
+    // capability in the next is read pessimistically, and the pessimistic half
+    // would be the false one.
+    expect(res.body.meta.costing.missingCapabilities).toEqual([]);
+    expect(res.body.meta.costing.historicalReproducibility).toBe('GUARANTEED_BY_STORED_COST');
+
+    // Available is not the same fact as known. These orders were written
+    // straight into the database by the bill() helper above, never through the
+    // billing route, so nothing ever consumed stock for them and there is no
+    // SaleConsumption row to read. The answer is still null — the cost of this
+    // coffee is not known — and null must not quietly become zero just because
+    // a provider is now able to answer in principle.
     expect(res.body.totals.cogsPaise).toBeNull();
     expect(res.body.totals.contributionMarginPaise).toBeNull();
     for (const row of res.body.rows) {

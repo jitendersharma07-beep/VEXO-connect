@@ -26,6 +26,9 @@ import displayRoutes from './api/routes/display.js';
 import kitchenRoutes from './api/routes/kitchen.js';
 import { printAgentsRouter, printJobsRouter } from './api/routes/printing.js';
 import gatewayRoutes from './api/routes/gateway.js';
+// ==== LANE inventory ====
+import inventoryRoutes from './api/routes/inventory/index.js';
+// ==== END LANE inventory ====
 
 // LANE foundation — the organisation, device and permission surface.
 import legalEntityRoutes from './api/routes/legalEntities.js';
@@ -151,6 +154,9 @@ export const createApp = () => {
   api.use('/reports/menu-profitability', menuProfitabilityRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
+  // ==== LANE inventory ====
+  api.use('/inventory', inventoryRoutes);
+  // ==== END LANE inventory ====
   api.use('/kitchen', kitchenRoutes);
   api.use('/print-agents', printAgentsRouter);
   api.use('/print-jobs', printJobsRouter);

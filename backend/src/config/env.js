@@ -43,6 +43,18 @@ export const env = {
   // A provider call that never returns must not hold a cashier, or a request
   // handler, forever. Exceeding this is UNKNOWN, never "refused".
   POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
+  // How an inventory reminder reaches a person. "inapp" is the shipped state
+  // and the only one that delivers anything: no email or WhatsApp adapter is
+  // written. Naming a transport with no adapter behind it does not throw — the
+  // notification is recorded FAILED with the reason, because a message that
+  // did not arrive has to leave a record saying so. See
+  // src/lib/inventory/notifyTransport.js.
+  //
+  // The accounts lane's SMTP settings below are now the obvious thing to build
+  // an "email" transport on, but wiring them together is a decision about who
+  // may be mailed and how often, not a refactor, so it is deliberately not
+  // done here.
+  INVENTORY_NOTIFY_TRANSPORT: process.env.INVENTORY_NOTIFY_TRANSPORT || 'inapp',
 
   // --- Transactional email (contract: accounts lane) ------------------------
   // Unset is the shipped state, exactly like the gateway: with no SMTP host
@@ -131,6 +143,17 @@ if (env.POS_GATEWAY_API_BASE) {
 }
 if (!Number.isFinite(env.POS_GATEWAY_TIMEOUT_MS) || env.POS_GATEWAY_TIMEOUT_MS <= 0) {
   throw new Error('POS_GATEWAY_TIMEOUT_MS must be a positive number of milliseconds');
+}
+// The test notification transport reports delivery on command without sending
+// anything. In production that would mean an expiring-batch warning marked
+// DELIVERED that nobody ever received — and unlike a failed payment, nobody is
+// standing at a counter to notice. Refused here at boot and again on every
+// lookup in notifyTransport.js, because one gate that can be edited out is not
+// a gate.
+if (env.NODE_ENV === 'production' && env.INVENTORY_NOTIFY_TRANSPORT.startsWith('test')) {
+  throw new Error(
+    `Notification transport "${env.INVENTORY_NOTIFY_TRANSPORT}" cannot be used in production`,
+  );
 }
 
 // --- mail configuration, refused at boot rather than at the first send ------

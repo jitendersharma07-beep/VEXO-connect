@@ -34,6 +34,20 @@ import Permissions from './pages/Permissions.jsx';
 import CustomerDisplay from './pages/CustomerDisplay.jsx';
 import PairDisplay from './pages/PairDisplay.jsx';
 import NotFound from './pages/NotFound.jsx';
+// ==== LANE inventory ==== (VC-105 prerequisite, spec Part B §8)
+import InventoryOverview from './pages/inventory/Overview.jsx';
+import InventoryStock from './pages/inventory/Stock.jsx';
+import InventoryBatches from './pages/inventory/Batches.jsx';
+import InventoryRequests from './pages/inventory/Requests.jsx';
+import InventoryTransfers from './pages/inventory/Transfers.jsx';
+import InventoryPlanning from './pages/inventory/Planning.jsx';
+import InventoryReceiving from './pages/inventory/Receiving.jsx';
+import InventoryAdjustments from './pages/inventory/Adjustments.jsx';
+import InventoryLedger from './pages/inventory/Ledger.jsx';
+import InventoryRecipes from './pages/inventory/Recipes.jsx';
+import InventoryProduction from './pages/inventory/Production.jsx';
+import InventorySetup from './pages/inventory/Setup.jsx';
+// ==== /LANE inventory ====
 
 function Home() {
   const { user } = useAuth();
@@ -217,6 +231,120 @@ export default function App() {
                   </RequireRoles>
                 }
               />
+              {/* ==== LANE inventory ==== (spec Part B §8)
+                  Every inventory screen admits exactly the two roles the
+                  server's INVENTORY_ACTIONS map admits, and no more. A cashier
+                  is refused here and refused again at the API, which is the
+                  point: this gate exists so a cashier is not shown a screen
+                  that would only fill with refusals, NOT to be the check.
+                  Owner-only actions — approving a count, releasing a recalled
+                  batch, rebuilding the ledger cache — are gated inside the
+                  pages and re-checked on every request. */}
+              <Route
+                path="inventory"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryOverview />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/stock"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryStock />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/batches"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryBatches />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/requests"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryRequests />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/transfers"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryTransfers />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/planning"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryPlanning />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/receiving"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryReceiving />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/adjustments"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryAdjustments />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/ledger"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryLedger />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="inventory/recipes"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryRecipes />
+                  </RequireRoles>
+                }
+              />
+              {/* A production run needs both dispatch and receive on the
+                  kitchen, which the server checks separately so the refusal
+                  names the missing half. The role gate here is the coarser
+                  one: it decides who may reach the screen at all. */}
+              <Route
+                path="inventory/production"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryProduction />
+                  </RequireRoles>
+                }
+              />
+              {/* Reference data is the owner's to change, but a manager who
+                  cannot see which location their sales come out of cannot read
+                  any other screen here. Admitted to look; refused to write, by
+                  the server first and this page second. */}
+              <Route
+                path="inventory/setup"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventorySetup />
+                  </RequireRoles>
+                }
+              />
+              {/* ==== /LANE inventory ==== */}
               {/* LANE foundation — the organisation registry (spec B§3, B§7):
                   legal entities & GST, brands, regions, tills & devices.
                   Gated by ACTION, not role, from the same list the server

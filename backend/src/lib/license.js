@@ -50,3 +50,18 @@ export const licenseUsable = (license) => Boolean(license && license.effectiveSt
 // and the safe reading of it.
 export const licenseHasModule = (license, module) =>
   Boolean(license && Array.isArray(license.modules) && license.modules.includes(module));
+
+// What VEXO may actually sell, and the same discipline ACTIONS follows in
+// src/lib/permissions.js: a key appears here only once something enforces it.
+// An aspirational entry is a toggle an operator can set that changes nothing,
+// which is a lie told to whoever sets it — and worse here than there, because
+// this one is sold.
+//
+// The licence issuing route validates against this list, so a typo becomes a
+// 400 at the moment of issue rather than a customer who has paid for
+// "INVENTROY" and cannot reach the screens.
+export const LICENSABLE_MODULES = Object.freeze({
+  INVENTORY: 'Inventory, warehouses and recipes',
+});
+
+export const MODULE_KEYS = Object.freeze(Object.keys(LICENSABLE_MODULES));

@@ -17,6 +17,12 @@
 import { readFileSync } from 'node:fs';
 import { mulDivRoundHalfUp } from './profitability.js';
 
+// What costing needs and does not have. Every entry here was true when VC-105
+// was written and the inventory lane was a schema comment; all six are now
+// supplied, so this list describes the NONE and SYNTHETIC providers only. The
+// LIVE provider clears it — see resolveCostProvider. Kept rather than deleted
+// because the two blocked providers still have to say what they are missing,
+// and "blocked for no stated reason" is not an answer a report may give.
 export const MISSING_CAPABILITIES = [
   'recipe_versions',
   'yields',
@@ -27,9 +33,10 @@ export const MISSING_CAPABILITIES = [
 ];
 
 // Declared in the inventory lane's schema comment ("perpetual WEIGHTED AVERAGE
-// per location per item"), pointing at src/lib/inventory/ledger.js — a file
-// that does not exist. VC-105 reports the declaration and its status; it does
-// not choose a valuation policy.
+// per location per item"), pointing at src/lib/inventory/ledger.js. That file
+// now exists and implements exactly that: weighted average per location per
+// item, held as paise per base unit. VC-105 reports the declaration and its
+// status; it does not choose a valuation policy.
 export const DECLARED_METHOD = 'WEIGHTED_AVERAGE';
 
 // InventorySettings.staleCostDays defaults to 90 in the draft schema. Adopted,
@@ -173,6 +180,14 @@ export const resolveCostProvider = ({ prisma, env = process.env } = {}) => {
       dependency: 'AVAILABLE',
       methodStatus: 'IMPLEMENTED',
       source: 'LIVE',
+      // Emptied, not inherited from `base`. Reaching this branch means the
+      // inventory lane is present, and it brings all six: recipe versions and
+      // their yields, unit conversions, modifier adjustments, weighted-average
+      // purchase valuation, and a cost struck and stored at sale time. Leaving
+      // the list populated would have the same payload say IMPLEMENTED and
+      // "missing recipe_versions" in one breath, and a reader believes the
+      // pessimistic half.
+      missingCapabilities: [],
       // SaleConsumption.costPaise was written at sale time and is read, never
       // recomputed, so a later purchase-price change cannot move the past.
       historicalReproducibility: 'GUARANTEED_BY_STORED_COST',

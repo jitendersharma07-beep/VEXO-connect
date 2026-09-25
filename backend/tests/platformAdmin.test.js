@@ -315,6 +315,63 @@ describe('onboarding a real customer company', () => {
   });
 });
 
+// A gate with no key is not a feature, it is an outage. The inventory module
+// is refused to every company by default, so there has to be a way for VEXO to
+// sell it — and this is the only one. Nothing in the customer-facing API can
+// set it, which is the point.
+describe('selling an extension module with a licence', () => {
+  const issue = (companyId, body) =>
+    request(app)
+      .post(`/api/atc/companies/${companyId}/licenses`)
+      .set(auth(rootToken))
+      .send({ plan: 'MULTI_STORE', expiresAt: new Date(Date.now() + 365 * 86400e3).toISOString(), ...body });
+
+  it('grants a module on the licence, and records the grant in the audit trail', async () => {
+    const company = await mkCompany({ name: 'Module Buyer' });
+    const res = await issue(company.id, { modules: ['INVENTORY'] });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.license.modules).toEqual(['INVENTORY']);
+
+    const stored = await prisma.license.findUnique({ where: { id: res.body.license.id } });
+    expect(stored.modules).toEqual(['INVENTORY']);
+
+    // Who turned Inventory on for this customer, and when. A module grant is a
+    // commercial act, so it has to be answerable from the record rather than
+    // from the current value of a column.
+    const entry = await prisma.posAuditLog.findFirst({
+      where: { action: 'LICENSE_ISSUE', companyId: company.id },
+      orderBy: { at: 'desc' },
+    });
+    expect(entry.meta.modules).toEqual(['INVENTORY']);
+  });
+
+  it('defaults to core POS only when no module is named', async () => {
+    const company = await mkCompany({ name: 'Core Only' });
+    const res = await issue(company.id, {});
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // An empty array, not null: every licence issued before this column
+    // existed says core POS only, and that has to keep being what it says.
+    expect(res.body.license.modules).toEqual([]);
+  });
+
+  it('refuses a module nobody sells, rather than storing it', async () => {
+    const company = await mkCompany({ name: 'Typo Buyer' });
+    // The column is an array of strings, so the database cannot tell a typo
+    // from a product. A customer who has paid for "INVENTROY" would find the
+    // screens shut and nothing in the system able to explain why.
+    const res = await issue(company.id, { modules: ['INVENTROY'] });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(await prisma.license.count({ where: { companyId: company.id } }), 'and issued nothing').toBe(0);
+  });
+
+  it('stores the same module once however many times it is named', async () => {
+    const company = await mkCompany({ name: 'Double Buyer' });
+    const res = await issue(company.id, { modules: ['INVENTORY', 'INVENTORY'] });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.license.modules).toEqual(['INVENTORY']);
+  });
+});
+
 describe('who may reach the VEXO console at all', () => {
   it('turns away a customer owner, however senior inside their own tenant', async () => {
     const company = await mkCompany();

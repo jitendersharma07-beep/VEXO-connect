@@ -68,6 +68,27 @@ export const licenseBlocked = (state) =>
         : 'No active VEXO Connect licence found for this account. Please contact VEXO.',
   );
 
+// An extension module the company has not bought.
+//
+// Deliberately not POS_FORBIDDEN. That code means "your role may not", which a
+// customer answers by asking their owner for a bigger role — and no role in
+// the company will ever open this one. It is not POS_LICENSE_* either: the
+// licence is perfectly healthy, it simply does not include this module, and a
+// customer told their licence was the problem will ring VEXO about a renewal
+// they do not need.
+//
+// Its own code, so the portal can route the three refusals to three different
+// places, and so a test can assert WHICH refusal happened rather than merely
+// that the request was refused.
+export const moduleNotLicensed = (module, label) =>
+  new AppError(
+    403,
+    'POS_MODULE_NOT_LICENSED',
+    `${label} is not included in your VEXO Connect licence. Contact VEXO to add it.`,
+    undefined,
+    { module },
+  );
+
 export const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };

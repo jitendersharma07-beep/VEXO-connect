@@ -80,10 +80,29 @@ if (!existingLicence) {
     data: {
       companyId: company.id, plan: 'MULTI_STORE', status: 'ACTIVE',
       expiresAt: new Date(Date.now() + 90 * 24 * 3600 * 1000), baseBranchLimit: 3,
+      // The sandbox is what the inventory screens are rendered against, and
+      // they are gated on the module. Without it the sidebar hides the section
+      // and every route answers 403.
+      modules: ['INVENTORY'],
       notes: 'Dev sandbox fixture — not a customer licence',
     },
   });
   console.log('PASS: issued a dev licence (90 days, MULTI_STORE)');
+} else if (!existingLicence.modules.includes('INVENTORY')) {
+  // A sandbox seeded before the module gate existed already has a licence, so
+  // the create above is skipped and the tenant would sit there entitled to
+  // nothing — screens hidden, routes 403 — with the fixture reporting success.
+  // This script is re-run to bring an existing sandbox up to date, so bringing
+  // the entitlement up to date is its job too.
+  //
+  // An UPDATE, which the ATC route deliberately does not offer: there a module
+  // grant is a commercial act and issuing a new row is what keeps the history.
+  // Nothing here is commercial and there is no history worth keeping.
+  await prisma.license.update({
+    where: { id: existingLicence.id },
+    data: { modules: [...new Set([...existingLicence.modules, 'INVENTORY'])] },
+  });
+  console.log('PASS: added the INVENTORY module to the existing dev licence');
 }
 
 const passwordHash = await hashPassword(PASSWORD);
