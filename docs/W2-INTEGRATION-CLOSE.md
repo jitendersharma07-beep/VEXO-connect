@@ -18,8 +18,8 @@ Read §1 and §8 if you read nothing else. §1 is what shipped; §8 is what did 
 | | |
 |---|---|
 | Branch | `x/w2-integration-close` |
-| Delivered commit | `10c09b2` — the commit that adds this report. The three commits closing the work are `6eb31e9` (QA harness honesty + the artifacts it produced), `094607a` (task #11), `10c09b2` (this report) |
-| Verified remote state | `git ls-remote github` → `refs/heads/x/w2-integration-close` = `10c09b2`. Confirmed by re-reading the remote after the push, not from the push's own output |
+| Delivered content | `6eb31e9` (QA harness honesty + the artifacts it produced), `094607a` (task #11), `10c09b2` (this report). `10c09b2` is the last commit that changes any shipped code, test, artifact or finding |
+| Verified remote state | `git ls-remote github` → `refs/heads/x/w2-integration-close` contains all three, confirmed by re-reading the remote after each push rather than trusting the push's own output — the same reason D-4 exists. The tip may sit one or two commits ahead of `10c09b2`: a report cannot contain its own commit hash, so the §1 bookkeeping lands after the content it describes. Any such commit touches this file only, which `git show --stat` will confirm |
 | Base | remote `main` @ `584de37`, which **is** an ancestor of this branch (`git merge-base --is-ancestor` returns 0) |
 | Remote `main` | **still `584de37` — not advanced.** See the note below |
 | Remote | `github` — the PUBLIC Expansion repo |
