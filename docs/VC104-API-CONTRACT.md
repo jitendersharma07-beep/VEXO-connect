@@ -344,7 +344,12 @@ Allowed from `SUBMITTED` or `REJECTED`. Requires `phone.order.reassign`.
 - Refused **409 `POS_INVOICE_ISSUED`** when `Order.invoiceNumber` is non-null.
   An issued invoice never moves store. (`A§3 VC-104`.)
 - Refused **409 `POS_CONFLICT`** when a payment already exists.
-- The target store is re-validated against §5.6.
+- The target store is re-validated against §5.6, and refused **409
+  `POS_BRANCH_UNAVAILABLE`** if it fails — including **because the destination
+  slot is full**. Since 09-25 a transfer occupies a place in the slot it
+  ARRIVES in (C-5), so a move into a full store is refused where it previously
+  succeeded. The order does not move: it stays live at its source store, in its
+  original slot, and `unavailableReasons` carries the capacity text.
 - **Pricing and tax are recomputed** for the new store before the response
   returns, via `recomputeOrder()`. The response carries the new totals, and the
   UI must show them as a changed price, not reuse the old summary.
@@ -405,6 +410,17 @@ returns `POS_PHONE_ORDER_ALREADY_DECIDED` even if its invoice has also been
 issued; `POS_INVOICE_ISSUED` is what a **SUBMITTED or REJECTED** order with an
 issued invoice returns. Both refuse, and in both cases the order does not move —
 but do not key "an invoice was issued" copy off the accepted case.
+
+The full order on `reassign` is **state → invoice → payment → destination**:
+`POS_PHONE_ORDER_ALREADY_DECIDED` (not SUBMITTED/REJECTED), then
+`POS_INVOICE_ISSUED`, then `POS_CONFLICT` (a payment exists), and only then
+`POS_BRANCH_UNAVAILABLE`. So capacity is the **last** thing checked and the
+first thing an operator can do something about — the other three are permanent
+for that order, a full slot is not. It is also checked twice: once outside the
+transaction against §5.6 (the forecast) and once inside it under the advisory
+lock (the binding one, C-5), so a transfer can pass the first and still be
+refused by the second when another till takes the last place in between. Both
+raise the same code, and in neither case does the order move.
 
 ---
 
