@@ -21,11 +21,12 @@ configuration, and nothing else here works until it is done — deliberately.
 ## 1. Configure the sender (outstanding owner input)
 
 > Two things are outstanding, not one: the mailbox **credential** below, and
-> **confirmation of the recipient**. `support@vexoconnect.com` is used throughout
-> this document because an earlier report named it — which is not the same as the
-> owner confirming it exists and that they can open it. Searched for and not
-> found: any independent record of that confirmation. Treat it as a placeholder
-> until the owner says otherwise.
+> **confirmation of the recipient**. An earlier report named
+> `support@vexoconnect.com`, which is not the same as the owner confirming it
+> exists and that they can open it. Searched for and not found: any independent
+> record of that confirmation. So every command in this document that would send
+> mail takes a placeholder rather than that address — it has to be typed in
+> deliberately, by someone who knows it is real.
 >
 > The domain's MX is real, but an MX proves a domain accepts mail, not that a
 > particular mailbox exists or that anyone reads it. There is no probe that
@@ -120,8 +121,14 @@ and certificate validation are verified above.
 ### Then prove it, before trusting it
 
 ```
-node backend/scripts/verify-mail-delivery.mjs support@vexoconnect.com
+node backend/scripts/verify-mail-delivery.mjs <A MAILBOX THE OWNER HAS CONFIRMED>
 ```
+
+Substitute an address the owner has confirmed they can open. Deliberately **not**
+pre-filled with `support@vexoconnect.com`: this command sends real mail to
+whatever you type, and that address is still unconfirmed (see the note at the top
+of this section). Putting it in a copy-pasteable command is how an unverified
+assumption becomes a message to somewhere nobody is reading.
 
 It sends one real message through `sendMail()` — the same function invitations
 and recovery use, outbox row included — and prints PASS/FAIL plus the provider's
@@ -189,9 +196,15 @@ Run inside the backend container, where `DATABASE_URL` and the `SMTP_*` values
 above are already in the environment:
 
 ```
-node scripts/bootstrap-platform-admin.mjs --email support@vexoconnect.com
-node scripts/bootstrap-platform-admin.mjs --email support@vexoconnect.com --confirm
+node scripts/bootstrap-platform-admin.mjs --email <THE OWNER'S CONFIRMED ADDRESS>
+node scripts/bootstrap-platform-admin.mjs --email <THE OWNER'S CONFIRMED ADDRESS> --confirm
 ```
+
+Same substitution as in step 1, and it matters more here: this address becomes the
+**permanent platform administrator**, and the invitation that opens the account is
+sent to it. If it is wrong, the one account that can administer the platform is
+addressed to a mailbox nobody opens. `support@vexoconnect.com` is not filled in
+because it has not been confirmed.
 
 The first form is a **preview**: it prints what it would do and writes nothing.
 Nothing is written and no mail is sent without `--confirm`.
