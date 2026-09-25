@@ -1,0 +1,22 @@
+-- A production run remembers what it was SET UP to make, not only what came out.
+--
+-- ProductionBatch was created by 20260924400000_inventory_core in this same
+-- lane and is read by nothing outside inventory.
+--
+-- Without this column the two quantities exist only for the length of one HTTP
+-- response: the POST handler knows the batch size it just scaled the inputs
+-- against, and the detail endpoint — the one a person actually opens a week
+-- later, when somebody asks where the 150 g went — has no way to recover it.
+-- The yield variance would be visible exactly once, to the person who already
+-- knew, and never again to anyone investigating.
+--
+-- It cannot be derived after the fact either. The input quantities were scaled
+-- from the batch size through a rounding division, so inverting them gives a
+-- number near the planned quantity rather than the planned quantity, and a
+-- LOSS figure reconstructed by approximation is worse than no figure at all.
+--
+-- Nullable on purpose. Rows written before this migration genuinely do not
+-- know their planned size, and NULL says exactly that; the screen shows no
+-- variance for them rather than inventing one by assuming the run went to
+-- plan, which would silently report every historical loss as zero.
+ALTER TABLE "ProductionBatch" ADD COLUMN "plannedQty" DECIMAL(18,3);

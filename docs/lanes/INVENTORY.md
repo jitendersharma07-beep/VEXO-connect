@@ -114,15 +114,15 @@ because it reads as checked.
 
 | # | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | One ledger, canonical implementation reused, isolated branch | ACCEPTED | `StockMovement` is the only stock table written; `/inventory/ledger/verify` compares caches to it — pilot step 44, 11 positions, 0 mismatches; step 47, 31 movements of 7 kinds |
+| 1 | One ledger, canonical implementation reused, isolated branch | ACCEPTED | `StockMovement` is the only stock table written; `/inventory/ledger/verify` compares caches to it — pilot step 49, 12 positions, 0 mismatches; step 52, 34 movements of 9 kinds. Production was added without a second engine: `requirementForProduction` and `requirementFor` share one scaling core, proved neutral by `inventorySales.test.js` passing unchanged — §14 |
 | 2 | Locations, sublocations, item kinds incl. packaging, unit conversions | ACCEPTED | pilot steps 1–8; screens 02, 11; `Takeaway Box` is a `PACKAGING` item carried through to a plan line |
-| 3 | Batches, FEFO, expiry blocking, shelf life, opened-container clock | ACCEPTED | pilot steps 10, 11, 13, 17, 18, 48, 49; screen 03; min-shelf-life refusal returns 409 |
+| 3 | Batches, FEFO, expiry blocking, shelf life, opened-container clock | ACCEPTED | pilot steps 10, 11, 13, 17, 18, 53, 54; screen 03; min-shelf-life refusal returns 409; a produced batch is stamped `manufacturedOn` with a null supplier rather than borrowing the milk's — §14 |
 | 4 | Receiving, ledger attribution, reversals not edits | ACCEPTED | pilot steps 9–16 and 25; screens 07, 09, 25, 26; every movement resolves to a named person; landed cost is apportioned, readable and conserves to the paise — §13 |
 | 5 | Five-stage requests, damage/shortage, idempotency | ACCEPTED | pilot steps 19–29; screens 04, 05; reconciliation table shows dispatched ≠ accepted with the difference itemised; who raised and who decided is named on the request, its issues and every lifecycle event — `inventoryApi.test.js`, four tests incl. the deleted-account control |
 | 6 | Plans, suggestions, reminders, scheduler persistence | ACCEPTED | pilot steps 30–34; screens 06, 24; the suggestion panel shows an unapproved request excluded from projected stock; the scheduler has since run unattended as a daemon and redelivered a seeded-undelivered notification on its first tick — §11; delivery goes through one transport seam with a negative control — §12 |
 | 7 | Single deduction per sale, uncosted visible, no restock on refund | ACCEPTED | pilot steps 39–43; screen 10; `tests/inventorySales.test.js` |
-| 8 | Nine screens, scoped by role, server-enforced | ACCEPTED | 11 screens shipped, covering the nine the brief names; 26 screenshots, 16 walks, direct-API probes in §6 |
-| 9 | Repeatable synthetic pilot | ACCEPTED | `scripts/dev-inventory-pilot.mjs`, 49 steps, exit 0, run repeatedly on rebuilt databases |
+| 8 | Nine screens, scoped by role, server-enforced | ACCEPTED | 12 screens shipped, covering the nine the brief names; 29 screenshots, 16 walks, direct-API probes in §6 |
+| 9 | Repeatable synthetic pilot | ACCEPTED | `scripts/dev-inventory-pilot.mjs`, 54 steps, exit 0, run repeatedly on rebuilt databases |
 | 10 | Portal connected and walked | ACCEPTED | §7 |
 | 11 | Commits and push | see §9 | Twelve commits listed in §9. This document is inside the last of them, so it cannot verify its own push — §9 gives the command that does. |
 | 12 | — | — | reporting requirement, not a build item |
@@ -329,7 +329,7 @@ only the resulting cookie, so the password never reaches the page.
 | INV-B3 | Scheduler has now run unattended as a daemon and did real work while it ran — see §11 | PRO | — | ACCEPTED | `INVENTORY_SCHEDULER` unset |
 | INV-B4 | **No email or WhatsApp adapter exists.** What now exists is the seam one plugs into, a complete in-app transport, and a test transport — so the missing piece is a provider, not wiring. Naming an absent transport writes a FAILED row reading "No adapter configured for transport …" rather than reporting a delivery that did not happen | PRO | owner approval of a provider | BLOCKED | `INVENTORY_NOTIFY_TRANSPORT=inapp` |
 | INV-B5 | Landed-cost apportionment is now readable and tested: a detail route, a screen that shows the charges and the share each line was given, six tests, and a pilot step that checks the sum. The apportionment itself was **wrong** until this row was closed — see §13 | PRO | — | ACCEPTED | drop `GET /goods-receipts/:grnId` and the modal; the stored columns predate them |
-| INV-B6 | `ProductionBatch` / central-kitchen production is **schema-only** — zero references in `src/`. See the correction below | ENTERPRISE | — | NOT STARTED | unused table |
+| INV-B6 | Central-kitchen production now posts through the one ledger: inputs leave FEFO, the output arrives carrying exactly what they were worth, and the yield variance is stated rather than absorbed. Route, 16 tests, 5 pilot steps, a screen — §14 | ENTERPRISE | — | ACCEPTED | drop `production.js` from `routes/inventory/index.js` and the route from `App.jsx`; `plannedQty` is nullable and unread by anything else |
 | INV-B7 | A rejected CORS origin surfaces as 500 `POS_INTERNAL_ERROR` rather than a 403. Pre-existing in `app.js`, not this lane's, not changed | CORE | — | NOT STARTED | n/a |
 | INV-B8 | Store requests now name who raised, approved, closed and cancelled them, on the request, on every issue and on every lifecycle event | PRO | — | ACCEPTED | serializer-only change |
 
@@ -350,6 +350,10 @@ read as a working feature.
 - **INV-B6 said `ProductionBatch` "is modelled with ledger support".** It is a table and
   nothing else: no route, no service, no ledger call, no reference of any kind under
   `src/`. It needs an API, ledger integration and a screen, from scratch.
+  *Since that correction* all three have been built and the row now reads ACCEPTED — §14.
+  The correction was right about the gap and, as it turned out, understated the cost of
+  it: the table it described as "modelled" was missing the one column the feature needs
+  most, and that was only discovered by rendering the screen. §14 records it.
 
 - **INV-B5's row said the apportionment was "modelled and stored", with no test.** That
   was accurate about the schema and wrong about the arithmetic, and the second half is
@@ -574,4 +578,177 @@ rather than a direct URL. The harness reads the share column back out of the DOM
 `₹68.68` and `₹31.33`, which is the `₹100.01` on the header — so the evidence is what a
 person sees rather than what the API returned a moment earlier. The walk also reports
 console errors and any element overflowing its box; both came back clean.
+
+## 14. The central kitchen: moving value without creating any (INV-B6)
+
+A production run is the only movement in this module that is not a purchase, a sale, a
+transfer or a correction. Paneer does not arrive from a supplier and is not sold as
+paneer; it is made from milk, and the milk stops existing. So the run posts two halves
+inside one transaction: `PRODUCTION_OUT` takes every input off the shelf FEFO at whatever
+the ledger says it was worth, and `PRODUCTION_IN` books the output in carrying **exactly**
+the sum of what left.
+
+The second sentence is the whole feature. A kitchen neither mints nor burns money, and if
+the output's value were recomputed from a price list instead of read back off the
+movements that had just posted, every batch would quietly create or destroy a few paise
+and the valuation report would drift away from the ledger that feeds it. That is why the
+inputs are posted first and the written `valuePaise` is read off the returned rows before
+the output is posted at all — the same shape `TRANSFER_IN` already uses.
+
+### No second engine
+
+The brief forbids a second inventory engine, and recipe scaling was the obvious place to
+grow one: a sale scales a recipe by a portion count, a production run scales it by a
+milli-precise output quantity, and the two look different enough to justify a copy. They
+are not. `consumption.js` now has one `requirementCore` doing the arithmetic, with
+`requirementFor` (sales) and `requirementForProduction` (runs) as the two ways in.
+
+The refactor was proved neutral rather than asserted to be: `tests/inventorySales.test.js`
+was not touched and passes unchanged, 25/25. Two copies of that division would have
+drifted the first time somebody fixed a rounding bug in one of them.
+
+### Charging the run that was set up
+
+A run planned at 2 kg that yields 1.85 kg still ate 2 kg of ingredients. Scaling the
+inputs down to match what appeared would make the variance vanish by construction — and
+the variance is the one number a kitchen manager is actually looking for. So the inputs
+scale on the planned quantity and the shortfall shows up where it belongs: as a higher
+cost per unit on the product that did arrive.
+
+This is also where the feature's worst defect lived, and it survived a green test suite.
+
+**`plannedQty` was never persisted.** The POST handler knew the batch size it had just
+scaled against and put it in the response; `ProductionBatch` had no column for it. Every
+test asserted the variance on the POST response, and every test passed. But the detail
+endpoint — the one a person opens a week later, when somebody asks where the 150 g went —
+rebuilt the document from the ledger and had nothing to rebuild the planned size from, so
+it returned `null` and the screen's variance callout never rendered at all. The loss was
+visible exactly once, to the person who already knew about it.
+
+It was found by **rendering the screen and noticing something absent**, not by a test. A
+missing callout is invisible to an assertion nobody wrote.
+
+Nor could it be recovered after the fact: the inputs were scaled from the batch size
+through a rounding division, so inverting them returns a number *near* the planned
+quantity rather than the planned quantity, and a loss figure reconstructed by
+approximation is worse than no figure at all. It needed a column —
+`20260925060000_production_planned_qty`, additive and nullable, because runs recorded
+before it genuinely do not know their planned size and `NULL` says so rather than claiming
+they went to plan.
+
+The test that now covers it reads the figures back from `GET /production/:id` **and** from
+the list, not from the POST response. Reverting `present()` to its old signature — the
+exact original bug, where POST knew and GET did not — fails it with
+`the run remembers what it was set up for: expected null to be '2000.000'`.
+
+### What it refuses to be
+
+| Refusal | Why |
+| --- | --- |
+| a draft or retired version | producing against a formula nobody has agreed to puts stock on the shelf at a cost nobody agreed to |
+| an archived recipe whose version is still ACTIVE | archiving the parent is what stops a dish being made; the picker hides it, and a convenience is not an enforcement |
+| a recipe with no output item | a latte is not stocked — a menu recipe is consumed by selling it, not by running a batch |
+| a recipe that eats its own output | a loop's cost is whatever the loop last happened to leave behind |
+| a batch-tracked output with no batch code | a made batch that cannot be named cannot be recalled |
+| a run the location cannot cover | named to the thousandth on both sides — `has 20000.000 of Milk … needs 25000.000` — and nothing is written |
+| dispatch rights without receive | the run takes stock off this shelf *and* puts stock back on it; the two are asked separately so the refusal names the missing half |
+
+FEFO and the shortfall check happen **before** the transaction opens. Unlike a sale,
+nobody is holding the food yet: a kitchen that cannot cover the batch should be told what
+it is short of, not handed a negative position.
+
+### A kitchen cannot make something free out of something unpriced
+
+`applyMovement` turns a receipt carrying `valuePaise: 0n` into a confident **ACTUAL zero**,
+and receipts have no ESTIMATED path. So when the rolled-up input status is MISSING the
+output is posted with `null` rather than zero, and reads back as MISSING. Booking it in at
+zero would have made the paneer read as free for the rest of its life. Zero value is not
+the same fact as zero cost.
+
+The residual limitation, stated rather than hidden: because receipts cannot be ESTIMATED,
+a run whose inputs were ESTIMATED writes an `ACTUAL` movement, while `present()` reports
+the true rolled-up status derived from the `PRODUCTION_OUT` rows. The document is right;
+the single movement row is optimistic.
+
+### The evidence
+
+`tests/inventoryProduction.test.js`, 16 tests, all passing. The first asserts the whole
+claim in one line — the company's stock value at the location is **identical before and
+after**, `'a kitchen neither mints nor burns money'` — rather than checking that a
+document was created.
+
+Three negative controls, each caught by exactly one test with exactly the right reason:
+
+| Mutation | Test that caught it | What it said |
+| --- | --- | --- |
+| scale inputs on actual output instead of planned | `charges the run that was set up…` | `expected 8000 to be 10000` |
+| drop the MISSING guard, post zero | `marks the output MISSING rather than booking it in at zero` | `expected 'ACTUAL' to be 'MISSING'` |
+| remove the archived-recipe check | `refuses an archived recipe…` | `expected 201 to be 409` |
+| revert `present()` so only POST knows the planned size | `charges the run that was set up…` | `expected null to be '2000.000'` |
+
+`production.js` was restored byte-identical after each, verified with `diff -q`.
+
+The pilot gained five steps and, like the landed-cost step, **checks its own arithmetic**
+rather than reporting that a run happened. It asserts the inputs sum to what the output
+was booked at, and that the company's total stock value is unchanged — and it asserts its
+own premise first, that the shelf was worth something before the run, so a broken filter
+cannot make "unchanged" mean "both zero":
+
+```
+45. production PRD/26-27/00001 at WH-MAIN: 200.000 of Full Cream Milk +
+    400.000 of Paneer → 1850.000 g of Paneer Butter Base (batch PBB-1),
+    ₹167.12 of ingredients carried across intact — company stock value
+    ₹32675.93 before and after
+46. yield variance -150.000 g: the ingredients for the full 2000.000 g still
+    left the shelf, so the same ₹167.12 is now carried by 1850.000 g and each
+    gram costs 9.0335 paise instead of 8.3560 — the loss is shown, not absorbed
+```
+
+Step 52 is the free corroboration: the ledger now holds 9 kinds of movement, including
+`PRODUCTION_IN` and `PRODUCTION_OUT`, and `/ledger/verify` still compares all 12 positions
+against the movements with 0 mismatches.
+
+### The screen
+
+Captures 27 and 28. The detail lists every input with the value it gave up and puts the
+output underneath as the sum those inputs add to, because the claim "a kitchen neither
+mints nor burns money" is only worth making if somebody can check it on screen. The
+harness reads the figures back out of the DOM rather than off the API: `₹11.20` and
+`₹155.92` in the input rows, `₹167.12` on the "Inputs, in total" line and `₹167.12` again
+on the output row. The variance is on the list as well as inside the run — a loss a reader
+has to open every row to find is a loss most readers will not find.
+
+### A defect this screen exposed in two already-shipped ones
+
+`fmtCost` routed through `fmtPaise`, whose guard is `/^-?\d+$/` — integer paise only. A
+unit cost is **not** a money amount: the ledger holds it as `Decimal(20,6)` paise per base
+unit, because rice at ₹60/kg is 6 paise per gram and rounding that to the nearest paisa
+would lose a third of it. So `"30.400000"` failed the guard and every unit-cost cell in
+the portal rendered the "cost not known" label over a number the server had computed
+correctly. Not a wrong figure — a figure withheld, which is worse on a column whose entire
+job is to show cost.
+
+Capture 29 is the Stock screen with the column working, and the proof it was ever broken
+is a negative control rather than a memory of the old code: reverting the one-character
+regex change, rebuilding, and re-reading the same column gives **1 numeric cell out of 12
+and eleven reading "cost not known"** — the single survivor being the one item whose unit
+cost happens to be a whole number. The bundle hash moved with each rebuild
+(`index-BBwsHgkW` → `index-CZxuO-uK` → back), so the rebuild demonstrably shipped
+different code each time.
+
+This is the only available proof: the frontend has no test runner, and this lane may not
+`npm install` one. Reading the rendered DOM is the substitute, and it is what caught this.
+
+### Migration rehearsal
+
+`20260925060000_production_planned_qty` was rehearsed on both paths. Fresh: every migration
+onto an empty database, drift empty. Populated: the 13 baseline migrations, then 93 real
+rows copied in, then the lane's four — 93 rows after, drift empty. The two paths converge
+(`migrate diff` between them is an empty migration).
+
+The rehearsal script's own list of lane-owned migrations was stale and named only two of
+the four. That is worth recording because of how it fails: a migration missing from that
+list silently lands in the *baseline* instead, and the populated rehearsal then never
+tests the migration it was added to test — it reports success for a run that proved
+nothing.
 

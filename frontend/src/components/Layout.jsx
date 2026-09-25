@@ -11,6 +11,7 @@ import {
   CalendarClock,
   ChefHat,
   ClipboardCheck,
+  CookingPot,
   KeyRound,
   Layers,
   LayoutDashboard,
@@ -153,6 +154,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               <NavItem to="/inventory/receiving" icon={PackagePlus} label="Receiving" />
               <NavItem to="/inventory/adjustments" icon={ListChecks} label="Counts & wastage" />
               <NavItem to="/inventory/recipes" icon={ChefHat} label="Recipes & food cost" />
+              <NavItem to="/inventory/production" icon={CookingPot} label="Central kitchen" />
               <NavItem to="/inventory/ledger" icon={ScrollText} label="Stock ledger" />
               <NavItem to="/inventory/setup" icon={Settings2} label="Inventory setup" />
             </>

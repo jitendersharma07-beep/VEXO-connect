@@ -33,6 +33,7 @@ import InventoryReceiving from './pages/inventory/Receiving.jsx';
 import InventoryAdjustments from './pages/inventory/Adjustments.jsx';
 import InventoryLedger from './pages/inventory/Ledger.jsx';
 import InventoryRecipes from './pages/inventory/Recipes.jsx';
+import InventoryProduction from './pages/inventory/Production.jsx';
 import InventorySetup from './pages/inventory/Setup.jsx';
 // ==== /LANE inventory ====
 
@@ -240,6 +241,18 @@ export default function App() {
                 element={
                   <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
                     <InventoryRecipes />
+                  </RequireRoles>
+                }
+              />
+              {/* A production run needs both dispatch and receive on the
+                  kitchen, which the server checks separately so the refusal
+                  names the missing half. The role gate here is the coarser
+                  one: it decides who may reach the screen at all. */}
+              <Route
+                path="inventory/production"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <InventoryProduction />
                   </RequireRoles>
                 }
               />

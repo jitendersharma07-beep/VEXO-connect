@@ -78,34 +78,70 @@ export const resolveRecipeLink = async (tx, { productId, variantId }) => {
 // negative — "oat milk" removes 150 ml of dairy and adds 150 ml of oat — and a
 // net negative requirement is clamped to zero rather than posted as a receipt:
 // a sale cannot put stock on the shelf, whatever the modifier arithmetic says.
-export const requirementFor = ({ lines, qtySold, yieldPercent, outputQty, adjustments = [] }) => {
+// The scaling itself, shared by sales and by production runs, because there is
+// only one correct answer to "what does this recipe need" and two copies of it
+// would drift the first time someone fixed a rounding bug in one of them.
+//
+// producedMilli is the output quantity asked for, in thousandths of the
+// recipe's output unit. A sale passes qtySold portions as qtySold × 1000; a
+// production run passes a measured quantity that need not be whole.
+const requirementCore = ({ lines, producedMilli, yieldPercent, outputQty }) => {
   const yieldMilli = qtyToMilli(yieldPercent ?? 100);
   const outputMilli = qtyToMilli(outputQty ?? 1);
   if (yieldMilli <= 0) throw new Error('A recipe version cannot have a zero or negative yield');
   if (outputMilli <= 0) throw new Error('A recipe version cannot have a zero or negative output quantity');
 
   const need = new Map();
-  const add = (itemId, milli) => need.set(itemId, (need.get(itemId) ?? 0n) + milli);
-
   for (const l of lines) {
     // One division, not two. Dividing by the output and then by the yield
     // rounds twice, and on a line like 3 g of spice across a 4-portion recipe
     // the second rounding is applied to an already-rounded number.
     const perBatch = BigInt(qtyToMilli(l.qtyBase));
-    add(
-      l.itemId,
-      divRound(perBatch * BigInt(qtySold) * 1000n * 100000n, BigInt(outputMilli) * BigInt(yieldMilli)),
+    const milli = divRound(
+      perBatch * BigInt(producedMilli) * 100000n,
+      BigInt(outputMilli) * BigInt(yieldMilli),
     );
+    need.set(l.itemId, (need.get(l.itemId) ?? 0n) + milli);
   }
-  for (const a of adjustments) {
-    add(a.itemId, BigInt(qtyToMilli(a.qtyDelta)) * BigInt(qtySold));
-  }
+  return need;
+};
 
-  return [...need.entries()]
+// Clamp, drop the empties, order deterministically. A net negative requirement
+// is clamped rather than posted as a receipt: neither a sale nor a production
+// run may put an input back on the shelf, whatever the modifier arithmetic
+// says. The sort is by item id so two callers with the same requirement write
+// their movements in the same order and the idempotency keys line up.
+const finishRequirement = (need) =>
+  [...need.entries()]
     .map(([itemId, milli]) => ({ itemId, qtyMilli: Number(milli > 0n ? milli : 0n) }))
     .filter((r) => r.qtyMilli > 0)
     .sort((a, b) => (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0));
+
+export const requirementFor = ({ lines, qtySold, yieldPercent, outputQty, adjustments = [] }) => {
+  const need = requirementCore({
+    lines,
+    producedMilli: BigInt(qtySold) * 1000n,
+    yieldPercent,
+    outputQty,
+  });
+  // Deltas are added AFTER the scaling and are themselves per portion, so
+  // "extra shot" on three lattes is three extra shots — the modifier is not
+  // divided by the recipe's yield, because the barista pulls a whole shot.
+  for (const a of adjustments) {
+    const milli = BigInt(qtyToMilli(a.qtyDelta)) * BigInt(qtySold);
+    need.set(a.itemId, (need.get(a.itemId) ?? 0n) + milli);
+  }
+  return finishRequirement(need);
 };
+
+// The requirement for a production run, in base-unit milli per item.
+//
+// Production asks for the quantity it INTENDS to make, not the quantity it
+// actually got. A run that plans 10 kg and yields 9.4 still consumed 10 kg of
+// inputs — the missing 600 g is the yield variance, and scaling the inputs down
+// to match the output would hide it by construction.
+export const requirementForProduction = ({ lines, producedMilli, yieldPercent, outputQty }) =>
+  finishRequirement(requirementCore({ lines, producedMilli, yieldPercent, outputQty }));
 
 // Modifier deltas that apply to this line. A row keyed to the recipe wins over
 // a generic one for the same item, so "extra shot" can mean one thing on a

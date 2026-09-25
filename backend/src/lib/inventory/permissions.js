@@ -79,6 +79,12 @@ export const INVENTORY_ACTIONS = Object.freeze({
   'inventory.recipe.view': [OWNER, MANAGER],
   'inventory.recipe.manage': [OWNER],
 
+  // A production run is a kitchen operation, not a financial one: the person
+  // who makes the paneer records making it. It creates no value — the inputs'
+  // value moves to the output — so it needs no second signature the way a
+  // count adjustment does.
+  'inventory.production.post': [OWNER, MANAGER],
+
   'inventory.count.create': [OWNER, MANAGER],
   // Never the same person who submitted it — enforced separately in the
   // route, because a role list cannot express "not you".

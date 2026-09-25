@@ -1845,7 +1845,16 @@ model ProductionBatch {
   recipeVersion   RecipeVersion     @relation(fields: [recipeVersionId], references: [id], onDelete: Restrict)
   outputItemId    String
   outputItem      InventoryItem     @relation(fields: [outputItemId], references: [id], onDelete: Restrict)
+  // What came out, and what the run was set up to make. Both are kept because
+  // the difference between them is the yield variance, and the ingredients
+  // were charged against the second one — so a reader shown only outputQty is
+  // shown a cost per unit with no way to see why it is high. It cannot be
+  // recovered later either: the inputs were scaled through a rounding
+  // division, so inverting them approximates the planned size rather than
+  // returning it. Nullable, because runs recorded before the column existed do
+  // not know, and NULL says so rather than claiming they went to plan.
   outputQty       Decimal           @db.Decimal(18, 3)
+  plannedQty      Decimal?          @db.Decimal(18, 3)
   inputValuePaise BigInt
   batchId         String?
   note            String?

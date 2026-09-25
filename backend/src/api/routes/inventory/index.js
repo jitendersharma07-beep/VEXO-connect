@@ -13,6 +13,7 @@
 //   planning     replenishment plans, suggestions, reminders, notifications
 //   adjustments  physical counts, wastage
 //   recipes      what a sale consumes, and the way sold stock comes back
+//   production   the central kitchen: making one stocked item out of others
 //   reports      stock, ledger, valuation, dashboard, traceability
 
 import { Router } from 'express';
@@ -24,6 +25,7 @@ import requestRoutes from './requests.js';
 import planningRoutes from './planning.js';
 import adjustmentRoutes from './adjustments.js';
 import recipeRoutes from './recipes.js';
+import productionRoutes from './production.js';
 import reportRoutes from './reports.js';
 
 export { MODULE_KEY } from '../../../lib/inventory/permissions.js';
@@ -39,6 +41,7 @@ router.use(requestRoutes);
 router.use(planningRoutes);
 router.use(adjustmentRoutes);
 router.use(recipeRoutes);
+router.use(productionRoutes);
 router.use(reportRoutes);
 
 export default router;

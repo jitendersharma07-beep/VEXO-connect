@@ -1050,6 +1050,117 @@ const main = async () => {
   }
 
   log();
+  log('Central kitchen');
+
+  // The claim this section exists to test is arithmetic, not workflow: a
+  // production run relocates value, it does not create or destroy any. So the
+  // value on the whole shelf is read before and after and compared, and the
+  // run is deliberately given a yield shortfall so the harder half — the loss
+  // staying visible instead of being absorbed into a cheaper input figure —
+  // is exercised too.
+  const valueAcross = async () => {
+    const rows = await prisma.stockBalance.findMany({
+      where: { companyId: fx.company.id },
+      select: { valuePaise: true },
+    });
+    return rows.reduce((a, r) => a + BigInt(r.valuePaise), 0n);
+  };
+
+  const gravy = await mkItem({
+    kind: 'SEMI_FINISHED',
+    name: 'Paneer Butter Base',
+    sku: 'SF-PBBASE',
+    baseUnit: 'G',
+    trackBatches: true,
+    trackExpiry: true,
+  });
+  const gravyRecipe = (
+    await post(`${API}/recipes`, { ...asOwner, body: { name: 'Paneer Butter Base', outputItemId: gravy.id }, expect: 201 })
+  ).recipe;
+  const gv1 = (
+    await post(`${API}/recipes/${gravyRecipe.id}/versions`, {
+      ...asOwner,
+      body: {
+        outputQty: '1000',
+        yieldPercent: '100',
+        lines: [
+          { itemId: paneer.id, qty: '200', unit: 'g' },
+          { itemId: milk.id, qty: '100', unit: 'ml' },
+        ],
+      },
+      expect: 201,
+    })
+  ).version;
+  await post(`${API}/recipes/${gravyRecipe.id}/versions/${gv1.id}/activate`, asOwner);
+  step(`recipe "${gravyRecipe.name}" v${gv1.version} activated — 200 g paneer and 100 ml milk make 1,000 g of base`);
+
+  const valueBeforeRun = await valueAcross();
+  // The premise, stated so the comparison below cannot pass by being empty: a
+  // broken filter would make both sides zero and "unchanged" would mean
+  // nothing at all.
+  if (valueBeforeRun <= 0n) throw new Error('the shelf is worth nothing before the run; the conservation check would be vacuous');
+
+  const run = (
+    await post(`${API}/production`, {
+      ...asOwner,
+      body: {
+        locationId: warehouse.id,
+        recipeVersionId: gv1.id,
+        // Set up for 2 kg; 1.85 kg came out. The 150 g is a real loss and the
+        // ingredients for the full 2 kg still left the shelf.
+        batchQty: '2000',
+        outputQty: '1850',
+        batchCode: 'PBB-1',
+        expiryDate: ymd(days(3)),
+        note: 'Morning batch for both stores',
+        idempotencyKey: key('prod'),
+      },
+      expect: 201,
+    })
+  ).production;
+  const valueAfterRun = await valueAcross();
+
+  const inputSum = run.inputs.reduce((a, i) => a + BigInt(i.valuePaise), 0n);
+  if (inputSum !== BigInt(run.inputValuePaise)) {
+    throw new Error(`the run's inputs add to ${inputSum} but it was booked in at ${run.inputValuePaise}`);
+  }
+  if (valueAfterRun !== valueBeforeRun) {
+    throw new Error(
+      `a production run changed the company's stock value from ${valueBeforeRun} to ${valueAfterRun} paise; ` +
+        'a kitchen neither mints nor burns money',
+    );
+  }
+  step(
+    `production ${run.number} at ${warehouse.code}: ` +
+      run.inputs.map((i) => `${i.qtyBase} of ${i.item.name}`).join(' + ') +
+      ` → ${run.outputQty} g of ${run.outputItem.name} (batch ${run.batch.batchCode}), ` +
+      `${rupees(run.inputValuePaise)} of ingredients carried across intact — ` +
+      `company stock value ${rupees(valueBeforeRun)} before and after`,
+  );
+
+  step(
+    `yield variance ${run.yieldVarianceQty} g: the ingredients for the full ${run.plannedQty} g still left the shelf, ` +
+      `so the same ${rupees(run.inputValuePaise)} is now carried by ${run.outputQty} g and each gram costs ` +
+      `${Number(run.outputUnitCostPaise).toFixed(4)} paise instead of ` +
+      `${(Number(run.inputValuePaise) / Number(run.plannedQty)).toFixed(4)} — the loss is shown, not absorbed`,
+  );
+
+  // The refusals the screen relies on, asked directly of the API.
+  await post(`${API}/production`, {
+    ...asOwner,
+    body: { locationId: warehouse.id, recipeVersionId: gv1.id, batchQty: '9000000', batchCode: 'PBB-X', idempotencyKey: key('prod') },
+    expect: 409,
+  });
+  step('REFUSED as expected: a run the warehouse cannot cover is turned away before anything is written');
+
+  await post(`${API}/production`, {
+    ...asNorth,
+    body: { locationId: warehouse.id, recipeVersionId: gv1.id, batchQty: '1000', batchCode: 'PBB-Y', idempotencyKey: key('prod') },
+    expect: 403,
+  });
+  step('REFUSED as expected: the North manager may dispatch from the warehouse but cannot book the output back into it');
+
+  log();
   log('Reports');
 
   const verify = await get(`${API}/ledger/verify`, asOwner);
