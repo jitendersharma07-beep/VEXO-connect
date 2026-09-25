@@ -97,6 +97,29 @@ const truncate = (text, max) => {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 };
 
+// Helvetica averages a little over half an em, and a URL is mostly lowercase
+// letters, digits and slashes, so 0.52 is close enough to pick a size with.
+const EM = 0.52;
+
+/**
+ * A single line of card text, sized to fit rather than cut to fit.
+ *
+ * The URL line carries the origin in full so a guest whose camera will not
+ * focus can type it and a card found loose can be traced back, which a
+ * truncated URL does neither of. A fixed character cap was wrong for exactly
+ * the case that matters: the dev origin fits under it and a real one —
+ * https://order.example.com plus "/t/" and a 32-character token is 64 — does
+ * not, so every production card would have printed a URL that does not
+ * resolve. Below 5.5pt it would stop being readable at arm's length, so text
+ * long enough to need that is truncated instead of being made illegible.
+ */
+const fitLine = (text, width, maxSize) => {
+  const s = String(text ?? '');
+  const size = Math.min(maxSize, width / (Math.max(s.length, 1) * EM));
+  if (size >= 5.5) return { size, text: s };
+  return { size: 5.5, text: truncate(s, Math.floor(width / (5.5 * EM))) };
+};
+
 const LAYOUTS = {
   sheet: { cols: 2, rows: 3, cardW: 260, cardH: 248, symbol: 118, titleSize: 11, tableSize: 26 },
   single: { cols: 1, rows: 1, cardW: 420, cardH: 470, symbol: 250, titleSize: 16, tableSize: 46 },
@@ -144,23 +167,33 @@ const drawCard = (layout, card, index) => {
   const symbolY = symbolTop - layout.symbol;
   ops.push(symbolOps(card.matrix, left, symbolY, layout.symbol));
 
+  const box = layout.cardW - pad * 2;
   let footer = symbolY - layout.titleSize * 1.4;
+  const instruction = fitLine(
+    card.versionLabel
+      ? `Scan to see the menu and order   ·   ${card.versionLabel}`
+      : 'Scan to see the menu and order',
+    box,
+    layout.titleSize * 0.95,
+  );
   ops.push(
-    `BT 0 0 0 rg /F1 ${n2(layout.titleSize * 0.95)} Tf ${n2(left)} ${n2(footer)} Td ` +
-      `${pdfString('Scan to see the menu and order')} Tj ET`,
+    `BT 0 0 0 rg /F1 ${n2(instruction.size)} Tf ${n2(left)} ${n2(footer)} Td ` +
+      `${pdfString(instruction.text)} Tj ET`,
   );
   footer -= layout.titleSize * 1.15;
+  const line = fitLine(card.footerLine, box, layout.titleSize * 0.72);
   ops.push(
-    `BT 0.45 0.45 0.45 rg /F1 ${n2(layout.titleSize * 0.72)} Tf ${n2(left)} ${n2(footer)} Td ` +
-      `${pdfString(truncate(card.footerLine, 58))} Tj ET`,
+    `BT 0.45 0.45 0.45 rg /F1 ${n2(line.size)} Tf ${n2(left)} ${n2(footer)} Td ` +
+      `${pdfString(line.text)} Tj ET`,
   );
 
   return ops.join('\n');
 };
 
 /**
- * @param cards  [{ storeName, placeLine, tableLabel, footerLine, matrix }]
- *               `matrix` is an encodeQr() result.
+ * @param cards  [{ storeName, placeLine, tableLabel, footerLine, versionLabel, matrix }]
+ *               `footerLine` is the URL and gets a line to itself; `matrix` is
+ *               an encodeQr() result.
  * @param layout 'sheet' (6 per A4, with cut lines) or 'single' (one large card).
  */
 export const renderQrCardsPdf = (cards, { layout = 'sheet' } = {}) => {

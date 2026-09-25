@@ -57,10 +57,16 @@ export const buildCard = ({ branch, table, floor, area, token, rotation }) => {
     storeName: branch.name,
     placeLine: printedPlace || branch.city || '',
     tableLabel: table.name,
-    // The URL in full, so a guest whose camera will not focus can still type it,
-    // and so a card found loose can be traced back. The rotation number tells two
-    // cards for the same table apart by eye.
-    footerLine: `${url}   ·   v${rotation}`,
+    // The URL in full, so a guest whose camera will not focus can still type it
+    // and so a card found loose can be traced back. It gets a line to itself: a
+    // real origin plus "/t/" and a 32-character token runs to about 70, and
+    // sharing the line with anything else pushed it under the size at which the
+    // renderer has to start dropping characters.
+    footerLine: url,
+    // Tells two cards for the same table apart by eye, so a manager holding an
+    // old card and its reprint can see which is which. Short, so it rides on
+    // the instruction line where there is room.
+    versionLabel: `v${rotation}`,
     matrix: encodeQr(url),
     url,
     printedPlace,

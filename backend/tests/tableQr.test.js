@@ -1305,6 +1305,36 @@ describe('printed cards decode to the configured URL', () => {
     expect(all).toContain('T1');
   });
 
+  it('prints the whole URL in the footer, never a truncated one', async () => {
+    // The footer exists so a guest whose camera will not focus can type the
+    // address, and so a card found loose can be traced back. Both need every
+    // character: a URL with an ellipsis in it is not a URL. This is the
+    // assertion a fixed character cap failed — BASE plus "/t/" plus a 32-
+    // character token is 60, which is the length a real https origin has too.
+    const res = await request(app)
+      .get('/api/table-qr/export.pdf')
+      .query({ branchId: branchA1.id })
+      .set(auth(tokens.managerA1))
+      .buffer()
+      .parse((r, cb) => {
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    const pdf = parsePdf(res.body);
+    const all = pdf.pages.flatMap((p) => textsOf(p.content));
+    const footers = all.filter((t) => t.startsWith(BASE));
+    expect(footers.length).toBeGreaterThan(1);
+    for (const line of footers) {
+      expect(line).not.toContain('…');
+      expect(line).toMatch(new RegExp(`^${BASE}/t/[\\w-]{32}$`));
+    }
+    // The rotation marker rides on the instruction line, and is what tells an
+    // old card from its reprint by eye, so it must survive too.
+    expect(all.some((t) => /^Scan to see the menu and order\s+·\s+v\d+$/.test(t))).toBe(true);
+  });
+
   it('a moved table is reported as needing a reprint, not silently mislabelled', async () => {
     const before = await request(app)
       .get('/api/table-qr')
