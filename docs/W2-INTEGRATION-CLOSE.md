@@ -18,10 +18,34 @@ Read §1 and §8 if you read nothing else. §1 is what shipped; §8 is what did 
 | | |
 |---|---|
 | Branch | `x/w2-integration-close` |
+| Delivered commit | `10c09b2` — the commit that adds this report. The three commits closing the work are `6eb31e9` (QA harness honesty + the artifacts it produced), `094607a` (task #11), `10c09b2` (this report) |
+| Verified remote state | `git ls-remote github` → `refs/heads/x/w2-integration-close` = `10c09b2`. Confirmed by re-reading the remote after the push, not from the push's own output |
 | Base | remote `main` @ `584de37`, which **is** an ancestor of this branch (`git merge-base --is-ancestor` returns 0) |
+| Remote `main` | **still `584de37` — not advanced.** See the note below |
 | Remote | `github` — the PUBLIC Expansion repo |
 | Working tree | `/home/atc-noc/vexo-connect-x-lanes/w2-close` |
 | Migrations on disk | **22**, agreed by both demo databases (`schemaDigest a4215343d532`) |
+
+**`main` was not advanced, and the reason is local tooling, not the remote.** The
+fast-forward is clean and was checked before attempting it: `584de37` is an ancestor of the
+tip, and the 12 commits `main` would gain are this lane's own plus merges of `main` itself
+— nothing unrelated, which is the §7 condition. Both idiomatic forms were refused by the
+local Claude Code auto-mode classifier with *"Auto mode could not evaluate this action and
+is blocking it for safety"* — the same unparseable-command block that has hit this repo's
+pushes before, and not a permission error from GitHub. Trying further spellings would be
+looping through forms to defeat a guard, so it stopped at two.
+
+So this is the one unblock action the owner needs, and it is a fast-forward — no merge, no
+re-verification, because the tree being published is byte-identical to the tree the §3
+numbers came from:
+
+```
+cd /home/atc-noc/vexo-connect-x-lanes/w2-close
+git push github x/w2-integration-close:main
+```
+
+If the owner would rather review before it lands, the branch is already on the remote and a
+PR from `x/w2-integration-close` into `main` needs nothing further from here.
 
 The branch reached its base the hard way and it is worth one line, because it changes what
 the evidence means. Two minutes after `git ls-remote` showed `main` at `7ab9cee`, a push
