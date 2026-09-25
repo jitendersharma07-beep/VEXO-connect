@@ -64,27 +64,61 @@ const app = createApp();
 const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 
+const COMPANY_SLUGS = ['alpha-scope', 'bravo-scope'];
+
+// Deletes THIS suite's own fixtures and nothing else, which is a deliberate
+// departure from the unscoped `deleteMany()` chains the other suites use. The
+// reason is that the unscoped pattern does not work here, and the first two
+// attempts at it both failed in the same way:
+//
+//   1. `posUser.deleteMany()` died on `UserInvitation_createdById_fkey` —
+//      residue from invitations.test.js. Adding a userInvitation delete fixed
+//      that one case.
+//   2. It then died on `Order_discountApprovedById_fkey` — residue from a
+//      discount suite. This file creates no orders at all.
+//
+// There are 23 RESTRICT foreign keys pointing at PosUser (including
+// Order.waiterId, added by this very lane), so an unscoped delete of every
+// PosUser is only safe if this file also deletes most of the database in
+// dependency order. That is what discounts.test.js's 38-line wipe does, and it
+// would need extending again for DiningVisit, TableQrCode and
+// SupportAccessGrant. globalSetup.js uses TRUNCATE ... CASCADE precisely
+// because it "needs no knowledge of the dependency graph"; a per-file helper
+// has no such escape.
+//
+// So this one stays inside its own two companies. It cannot be reddened by what
+// another suite left behind, which matters more for this file than for most:
+// it is a security regression test, and globalSetup's own comment makes the
+// argument — "a warning that cries wolf is worse than none: the next reader
+// learns to ignore it". A gate test that goes red for unrelated reasons is a
+// gate test somebody eventually stops reading.
 const wipe = async () => {
-  await prisma.deviceCommand.deleteMany();
-  await prisma.device.deleteMany();
-  await prisma.terminal.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.permissionRule.deleteMany();
-  await prisma.userStoreAssignment.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  // Before posUser, and not optional: UserInvitation.createdById is a Restrict
-  // FK, so leaving a row here makes posUser.deleteMany() fail with
-  // `UserInvitation_createdById_fkey`. floorplan.test.js omits this line and
-  // fails exactly that way whenever the sequencer happens to run it after
-  // invitations.test.js — recorded in the handover as a separate defect.
-  await prisma.emailOutbox.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
+  const companies = await prisma.company.findMany({
+    where: { slug: { in: COMPANY_SLUGS } },
+    select: { id: true },
+  });
+  const ids = companies.map((c) => c.id);
+  if (!ids.length) return;
+  const companyId = { in: ids };
+
+  const users = await prisma.posUser.findMany({ where: { companyId }, select: { id: true } });
+  const userId = { in: users.map((u) => u.id) };
+
+  await prisma.deviceCommand.deleteMany({ where: { companyId } });
+  await prisma.device.deleteMany({ where: { companyId } });
+  await prisma.terminal.deleteMany({ where: { companyId } });
+  await prisma.posAuditLog.deleteMany({ where: { companyId } });
+  await prisma.posSession.deleteMany({ where: { userId } });
+  await prisma.permissionRule.deleteMany({ where: { companyId } });
+  await prisma.userStoreAssignment.deleteMany({ where: { companyId } });
+  await prisma.licenseAddon.deleteMany({ where: { license: { companyId } } });
+  await prisma.license.deleteMany({ where: { companyId } });
+  await prisma.discountPolicy.deleteMany({ where: { companyId } });
+  await prisma.emailOutbox.deleteMany({ where: { companyId } });
+  await prisma.userInvitation.deleteMany({ where: { companyId } });
+  await prisma.posUser.deleteMany({ where: { companyId } });
+  await prisma.branch.deleteMany({ where: { companyId } });
+  await prisma.company.deleteMany({ where: { id: companyId } });
 };
 
 const tokens = {};
