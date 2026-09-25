@@ -951,11 +951,29 @@ router.post(
     // One variable rather than three now() calls is what makes "checked against
     // the slot it lands in" true by construction instead of by luck.
     //
-    // For a SCHEDULED order the anchor stays scheduledFor: the food is still due
-    // at the same time wherever it is cooked, so `when` is that, while the event
-    // still records the real move time.
+    // For a SCHEDULED order that is still ahead of its due time the anchor stays
+    // scheduledFor: the food is due at the same moment wherever it is cooked, so
+    // `when` is that, while the event still records the real move time.
+    //
+    // An OVERDUE one is the opposite case and it is a capacity hole, not a
+    // rounding detail. An order due at 18:00 and still unmade at 19:30 does not
+    // get cooked at 18:00 — it goes on the pass now. Judging it against 18:00
+    // checks a window that has already elapsed and is therefore almost always
+    // empty, so a stale scheduledFor walks straight past a destination that is
+    // full RIGHT NOW, and the store is handed food it has no room to cook.
+    // Nothing stops this happening: submit refuses a scheduledFor in the past,
+    // but nothing re-checks it afterwards. An order can therefore sit SUBMITTED
+    // straight through its due time — not because the status cannot advance
+    // (REJECT is a route and it does release the slot) but because no clock
+    // advances it. There is no sweep, no expiry, nothing time-driven at all;
+    // only a human pressing accept or reject moves it.
+    //
+    // The admission rule is therefore the LATER of the two — the same GREATEST
+    // that SLOT_ANCHOR applies, so the slot checked here and the slot the order
+    // lands in are one rule evaluated in two places rather than two rules that
+    // have to be kept in step.
     const movedAt = new Date();
-    const when = po.scheduledFor ?? movedAt;
+    const when = po.scheduledFor && po.scheduledFor > movedAt ? po.scheduledFor : movedAt;
     // Modifiers come along so the new store's minimum-order-value rule is
     // judged against what this basket actually costs. Nothing is re-priced from
     // them — the line's unitPrice was snapshotted at submit and recomputeOrder

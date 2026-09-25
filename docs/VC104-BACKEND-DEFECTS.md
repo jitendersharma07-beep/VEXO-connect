@@ -481,10 +481,11 @@ history, median of 7 including Prisma overhead:
 The `COALESCE` form is 8x the cost of the wrong answer and **an index does not
 help it at all** — the correlated subquery sits in the filter, so it is
 evaluated once per row of the store's history. That history is the reason the
-number matters: **`PhoneOrderStatus` has no terminal state**, so an ACCEPTED
-order stays ACCEPTED forever and the candidate set is everything the store has
-ever taken, growing without bound. `loadBranchDecision` runs this once per
-candidate branch, so a five-store company pays it five times per call.
+number matters: **there is no status beyond accepted** — rejection releases an
+order, but nothing marks one cooked or closed — so an ACCEPTED order stays
+ACCEPTED forever and the candidate set is everything the store has ever taken,
+growing without bound. `loadBranchDecision` runs this once per candidate branch,
+so a five-store company pays it five times per call.
 
 Splitting the anchor into three arms that partition the same way `COALESCE`
 does makes each arm's predicate indexable, which is what recovers the cost. The
@@ -492,16 +493,73 @@ two unindexed numbers (14.1 and 17.0) are separate medians of the same
 configuration — treat the spread as the noise floor of this probe, not as a
 result.
 
+#### The overdue scheduled transfer — the hole the first fix left
+
+The first version of this fix pinned a scheduled order to `scheduledFor` and
+said so in as many words: *"a move does not change it: the food is still due at
+the same time."* That is right while the order is still ahead of its due time
+and **wrong the moment it is not**, and the gap it leaves is the same shape as
+D-2's original one.
+
+An order due at 18:00 that is still sitting unmade at 19:30 is not going to be
+cooked at 18:00 — it goes on the pass now. Judging its transfer against the
+18:00 slot checks a window that **has already elapsed and is therefore almost
+always empty**, so a stale `scheduledFor` walks straight past a destination that
+is full right now, and the store is handed food it has no room to cook. Nothing
+in the system prevents an order reaching that state: submit refuses a
+`scheduledFor` in the past, but nothing re-checks it afterwards, and no clock
+ever advances the order. There is no sweep and no expiry — only a human pressing
+accept or reject moves it.
+
+**The admission rule, stated once.** The slot an order is admitted against, and
+the slot it subsequently occupies, are both
+
+> **the LATER of its due time and the latest move into the store it is now at.**
+
+`GREATEST(scheduledFor, max(REASSIGNED.at))` in `SLOT_ANCHOR`, and the same
+later-of in the reassign route's `when`. Deliberately one rule evaluated in two
+places rather than two rules that have to be kept in step — and the battery
+enforces that they agree, because M12 reverts the anchor's `GREATEST` to
+`COALESCE` (check and anchor disagree) and is caught.
+
+Valid future-scheduled behaviour is unchanged and is pinned by its own test:
+a transfer of an order still ahead of its due time stays anchored on
+`scheduledFor`, books the due slot and books nothing at the move time. Ties go
+to the due time — the comparison is `>`, not `>=` — so an order transferred at
+exactly its due instant keeps the scheduled reading.
+
+The three anchor arms stay **disjoint and complete** under the new rule, which
+is the property that stops an order being counted twice or not at all:
+
+| arm | condition | anchor |
+|---|---|---|
+| A | has a due time, and has *not* been moved here since it was due | `scheduledFor` |
+| B | moved here, and that move is later than any due time | the `REASSIGNED.at` |
+| C | no due time, never moved here | `createdAt` |
+
+Four mutants hold that partition in place, each caught by its named detector:
+**M11** honours an overdue `scheduledFor` in the route (the stale due time
+bypasses the current slot); **M12** breaks anchor/check agreement; **M13**
+deletes arm A's exclusion so an overdue order occupies **two** slots; **M14**
+reverts arm B to `scheduledFor IS NULL` so it occupies **none**.
+
+**Cost of the extra clause.** Arm A gained a correlated `NOT EXISTS`, which
+sounds like the `COALESCE` mistake repeated. It is not, because of the order of
+evaluation: arm A is first narrowed by the indexed `scheduledFor` range, so the
+subquery runs only for the handful of rows already inside one 15-minute window,
+not once per row of the store's entire history.
+
 **Migration impact.** `20260924800001_vc104_slot_count_indexes` — two
 `CREATE INDEX`, nothing else. Additive, no column, no data change, no backfill;
 rolling back is a `DROP INDEX`. **It has not been applied to any production
 database from this work.** The migration file carries a deployment note that
-matters more than its size: plain `CREATE INDEX` takes a SHARE lock that blocks
-INSERT/UPDATE/DELETE on the table until it finishes, and `CREATE INDEX
-CONCURRENTLY` cannot be used because Prisma wraps each migration in a
-transaction. On a large `PhoneOrder` table the two statements should be run by
-hand with `CONCURRENTLY` and the migration marked applied, rather than pausing
-writes on the phone-ordering path.
+matters more than its size, and **that note has now been rehearsed rather than
+reasoned about** — see *"The migration rehearsal"* below. Two of its original
+claims survived measurement and one did not: plain `CREATE INDEX` does take a
+SHARE lock that blocks writes, but **Prisma does not wrap a migration in a
+transaction**, so the note's advice to hand-run the SQL and mark the migration
+applied was both unnecessary and the most dangerous of the available options.
+The note has been corrected in place.
 
 Only one of the two indexes carries the improvement, and the doc says so: the
 `PhoneOrder` index alone takes 17.0 → 6.4 ms, the `PhoneOrderEvent` index alone
@@ -514,11 +572,13 @@ Numbers below are what the runs printed, not what was expected of them.
 
 | gate | result |
 |---|---|
-| `tests/phoneOrders.test.js` (focused) | **71 passed / 71** |
-| backend full suite, `vitest run` | **675 passed / 675**, 22 files, exit 0, 141.25 s |
-| mutation battery, `scripts/vc104-slot-mutants.mjs` | **11/11 enforced caught**, 2 predicted escapes (M8/M9) — `PASS`. The preceding run was `9/11`; both escapes and the correction are written up under *Atomicity* |
+| `tests/phoneOrders.test.js` (focused) | **76 passed / 76**, 11.84 s |
+| backend full suite, `vitest run` — **the integration gate, run once on final bytes** | **680 passed / 680**, 22 files, exit 0, 157.43 s, at load 3.1. `[test-db-lock] acquired as vcx-test-lock:2977818`, **no `LOST` line in the log**. 680 = the previous 675 plus the 5 tests added here (71 → 76) |
+| mutation battery, `scripts/vc104-slot-mutants.mjs` | **17/17 enforced caught, 0 predicted escapes** — `PASS`. M8 and M9 were previously *declared* escapes and are now enforced and caught; the history of that reclassification is under *Atomicity* |
 | migration applies from zero | **PASS** — all 22 migrations into an empty DB, both indexes present after |
-| `frontend/qa/run-all.sh`, `tests/e2e/walk-*.cjs` | **NOT RUN** — need a running dev stack, and D-4 records that harness as defective for this tree. Not skipped silently; this change is backend-only and touches no frontend file |
+| migration rehearsal on a populated isolated DB | **PASS** — 120k orders / 41 MB, under concurrent writes; lock modes, stall, failure recovery and index validity all measured. Own section below |
+| `frontend/qa/run-all.sh` (VC-104 browser) | **75 passed / 75, 0 skipped** — artifact self-stamps `branch: x/vc104-slot-anchor`, `baseSha: 82c355b`, `dirty: true` |
+| `frontend/qa/run-all.sh` (VC-105 browser) | **48 passed / 48** — run because the harness runs both stages; unrelated to this change and reported for completeness |
 
 **Two earlier full-suite runs were discarded, and why they were not defects.**
 The first two attempts came back `672/673`, each with a **single failure that was
@@ -540,11 +600,13 @@ them this session's — so the contention is CPU, not shared fixtures.
 *Recorded because "green on the third try" is only honest if the first two are
 shown.*
 
-The **675** in the table is not that third run. It is a **fourth**, taken after
-the two atomicity tests were added, on the bytes below, at load 6.0 — and it
-reports `[test-db-lock] acquired as vcx-test-lock:1795514` with no `LOST` line
-anywhere in the log. The earlier 673 runs are left in place above rather than
-overwritten, because they are the evidence for the contention finding.
+A **fourth** run, taken after the two atomicity tests were added, returned
+**675/675** at load 6.0, reporting `[test-db-lock] acquired as
+vcx-test-lock:1795514` with no `LOST` line anywhere in the log. That run is
+superseded by the final-bytes gate recorded further down — the overdue-transfer
+work landed after it — but the 673 runs and the 675 are all left in place rather
+than overwritten, because they are the evidence for the contention finding and
+overwriting them would delete the only reason the third try is believable.
 
 #### What the numbers above were taken against
 
@@ -555,28 +617,53 @@ fingerprint of what they ran on. SHA-256 of the exact bytes:
 | file | sha256 (first 8 … last 8) |
 |---|---|
 | `backend/prisma/schema.prisma` | `da2d0915…1351a4fa` |
-| `backend/src/lib/phoneOrders.js` | `cf094b9d…c07f7341` |
-| `backend/src/api/routes/phoneOrders.js` | `c499a352…1ff90af3` |
-| `backend/tests/phoneOrders.test.js` | `595a8431…3f756e6b` |
-| `backend/prisma/migrations/20260924800001_…/migration.sql` | `4eb9c24c…d34412ca` |
-| `backend/scripts/vc104-slot-mutants.mjs` | `45c6068e…c39a761c` |
+| `backend/src/lib/phoneOrders.js` | `5d77f0b9…2cdca2cb` |
+| `backend/src/api/routes/phoneOrders.js` | `5e45f9c5…7e8ac23c` |
+| `backend/tests/phoneOrders.test.js` | `c32c28dc…ef26ff7f` |
+| `backend/prisma/migrations/20260924800001_…/migration.sql` | `30d92ad4…c87876a0` |
+| `backend/scripts/vc104-slot-mutants.mjs` | `8bff8a57…a4d4b7b7` |
 | `backend/scripts/vc104-slot-cost-probe.mjs` | `a0fddf2e…0d43903e` |
+| `backend/scripts/vc104-default-clock-probe.mjs` | `da26c8e7…64efe4f9` |
+| `backend/scripts/vc104-rehearse-db.mjs` | `4be2dea0…a1a5fc1a` |
+| `backend/scripts/vc104-rehearse-populate.mjs` | `01b8f766…8bc3fc8c` |
+| `backend/scripts/vc104-rehearse-observe.mjs` | `b6966586…15aaa5f3` |
 
 Rollup of the first four concatenated in that order, which is the one number to
 check if you only check one:
-`b82c528d39c8ebd8e804a142ccaac639e0cabd545c48c05eaed1fea8150b02ee`
+`533c19bdb8e777014dd9485cee87314b5c3e00c4e423ea78c5e51a4eaca696fb`
+
+**`schema.prisma` and `vc104-slot-cost-probe.mjs` carry the same digests as the
+09-24 table above, and that is the point of listing them** — this change adds no
+column and re-takes no cost number, so those two bytes must not have moved. The
+other five did. The previous rollup was
+`b82c528d39c8ebd8e804a142ccaac639e0cabd545c48c05eaed1fea8150b02ee`; it is kept
+here so the two tables can be told apart rather than silently replaced.
+
+The `migration.sql` digest moved for a **comment-only** edit — the corrected
+deployment note. That is safe for an already-applied migration and was verified
+rather than assumed: `migrate deploy` and `migrate status` both pass against a
+database holding the pre-edit version, and `migrate deploy` is what the harness
+and `package.json` use. `migrate dev` would flag the drift; nothing in this
+project's pipeline runs it.
 
 The three documents in this change are deliberately **not** in that list: they are
 still being written as the results come in, so digesting them would fingerprint
 the prose rather than the thing tested.
 
-Two of the entries are worth a word. `scripts/vc104-slot-mutants.mjs` is in the
-list because the battery result is a claim about the *battery*, and it was edited
-between the `9/11` run and the `11/11` one — anyone auditing that pair needs to
-know the runner changed and how. And the digests were taken **after** the battery
-printed `restored both files from the bytes read at startup`, because a mutation
-run leaves the source mutated until it finishes: a `git diff` taken mid-run showed
-M4's edit and would have been a false record of the change.
+`scripts/vc104-slot-mutants.mjs` is in the list because the battery result is a
+claim about the *battery*, and the runner has been edited at every step of this
+history — between the `9/11` and `11/11` runs, and again to add M11–M14 and to
+promote M8/M9 for the `17/17`. Anyone auditing those runs against each other
+needs to know the runner changed and how.
+
+And the digests were taken **after** the battery printed `restored both files
+from the bytes read at startup`, because a mutation run leaves the source
+mutated until it finishes: a `git diff` taken mid-run showed M4's edit and would
+have been a false record of the change. Before taking this table the process
+list was checked for a live battery — and the naive check
+`ps aux | grep -c '[v]c104-slot-mutants'` **returns 1 even when nothing is
+running**, because the shell wrapper's own command line contains the pattern.
+Read the matched lines, do not trust the count.
 
 Equivalence to the commit is checkable without taking this table on trust, and
 without a commit SHA that this file would have to be rewritten to carry:
@@ -589,6 +676,99 @@ Every row must reproduce against the commit that carries *this* file. If one
 differs, the bytes that were tested are not the bytes that shipped, and the
 results above belong to something else.
 
+#### The migration rehearsal
+
+The deployment note on `20260924800001` was written from reasoning. It has now
+been rehearsed, and **one of its three claims was false in the direction that
+matters** — it recommended the one procedure nobody should follow.
+
+**Setup.** A throwaway database, `vcx_rehearse_vc104`, built by deploying the
+other 22 migrations into an empty database and then populating it: **120 000
+`PhoneOrder` (41 MB)** spread over 90 days so `createdAt` is selective rather
+than one repeated key, plus **15 000 `PhoneOrderEvent`** (one order in eight
+carries a `REASSIGNED`), then `ANALYZE`. The index migration was held back, so
+it is the only thing under measurement. Throughout the run a **separate
+process** inserted into `PhoneOrder` in a tight loop, timing each insert
+individually so a blocked write shows as one long sample instead of being
+averaged away, while a third connection sampled `pg_locks` every 20 ms. Separate
+processes deliberately: one process with one pool would let Prisma serialise the
+work and hide the contention. Scripts are
+`backend/scripts/vc104-rehearse-{db,populate,observe}.mjs`; each refuses any
+database not matching `vcx_rehearse_*`, so a mistyped argument fails closed.
+
+**Versions, verified not assumed.** Prisma CLI and `@prisma/client` both
+**5.22.0**, schema engine and query engine
+`605197351a3c8bdd595af2d2a9bc3025bca48ea2`, Node **v22.23.2**.
+
+**Lock impact.**
+
+| measurement | result |
+|---|---|
+| lock taken on `PhoneOrder` | **`ShareLock`**, 44 samples — as the note claimed |
+| writers observed blocked | **29 samples** of a writer's `RowExclusiveLock` in `WAITING` |
+| slowest single INSERT during the build | **757.8 ms** |
+| slowest single INSERT, no-migration control | **298.4 ms** |
+| migration duration per the ledger's own `started_at`/`finished_at` | **766 ms** |
+| writes that FAILED | **0** — they queued, they did not error |
+
+The control run matters: without it, 757 ms is a number with nothing to compare
+it to. And the max stall (757.8 ms) matching the migration's own duration
+(766 ms) is the finding stated plainly — **a writer that arrives as the build
+starts waits for the whole build**. At 120k that is sub-second; it scales with
+the table and it lands on the phone-ordering path.
+
+**The false claim.** The note said `CREATE INDEX CONCURRENTLY` "cannot run
+inside a transaction, and Prisma wraps each migration in one", and concluded
+that a large table needs the statements hand-run and the migration marked
+applied. Three probes:
+
+| probe | result |
+|---|---|
+| A — one `CREATE INDEX CONCURRENTLY`, alone in a migration | **applies, exit 0**, index `indisvalid = true` |
+| B — two statements, the second invalid | first statement **is rolled back**; migrations *are* atomic |
+| C — `CREATE INDEX CONCURRENTLY` beside another statement | **SQLSTATE 25001**, the predicted code |
+
+A and B look contradictory and are not. Prisma 5.22.0 issues **no `BEGIN` of its
+own**; it sends the migration file as a single simple-query message. Postgres
+wraps a *multi-statement* simple query in an implicit transaction block but not
+a *single-statement* one. That reconciles all three, and C was run specifically
+to confirm the reconciliation by predicting its error code in advance rather
+than inferring the mechanism from A and B alone.
+
+**So the operational advice is now the opposite of what the note said.** If the
+table is ever large enough for the pause to matter, do not hand-run SQL and
+forge the ledger — **split the migration into two files with one
+`CREATE INDEX CONCURRENTLY` each**, which is proven to work through
+`migrate deploy`. The cost is that the two indexes are no longer atomic with
+each other, which for two independent additive indexes is nothing. The migration
+is left as-is (two plain statements) because at present size the pause is
+sub-second; the corrected note in the file tells the next operator both the
+measurement and the split recipe.
+
+**Failure recovery.** Probe B's failure left the ledger row with
+`finished_at = NULL, rolled_back_at = NULL`, which blocks all further
+migrations (`P3018`). Recovered with
+`prisma migrate resolve --rolled-back <name>` — exit 0, row stamped
+`rolled_back_at`, deploys unblocked. **No `_prisma_migrations` row was edited
+directly**, and the note now says not to.
+
+**Index validity.** Both shipped indexes came out `indisvalid = indisready =
+indislive = true` (4872 kB and 744 kB). This matters because an interrupted
+`CONCURRENTLY` build leaves an **invalid** index behind — maintained on every
+write, never used for reads, and silent. The check an operator should run after
+any deploy is now in the migration header; run against the rehearsal database it
+returned zero rows. Probe C's failure left nothing behind, because it was
+rejected before doing any work.
+
+**One thing the rehearsal deliberately checked and one it did not.** It checked
+that editing an already-applied migration's *comment* does not break anything:
+`migrate deploy` and `migrate status` both pass on a modified-but-applied
+migration, which is what made correcting the note safe (the harness uses
+`migrate deploy`). It did **not** re-measure the 17.0 / 6.4 / 4.0 / 14.6 ms cost
+table — those numbers are from the earlier probe and are unchanged by this work.
+
+The rehearsal database is dropped at the end of the run.
+
 #### What *this* fix does not settle
 
 Kept in the same spirit as the section it replaces — the limits are listed
@@ -600,24 +780,69 @@ because they are known, not because they are acceptable.
    wait on C-6. There is no reschedule route either. So the spec item
    *"cancellation/rescheduling and exact booked-count changes"* is **covered
    only for rejection**, which is pinned; the other two are not testable
-   because they do not exist. The operational consequence is real: **a
-   scheduled order that no-shows holds its future slot forever**, and the only
-   way to free it is for the destination to reject it.
-2. **The candidate set still grows without bound.** `PhoneOrderStatus` has no
-   terminal state, so every order a store has ever accepted stays `ACCEPTED`
-   and remains a candidate row for every future slot count. The index makes
-   that cheap (4 ms at 120k) rather than making it finite. A store doing a
-   thousand orders a week crosses 120k in about two years, and nothing in this
-   change prunes it. Retention, or a terminal state, is the actual fix and is
-   not in scope here.
-3. **A millisecond window between the check and the write remains.**
-   `reserveSlot` counts at instant T, and the row is written a few ms later.
-   Submit and reassign both pin the checked instant (`takenAt` → `createdAt`,
-   `movedAt` → event `at`) so the row lands in the slot that was actually
-   checked. Removing either pin is mutant M8/M9, and **both were predicted to
-   escape and did** — the window is milliseconds wide and only opens exactly on
-   a slot boundary, so no deterministic test can see it. It is argued in code
-   and recorded here rather than asserted.
+   because they do not exist.
+
+   The operational consequence, stated correctly — an earlier draft of this
+   document said a no-show "holds its future slot forever", which overstates it
+   in a way worth correcting rather than quietly deleting. **An unreleased
+   reservation occupies exactly one slot: its own.** It does not accumulate and
+   it does not spread. While that slot is still ahead, the store has one fewer
+   place in it and only a rejection gives it back. Once the slot has elapsed the
+   reservation is anchored in the past and constrains nothing bookable, because
+   capacity is only ever asked about the slot being booked into.
+
+   Two things that sound like the same problem are deliberately kept apart
+   below: that nothing can *release* a place (this item) and that nothing ever
+   *removes the row* (item 2). The first is a capacity question and is bounded
+   by one slot; the second is a query-cost question and is unbounded. Rolling
+   them together is what produced the "forever" wording.
+2. **The candidate set still grows without bound.** Stated precisely, because
+   "`PhoneOrderStatus` has no terminal state" — the wording used earlier in this
+   document — is not quite true and the imprecision hides which half is the
+   problem. `REJECTED` *is* reachable and it *does* drop an order out of the live
+   set (`status IN ('SUBMITTED','ACCEPTED')`), which is why rejection returns a
+   place. What does not exist is any status **beyond** accepted: nothing marks an
+   order cooked, collected or closed. So every order a store has ever accepted
+   stays `ACCEPTED` and remains a candidate row for every future slot count. The
+   index makes that cheap (4 ms at 120k) rather than making it finite. A store
+   doing a thousand orders a week crosses 120k in about two years, and nothing in
+   this change prunes it. Retention, or a post-accept terminal state, is the
+   actual fix and is not in scope here.
+3. **A millisecond window between the check and the write remains, but it is
+   now pinned by test rather than by argument.** `reserveSlot` counts at instant
+   T and the row is written a few ms later. Submit and reassign both pin the
+   checked instant (`takenAt` → `createdAt`, `movedAt` → event `at`) so the row
+   lands in the slot that was actually checked. Removing either pin is mutant
+   M8/M9.
+
+   **An earlier version of this document said both "were predicted to escape and
+   did", and used that prediction as the reason to stop.** That was the wrong
+   move twice over: a predicted escape is still an uncovered mutant, and the
+   stated reason for the prediction — "the window is milliseconds wide, so no
+   deterministic test can see it" — was not the actual obstacle. The real
+   obstacle was not knowing **which clock fills `@default(now())`**, and that is
+   a measurable question, not a philosophical one. Measured
+   (`scripts/vc104-default-clock-probe.mjs`): `createdAt` is bound as a
+   parameter in the generated INSERT, so Postgres's `DEFAULT CURRENT_TIMESTAMP`
+   is not what fills it — but monkey-patching JS `Date` does not change the
+   persisted value either. **The Rust query engine fills it**, from a clock
+   neither Postgres nor JS controls.
+
+   That is precisely what makes the divergence testable: `vi.setSystemTime` can
+   move the *checked* instant to a slot boundary while the engine's default
+   stays on the real clock, so the two land in different 15-minute slots by
+   construction rather than by luck of timing. Both mutants are now **enforced
+   and caught by their named detectors** — M9 by *"pins a submitted order to the
+   instant it was checked against, across a slot boundary"*, M8 by *"pins a
+   transfer to the instant it was checked against, even while it waits for the
+   slot lock"*, the latter holding the advisory lock from a second transaction so
+   the write is forced to queue across the boundary. The battery now declares
+   **zero** predicted escapes.
+
+   What remains is narrower and is a genuine limit: the pins guarantee the row
+   lands in the slot that was *counted*, not that the slot is still the right one
+   by wall-clock time when the transaction commits. An order checked at 11:59:59.9
+   and committed at 12:00:00.1 is deliberately anchored to the 11:45 slot.
 4. **The cost numbers are one machine, one Postgres, one shape of history.**
    Treat the *ratios* as the finding and the absolute milliseconds as
    indicative. Stated unambiguously, all against the old wrong count of 10.0 ms
@@ -629,22 +854,42 @@ because they are known, not because they are acceptable.
    faster than it was. The probe is kept at
    `backend/scripts/vc104-slot-cost-probe.mjs` so the numbers can be re-taken.
 5. **Nothing here has touched a production database.** The migration is
-   additive and applied only to an isolated test DB; see the deployment note
-   above before running it anywhere real.
-6. **No browser evidence, though the UI needs no change.** This is a backend
-   change verified by backend tests. The response *shape* is untouched, which
-   was checked rather than assumed: the only consumer is
-   `frontend/src/pages/PhoneOrderNew.jsx:966`, rendering
-   `${booked}/${maxOrdersPerSlot} booked this ${slotMinutes}-min slot`, and all
-   three fields still exist and still mean the same thing. `AT_CAPACITY` is
-   still the reason code, so `frontend/src/lib/vc104.js:36`'s "Kitchen full"
-   copy still maps. **What changes is the number.** A store that receives
-   transfers will now show a higher `booked` than before and will refuse at the
-   cap where it previously waved orders through — correct, and visible to
-   operators the first time a kitchen fills. That is a behaviour change to
-   announce, not a bug report to expect. D-4 is still open (no VC-105 browser QA
-   harness for this tree), so the UI has not been re-driven to confirm it
-   renders the larger number sensibly.
+   additive and has been applied only to isolated test databases and to the
+   throwaway rehearsal database described below, which is dropped at the end of
+   the run and whose helper scripts refuse any database not named
+   `vcx_rehearse_*`. Read the corrected deployment note in the migration file
+   before running it anywhere real.
+6. **Browser evidence now exists, and the UI needed no change.** This is a
+   backend change, so the response *shape* being untouched was checked rather
+   than assumed: the only consumer is `frontend/src/pages/PhoneOrderNew.jsx:966`,
+   rendering `${booked}/${maxOrdersPerSlot} booked this ${slotMinutes}-min slot`,
+   and all three fields still exist and still mean the same thing. `AT_CAPACITY`
+   is still the reason code, so `frontend/src/lib/vc104.js:36`'s "Kitchen full"
+   copy still maps.
+
+   That reasoning has now been driven through a real browser rather than left as
+   an argument — `frontend/qa/run-all.sh` against this candidate, **75/75 with 0
+   skipped**, covering all four surfaces this change could have disturbed:
+
+   | surface | checks that passed |
+   |---|---|
+   | availability / booked count | *the ASAP probe reports a booked count for CH at all*; *one ASAP submission moves the booked count by exactly one (D-2)*; *CP is untouched by CH capacity* |
+   | full-slot refusal | *a full CH slot is refused with Kitchen full*; *the refusal carries the 2/2 count*; *a full CH slot refuses ASAP too, with Kitchen full* |
+   | transfer | *owner is offered the move on a REJECTED order*; *the move re-routed the order to CH and reset it to SUBMITTED*; *history shows the move between named stores*; *CP manager no longer sees the order moved to CH* |
+   | re-price banner | *the re-price banner appears after the move*; *the re-priced quote reflects CH delivery ₹65 (was ₹40)*; *the operator is told to read the NEW quote to the caller* |
+
+   No harness repair was needed. D-4's tree-stamp fix did its job: the artifact
+   names `tree: …/slot-anchor`, `branch: x/vc104-slot-anchor`,
+   `baseSha: 82c355b`, `dirty: true`, so the run cannot be mistaken for evidence
+   about a different checkout. `skipped: 0` is recorded deliberately, because a
+   results file's `total` counts the checks that *ran* — an aborted run reads as
+   a pass unless the skip count is read alongside it.
+
+   **What changes is the number, and that is still a behaviour change to
+   announce.** A store that receives transfers will now show a higher `booked`
+   than before and will refuse at the cap where it previously waved orders
+   through. Correct, and visible to operators the first time a kitchen fills —
+   not a bug report to expect.
 
 ---
 
@@ -1614,6 +1859,18 @@ certifies these five assertions and nothing more.
 > Three consecutive 10/10 runs said nothing about atomicity, because no
 > mutation in the set attacked it. Consecutive green runs measure stability,
 > never coverage.
+>
+> **Brought current, 09-25.** The roster is now **17 mutants, all enforced,
+> 17/17 caught, zero declared escapes.** Six were added after the account above:
+> M11–M14 for the overdue-transfer rule, and M8/M9 **promoted out of the
+> "predicted escape" category rather than left there**. That promotion is the
+> same lesson landing a third time — a declared escape is a question nobody
+> asked, dressed up as an answer. The reason given for M8/M9's escape ("the
+> window is milliseconds wide") was never the real obstacle; the real one was
+> not knowing which clock fills `@default(now())`, which turned out to be
+> measurable in an afternoon. **Two mutants, M4 and M11, are caught with no
+> collateral reds at all** — exactly one test each — which is the tightest
+> result the battery can report.
 >
 > **One hazard in the battery itself was found by reading it, not by it
 > failing.** The runner read vitest's JSON report from a fixed path without
