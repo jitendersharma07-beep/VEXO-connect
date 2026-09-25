@@ -982,9 +982,32 @@ export default function Integrations() {
                 </div>
               ))}
             </div>
+            {/* A capability grade describes the PROVIDER. This describes us, and
+                the two have to be shown apart: "menu push: PATH_ONLY" is true of
+                Zomato and would leave an operator waiting for a menu to sync. */}
+            {chosen.notImplementedHere?.length ? (
+              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                <div className="font-semibold text-slate-900">
+                  Offered by {chosen.label}, not built in VEXO Connect yet
+                </div>
+                <ul className="mt-1 list-inside list-disc text-xs">
+                  {chosen.notImplementedHere.map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {/* The heading follows `operable`, because it did not and the result
+                was a panel headed "Not operable" sitting under a status badge
+                reading CONNECTED. Both boxes are the same amber — what is still
+                outstanding is worth the same attention either way — but a
+                provider that can be switched on is told what it still needs, not
+                that it cannot run. */}
             {chosen.blockedReason ? (
               <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                <div className="font-semibold">Not operable</div>
+                <div className="font-semibold">
+                  {chosen.operable ? 'Still needed before this can go live' : 'Not operable'}
+                </div>
                 {chosen.blockedReason}
                 {chosen.alternatives?.length ? (
                   <ul className="mt-2 list-inside list-disc text-xs">
