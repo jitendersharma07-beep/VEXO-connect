@@ -24,6 +24,13 @@ VCX_STAGING_API_PORT="${VCX_STAGING_API_PORT:-5540}"
 VCX_STAGING_WEB_PORT="${VCX_STAGING_WEB_PORT:-5640}"
 VCX_STAGING_EDGE_PORT="${VCX_STAGING_EDGE_PORT:-8120}"
 
+# The edge container's identity, so the runner can recreate it from THIS repo
+# instead of it being a hand-built object nobody can reproduce. Its config mount
+# source must be deploy/staging-edge.conf — see the note there and the
+# "edge config is the versioned file" check in deploy/staging-assert.sh.
+VCX_STAGING_EDGE_NAME="${VCX_STAGING_EDGE_NAME:-vcx-staging-edge}"
+VCX_STAGING_EDGE_IMAGE="${VCX_STAGING_EDGE_IMAGE:-nginx:alpine}"
+
 # --- frontend base path -----------------------------------------------------
 # PINNED, and the pin is the point.
 #
@@ -63,4 +70,5 @@ VCX_STAGING_APP_URL="http://127.0.0.1:${VCX_STAGING_EDGE_PORT}"
 VCX_STAGING_CORS_ORIGIN="http://127.0.0.1:${VCX_STAGING_EDGE_PORT},http://127.0.0.1:${VCX_STAGING_WEB_PORT}"
 
 export VCX_STAGING_API_PORT VCX_STAGING_WEB_PORT VCX_STAGING_EDGE_PORT
+export VCX_STAGING_EDGE_NAME VCX_STAGING_EDGE_IMAGE
 export VCX_STAGING_BASE_PATH VCX_STAGING_APP_URL VCX_STAGING_CORS_ORIGIN

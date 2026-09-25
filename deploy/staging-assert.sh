@@ -96,6 +96,36 @@ else
   directives "$CONF" | grep -q "listen 127.0.0.1:${VCX_STAGING_EDGE_PORT}" \
     && ok "edge listens on 127.0.0.1:${VCX_STAGING_EDGE_PORT} (loopback only)" \
     || bad "edge does not listen on loopback :${VCX_STAGING_EDGE_PORT}"
+
+  # Everything above reads $CONF — the file in THIS repo. That is only evidence
+  # about the running edge if the running edge is actually mounting it. It was
+  # not: until 2026-09-25 the container bind-mounted a hand-placed copy in the
+  # operator's home directory, so these checks described a file nginx had never
+  # read. Two identical-looking configs that drift apart is the same class of
+  # bug as the bundle and the allow-list, so it gets the same treatment.
+  if command -v docker >/dev/null 2>&1 &&
+     docker inspect "$VCX_STAGING_EDGE_NAME" >/dev/null 2>&1; then
+    mnt="$(docker inspect "$VCX_STAGING_EDGE_NAME" \
+             --format '{{range .Mounts}}{{if eq .Destination "/etc/nginx/conf.d/default.conf"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
+    want="$(cd "$(dirname "$CONF")" && pwd)/$(basename "$CONF")"
+    if [ -z "$mnt" ]; then
+      bad "$VCX_STAGING_EDGE_NAME mounts no /etc/nginx/conf.d/default.conf"
+    elif [ "$mnt" = "$want" ]; then
+      ok "running edge mounts the versioned config (no second copy to drift)"
+    elif [ ! -r "$mnt" ]; then
+      bad "running edge mounts $mnt, which is not readable from here"
+    elif [ "$(directives "$mnt" | sha256sum)" = "$(directives "$CONF" | sha256sum)" ]; then
+      # Weaker than sharing one file, but it still fails the moment the two
+      # diverge, which is the case that actually hurts. Comments are stripped
+      # from both sides so a doc-only difference is not reported as drift.
+      ok "running edge serves a byte-identical copy of $CONF"
+      note "it is still a SECOND file ($mnt); 'bash vcxcr edge' collapses them"
+    else
+      bad "running edge mounts $mnt, whose directives differ from $CONF"
+      note "the checks above describe a file nginx is not reading"
+      note "recreate it from the repo with: bash vcxcr edge"
+    fi
+  fi
 fi
 
 echo "staging-assert: backend origins"
