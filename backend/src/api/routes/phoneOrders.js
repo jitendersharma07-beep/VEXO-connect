@@ -291,7 +291,14 @@ const loadBranchDecision = async ({ req, fulfilment, address, when, items }) => 
 // No capacity row means the store has not configured a limit, so there is
 // nothing to enforce — the same answer evaluateBranches gives, and deliberately
 // not a refusal.
-const reserveSlot = async (tx, { companyId, branchId, when }) => {
+// Exported for tests. Two reassign requests fired with Promise.all do NOT
+// overlap in here — measured 2026-09-24: they enter 28 ms apart and the first
+// has finished counting 25 ms before the second arrives, because each request
+// does eight sequential round trips before its transaction opens. So an
+// HTTP-level race test passes with or without the lock and proves nothing about
+// it. tests/phoneOrders.test.js drives this function directly, in two genuinely
+// parallel transactions, to exercise the lock itself.
+export const reserveSlot = async (tx, { companyId, branchId, when }) => {
   const cap = await tx.branchPrepCapacity.findFirst({ where: { companyId, branchId } });
   if (!cap) return;
   const { start, end } = slotBoundsFor(when, cap.slotMinutes);

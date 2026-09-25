@@ -19,6 +19,15 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
+// The capacity reservation, called directly by the concurrency test. Two
+// requests over HTTP do not overlap inside it (measured), so the lock it takes
+// can only be exercised from here.
+const { reserveSlot } = await import('../src/api/routes/phoneOrders.js');
+// Used to build the rendezvous in the binding-re-check test below: the same
+// lock the route takes, and the same grid it takes it on. Imported rather than
+// re-derived, so a change to either makes that test fail instead of quietly
+// locking a slot the route is not using.
+const { lockSlot, slotBoundsFor } = await import('../src/lib/phoneOrders.js');
 
 const app = createApp();
 
@@ -1006,6 +1015,13 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
       where: { routedBranchId: a2.id, status: { in: ['SUBMITTED', 'ACCEPTED'] } },
     });
 
+  // The source side of the same question. a2 is the branch these tests cap, so
+  // a1 is where a refused transfer has to still be found.
+  const liveAtA1 = () =>
+    prisma.phoneOrder.count({
+      where: { routedBranchId: a1.id, status: { in: ['SUBMITTED', 'ACCEPTED'] } },
+    });
+
   // THE INVARIANT, replacing `does NOT count an ASAP order moved after its slot
   // elapsed (D-2 limitation)` — which asserted the undercount and so could only
   // ever prove the bug was still there.
@@ -1041,6 +1057,200 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
       // to the next caller too.
       const opt = await options({ fulfilment: 'DELIVERY', addressId: addrA.id });
       expect(opt.body.options.find((o) => o.branchId === a2.id).available).toBe(false);
+    });
+  });
+
+  // How many advisory locks in the slot namespace are held / queued, in THIS
+  // database. classid is the namespace reserveSlot uses; globalSetup's suite
+  // lock is the one-argument form, which Postgres files under classid 0, so it
+  // cannot be mistaken for one of these.
+  const slotLocks = async (granted) => {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT count(*)::int AS n FROM pg_locks
+        WHERE locktype = 'advisory'
+          AND classid = 5653849
+          AND granted = $1
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+      granted,
+    );
+    return rows[0].n;
+  };
+
+  // Polls a condition instead of sleeping on a guess, and fails with the reason
+  // rather than with a bare timeout — because in this test "the condition never
+  // became true" IS the defect being detected, and it has to be legible.
+  const waitFor = async (what, cond, tries = 200) => {
+    for (let i = 0; i < tries; i += 1) {
+      if (await cond()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+
+  // THE BINDING RE-CHECK, forced. Every other capacity test here is refused by
+  // the ADVISORY read in loadBranchDecision, which runs before the transaction
+  // opens — so not one of them ever reaches the check inside it. The mutation
+  // battery proved that rather than it being noticed by reading: deleting the
+  // in-transaction reserveSlot (M3) left the whole suite GREEN, and moving it
+  // to after the commit (M10) left even the source-preservation test green.
+  // Both escaped for the same reason — a destination that is ALREADY full is
+  // caught early, so the atomicity was argued and never asserted.
+  //
+  // Reaching it means filling the slot AFTER the advisory read and BEFORE the
+  // transaction's re-count. That is arranged deterministically, not with a
+  // sleep: a concurrent transaction takes the slot lock and fills the slot
+  // without committing, so the advisory read — READ COMMITTED, and it takes no
+  // lock — still sees room; the request then queues on the lock inside its own
+  // transaction; and the handoff is a waiter appearing in pg_locks, not a timer.
+  //
+  // If the binding check is absent there is never a waiter, so this fails
+  // loudly instead of passing by accident. That is the point of it.
+  it('re-checks capacity inside the transaction, after the advisory read said yes', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      const victim = (await submit(baseSubmission())).body.phoneOrder;
+      const { start } = slotBoundsFor(new Date(), 15);
+
+      let release;
+      const held = new Promise((r) => { release = r; });
+      const blocker = prisma.$transaction(
+        async (tx) => {
+          await lockSlot(tx, { companyId: companyA.id, branchId: a2.id, start });
+          // a2 is now full — but only to this uncommitted transaction.
+          await tx.phoneOrder.create({
+            data: {
+              companyId: companyA.id,
+              reference: `PH-LATEFILL-${Date.now()}`,
+              customerId: customerA.id,
+              fulfilment: 'PICKUP',
+              status: 'SUBMITTED',
+              routedBranchId: a2.id,
+              operatorName: 'late fill',
+              idempotencyKey: `latefill-${Date.now()}`,
+              requestHash: 'latefill',
+            },
+          });
+          await held;
+        },
+        { timeout: 20000, maxWait: 20000 },
+      );
+
+      let moving;
+      try {
+        await waitFor('the blocker to hold the slot lock', async () => (await slotLocks(true)) >= 1);
+
+        moving = request(app)
+          .post(`/api/phone-orders/${victim.id}/reassign`)
+          .set(auth(tokens.ownerA))
+          .send({ branchId: a2.id, reason: 'the slot fills while this is in flight' });
+        moving.catch(() => {});
+
+        // Past its advisory read (which saw room) and now queued on the lock.
+        await waitFor('the request to queue on the slot lock', async () => (await slotLocks(false)) >= 1);
+      } finally {
+        release();
+        await blocker.catch(() => {});
+      }
+
+      const refused = await moving;
+      expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+      expect(refused.body.error.details.unavailableReasons[0].code).toBe('AT_CAPACITY');
+
+      // Refused AND rolled back. M10 keeps the 409 and loses only this.
+      const after = await prisma.phoneOrder.findUnique({ where: { id: victim.id } });
+      expect(after.routedBranchId).toBe(a1.id);
+      expect(
+        await prisma.phoneOrderEvent.count({
+          where: { phoneOrderId: victim.id, action: 'REASSIGNED' },
+        }),
+      ).toBe(0);
+      expect(await liveAtA2()).toBe(1); // the late fill only
+
+      await prisma.phoneOrder.deleteMany({ where: { id: victim.id } });
+    });
+  });
+
+  // A refused transfer must leave the SOURCE untouched. Every other test here
+  // watches the destination — that the order did not arrive, that the count did
+  // not move — and none of them would notice a refusal that had already written
+  // half the move before throwing: routedBranchId repointed, status flipped, or
+  // the REASSIGNED event logged. reserveSlot throws before any write, so the
+  // refusal is a no-op; until now that was an argument from reading the code
+  // rather than an assertion, which is exactly the kind of claim this file is
+  // supposed to pin.
+  it('leaves the source order, its status and its event log untouched when refused', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      // a2 is full with one native order, so any transfer in must be refused.
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+
+      const created = await submit(baseSubmission());
+      const po = created.body.phoneOrder;
+      try {
+        const before = await prisma.phoneOrder.findUnique({ where: { id: po.id } });
+        expect(before.routedBranchId).toBe(a1.id);
+        const liveAtA1Before = await liveAtA1();
+
+        const refused = await request(app)
+          .post(`/api/phone-orders/${po.id}/reassign`)
+          .set(auth(tokens.ownerA))
+          .send({ branchId: a2.id, reason: 'destination is full' });
+        expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+        expect(refused.body.error.details.unavailableReasons[0].code).toBe('AT_CAPACITY');
+
+        // The source order is byte-for-byte where it was. updatedAt is the
+        // sensitive one: Prisma stamps it on ANY write to the row, so an equal
+        // updatedAt rules out a write that was later corrected, not merely a
+        // net-zero change.
+        const after = await prisma.phoneOrder.findUnique({ where: { id: po.id } });
+        expect(after.routedBranchId).toBe(a1.id);
+        expect(after.status).toBe(before.status);
+        expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+
+        // Its reservation at the source survives: still live, still counted there.
+        expect(await liveAtA1()).toBe(liveAtA1Before);
+
+        // Nothing was logged. A partial move would have left this behind, and
+        // because the slot anchor READS this event, a stray one would also
+        // silently re-anchor the order to a store it never reached.
+        expect(
+          await prisma.phoneOrderEvent.count({
+            where: { phoneOrderId: po.id, action: 'REASSIGNED' },
+          }),
+        ).toBe(0);
+
+        // And the destination did not absorb a phantom place either.
+        expect(await bookedAtA2()).toBe(1);
+        expect(await liveAtA2()).toBe(1);
+      } finally {
+        // withCapacity only clears orders routed to a2; this one stayed at a1
+        // by design, so it has to take itself away or it leaks into the next test.
+        await prisma.phoneOrder.deleteMany({ where: { id: po.id } });
+      }
+    });
+  });
+
+  // An order occupies ONE slot. That sounds too obvious to be worth a test, and
+  // it was structurally guaranteed while the anchor was a single COALESCE — a
+  // scalar cannot fall inside two windows. It is no longer guaranteed:
+  // countBookedInSlot now evaluates the same rule as three UNIONed arms so it
+  // can use an index, and arms B and C are kept disjoint only by a NOT EXISTS.
+  // Delete that clause and a moved order is counted BOTH in the slot it arrived
+  // in and in the stale slot matching its original createdAt.
+  //
+  // Nothing else catches that: every other test reads the CURRENT slot, and the
+  // phantom lands in a past one. So this reads both.
+  it('occupies only the slot it arrived in, not also the slot it was called in', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const calledAt = new Date(Date.now() - 3600_000);
+      const moved = await moveToA2('moved late', 3600_000);
+      expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+
+      // The arrival slot holds it...
+      expect(await bookedAtA2()).toBe(1);
+      // ...and the slot it was originally called in holds nothing. With the
+      // NOT EXISTS gone this reads 1, and the order is booked twice over.
+      expect(await bookedAtA2(calledAt)).toBe(0);
+      // Exactly one order exists, so the two readings cannot both be right.
+      expect(await liveAtA2()).toBe(1);
     });
   });
 
@@ -1111,10 +1321,58 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
     });
   });
 
-  // Two transfers racing for one remaining place. Before the advisory lock both
-  // read booked = n-1 outside any transaction and both committed; the guard was
-  // advisory and the cap was not a limit. Fired with Promise.all so they are
-  // genuinely in flight together rather than merely adjacent.
+  // THE LOCK ITSELF. The HTTP test below does not exercise it — measured
+  // 2026-09-24, two reassigns fired with Promise.all enter reserveSlot 28 ms
+  // apart and the first finishes counting 25 ms before the second arrives,
+  // because each request makes eight sequential round trips before opening its
+  // transaction. That test therefore passed with the lock removed, which makes
+  // it worthless as evidence for the lock however much it looks like a race.
+  //
+  // This one drives the real reserveSlot in two parallel transactions that hold
+  // their critical sections open across each other, so the overlap is a fact of
+  // the test rather than a hope about scheduling.
+  it('serializes two genuinely overlapping reservations for the last place', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      let n = 0;
+      const attempt = () =>
+        prisma.$transaction(async (tx) => {
+          await reserveSlot(tx, { companyId: companyA.id, branchId: a2.id, when: new Date() });
+          // Held open so the other transaction is provably inside its own
+          // critical section at the same time. Without the lock both count 0,
+          // both sleep, and both write — the cap becomes a suggestion.
+          await new Promise((r) => setTimeout(r, 150));
+          await tx.phoneOrder.create({
+            data: {
+              companyId: companyA.id,
+              reference: `PH-RACE-${(n += 1)}-${Date.now()}`,
+              customerId: customerA.id,
+              fulfilment: 'PICKUP',
+              status: 'SUBMITTED',
+              routedBranchId: a2.id,
+              operatorName: 'race probe',
+              idempotencyKey: `race-${n}-${Date.now()}`,
+              requestHash: 'race',
+            },
+          });
+        });
+
+      const settled = await Promise.allSettled([attempt(), attempt()]);
+      const ok = settled.filter((s) => s.status === 'fulfilled');
+      const refused = settled.filter((s) => s.status === 'rejected');
+      expect(ok).toHaveLength(1);
+      expect(refused).toHaveLength(1);
+      expect(refused[0].reason?.details?.unavailableReasons?.[0]?.code).toBe('AT_CAPACITY');
+
+      // The decisive one: the cap held against a real overlap.
+      expect(await liveAtA2()).toBe(1);
+      expect(await bookedAtA2()).toBe(1);
+    });
+  });
+
+  // End-to-end cover for the same rule over HTTP. Kept deliberately even though
+  // the two requests do not truly contend (see above): it proves the route
+  // refuses the second transfer with the right status and reason, which the
+  // direct test cannot show.
   it('lets exactly one of two simultaneous transfers take the last place', async () => {
     await withCapacity(a2.id, 2, async () => {
       expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
@@ -1161,14 +1419,71 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
       const SLOT = 15 * 60_000;
       const start = Math.floor(ev.at.getTime() / SLOT) * SLOT;
 
-      // Its own slot, asked at the exact opening instant: counted.
+      // The anchor is moved ONTO the boundary. Left where it naturally fell —
+      // somewhere in the middle of a slot — neither edge of the window is ever
+      // tested, and a rule using <= for the slot end passes just as happily.
+      await prisma.phoneOrderEvent.update({
+        where: { id: ev.id },
+        data: { at: new Date(start) },
+      });
+
+      // Inclusive at the start: an order anchored exactly at the opening
+      // instant belongs to THIS slot.
       expect(await bookedAtA2(new Date(start))).toBe(1);
-      // One millisecond before that instant is the PREVIOUS slot: not counted.
-      expect(await bookedAtA2(new Date(start - 1))).toBe(0);
-      // The end instant belongs to the NEXT slot, so it is not counted there
-      // either — which is what stops two adjacent slots both claiming it.
-      expect(await bookedAtA2(new Date(start + SLOT))).toBe(0);
       expect(await bookedAtA2(new Date(start + SLOT - 1))).toBe(1);
+
+      // Exclusive at the end: the previous slot ends at `start` and must NOT
+      // claim it, or two adjacent slots both count the same order.
+      expect(await bookedAtA2(new Date(start - 1))).toBe(0);
+      expect(await bookedAtA2(new Date(start - SLOT))).toBe(0);
+      // Nor does the next slot reach back for it.
+      expect(await bookedAtA2(new Date(start + SLOT))).toBe(0);
+    });
+  });
+
+  // The test above probes ONE arm. countBookedInSlot answers the rule as three
+  // UNIONed arms — scheduled, moved-in, and native — so the half-open window is
+  // written three times, against three different columns. A mutation run proved
+  // that: turning `< end` into `<= end` in the scheduled arm and in the native
+  // arm left the whole suite green, because the test above anchors on a
+  // PhoneOrderEvent and so only ever exercises the moved-in arm.
+  //
+  // These two close that. Same assertions, different arm.
+  const probeBoundary = async (start) => {
+    const SLOT = 15 * 60_000;
+    expect(await bookedAtA2(new Date(start))).toBe(1);
+    expect(await bookedAtA2(new Date(start + SLOT - 1))).toBe(1);
+    expect(await bookedAtA2(new Date(start - 1))).toBe(0);
+    expect(await bookedAtA2(new Date(start + SLOT))).toBe(0);
+  };
+
+  it('anchors a native ASAP order inclusively at slot start and exclusively at slot end', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const created = await submit(baseSubmission({ branchId: a2.id }));
+      expect(created.status).toBe(201);
+      const SLOT = 15 * 60_000;
+      const start = Math.floor(Date.now() / SLOT) * SLOT;
+      // Never moved and never scheduled, so createdAt is the anchor: put it
+      // exactly on the boundary.
+      await prisma.phoneOrder.update({
+        where: { id: created.body.phoneOrder.id },
+        data: { createdAt: new Date(start) },
+      });
+      await probeBoundary(start);
+    });
+  });
+
+  it('anchors a scheduled order inclusively at slot start and exclusively at slot end', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const SLOT = 15 * 60_000;
+      // scheduledFor is refused unless it is in the future, so take the next
+      // whole boundary rather than the current one.
+      const start = Math.floor(Date.now() / SLOT) * SLOT + SLOT;
+      const created = await submit(
+        baseSubmission({ branchId: a2.id, scheduledFor: new Date(start).toISOString() }),
+      );
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      await probeBoundary(start);
     });
   });
 
@@ -1193,6 +1508,80 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
       // ...and not in the slot it was moved in, which is where an ASAP order
       // would have landed.
       expect(await bookedAtA2()).toBe(0);
+    });
+  });
+
+  // The same control with teeth. The test above pins where a scheduled order is
+  // COUNTED; this pins which slot it is CHECKED against, and they are different
+  // claims — anchoring the check on the move time instead of scheduledFor leaves
+  // the count correct and silently refuses a transfer that should succeed.
+  //
+  // a2 is full right now and empty at the scheduled time, so the move can only
+  // pass if the check looks at the right slot.
+  it('judges a scheduled transfer against its due slot, not the moment it moves', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      // Fill a2's CURRENT slot with a native ASAP order.
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+      expect(await bookedAtA2()).toBe(1);
+
+      // An ASAP transfer must be refused — the store is full now.
+      expect((await moveToA2('asap into a full slot')).status).toBe(409);
+
+      // A scheduled one, due three hours out, must be accepted in the same
+      // breath: that slot is empty.
+      const at = new Date(Date.now() + 3 * 3600_000);
+      const created = await submit(baseSubmission({ scheduledFor: at.toISOString() }));
+      const res = await request(app)
+        .post(`/api/phone-orders/${created.body.phoneOrder.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'due much later' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    });
+  });
+
+  // A -> B -> A. The anchor is the LATEST reassign into the branch that holds
+  // the order now, so coming back must re-anchor to the return, not to the
+  // outbound leg and not to createdAt. The three instants are forced apart into
+  // different slots so that reading the wrong event cannot accidentally agree.
+  it('re-anchors to the latest move when an order returns to a store it left', async () => {
+    await withCapacity(a1.id, 5, async () => {
+      const created = await submit(baseSubmission());
+      const po = created.body.phoneOrder;
+
+      const move = (branchId, reason) =>
+        request(app)
+          .post(`/api/phone-orders/${po.id}/reassign`)
+          .set(auth(tokens.ownerA))
+          .send({ branchId, reason });
+
+      expect((await move(a2.id, 'out to the other store')).status).toBe(200);
+      expect((await move(a1.id, 'and back again')).status).toBe(200);
+
+      // Force the history apart: taken 3 h ago, sent to a2 2 h ago, returned
+      // to a1 now. Only the last of those is the slot a1 is cooking it in.
+      const threeHoursAgo = new Date(Date.now() - 3 * 3600_000);
+      const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+      await prisma.phoneOrder.update({
+        where: { id: po.id },
+        data: { createdAt: threeHoursAgo },
+      });
+      const out = await prisma.phoneOrderEvent.findFirst({
+        where: { phoneOrderId: po.id, action: 'REASSIGNED', toBranchId: a2.id },
+      });
+      await prisma.phoneOrderEvent.update({ where: { id: out.id }, data: { at: twoHoursAgo } });
+
+      const bookedAtA1 = async (instant) => {
+        const res = await options({
+          fulfilment: 'DELIVERY',
+          addressId: addrA.id,
+          ...(instant ? { scheduledFor: instant.toISOString() } : {}),
+        });
+        return res.body.options.find((o) => o.branchId === a1.id).capacity.booked;
+      };
+
+      expect(await bookedAtA1()).toBe(1); // the return leg — where it really is
+      expect(await bookedAtA1(twoHoursAgo)).toBe(0); // the outbound leg
+      expect(await bookedAtA1(threeHoursAgo)).toBe(0); // the original call
     });
   });
 

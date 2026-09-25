@@ -129,15 +129,107 @@ export const slotBoundsFor = (when, slotMinutes) => {
 // only source of truth for whether an order is scheduled at all.
 //
 // A -> B -> A is handled by taking the LATEST reassign into the current branch.
+// "A REASSIGNED event that brought this order to the store it is at NOW."
+// Written ONCE and interpolated everywhere, because it is needed in three
+// places that must agree exactly: the readable anchor below, arm B (which finds
+// the latest such event) and arm C (which excludes orders that have one). If
+// arm B and arm C ever disagreed about what counts as a move, they would stop
+// partitioning the orders and start either double-counting or dropping them.
+const reassignedIntoCurrentBranch = (e) => `${e}."phoneOrderId" = po.id
+        AND ${e}.action = 'REASSIGNED'
+        AND ${e}."toBranchId" = po."routedBranchId"`;
+
+// Which orders occupy a store at all. Also written once: it appears in all
+// three arms, and a status list that drifted between them would let an order be
+// live for one arm and finished for another.
+const LIVE_AT_BRANCH = `po."companyId" = $1
+       AND po."routedBranchId" = $2
+       AND po.status IN ('SUBMITTED','ACCEPTED')`;
+
+// The rule as one expression. This is the readable statement of the invariant,
+// and it is what `anchorOf` below returns — but it is NOT what counts a slot.
+// Why not is the next comment.
 const SLOT_ANCHOR = `
   COALESCE(
     po."scheduledFor",
     (SELECT max(e."at")
        FROM "PhoneOrderEvent" e
-      WHERE e."phoneOrderId" = po.id
-        AND e.action = 'REASSIGNED'
-        AND e."toBranchId" = po."routedBranchId"),
+      WHERE ${reassignedIntoCurrentBranch('e')}),
     po."createdAt")`;
+
+// Counting by filtering on SLOT_ANCHOR directly is correct and far too slow.
+// Measured by backend/scripts/vc104-slot-cost-probe.mjs — which imports the
+// real countBookedInSlot below rather than a copy of its SQL — at 120k orders
+// of one store's history, median of 7, counting one 15-minute slot:
+//
+//     old count by createdAt alone (the WRONG answer, for scale)     10.0 ms
+//     by the anchor expression (correct, unindexable)                82.3 ms
+//     by the arms below, no index                                 14.1-17.0 ms
+//     by the arms below, with the two indexes in schema.prisma        4.0 ms
+//
+// Read the ratios, not the milliseconds: the naive correct form is 8.2x the
+// wrong one, the shipped form 1.4x. The 4.0 ms is NOT on that scale — those
+// indexes would have sped the old query up too, so it is not evidence that this
+// change made counting faster than it was.
+//
+// The expression form cannot be indexed: the anchor is a correlated subquery,
+// so Postgres evaluates it once per row of branch history, and adding an index
+// changes nothing. Worse, that history NEVER SHRINKS, because
+// PhoneOrderStatus has no terminal state — an ACCEPTED order stays ACCEPTED
+// forever, so the scanned set is every order the store has ever accepted, not
+// its live backlog. loadBranchDecision runs this once per candidate branch on a
+// hot path, so a five-store company pays it five times over.
+//
+// The same rule is therefore evaluated as three DISJOINT arms, each able to use
+// an index. They partition exactly the way COALESCE does:
+//
+//   A  scheduledFor set                  -> scheduledFor range   (COALESCE arm 1)
+//   B  no scheduledFor, moved here       -> latest REASSIGNED at (COALESCE arm 2)
+//   C  no scheduledFor, never moved here -> createdAt range      (COALESCE arm 3)
+//
+// A excludes a NULL scheduledFor implicitly, since a NULL comparison is not
+// true; B and C both require it NULL and are split by EXISTS / NOT EXISTS. That
+// makes the arms provably disjoint, and UNION rather than UNION ALL means the
+// count still cannot double if that reasoning is ever broken.
+//
+// Arm B is driven FROM the event side, so the scan is a 15-minute window of
+// events rather than the whole history. Constraining e."companyId" is what
+// makes the existing (companyId, at) index usable, and it is sound because all
+// four phoneOrderEvent.create sites write the parent order's companyId.
+//
+// EQUIVALENCE IS NOT ASSUMED. The cost probe refuses to report a timing unless
+// this form and the expression form return the identical count, and the whole
+// mutation battery is re-run against this shape.
+const SLOT_ARMS = `
+    SELECT po.id
+      FROM "PhoneOrder" po
+     WHERE ${LIVE_AT_BRANCH}
+       AND po."scheduledFor" >= $3
+       AND po."scheduledFor" < $4
+  UNION
+    SELECT po.id
+      FROM "PhoneOrderEvent" e
+      JOIN "PhoneOrder" po ON po.id = e."phoneOrderId"
+     WHERE e."companyId" = $1
+       AND e."at" >= $3
+       AND e."at" < $4
+       AND e.action = 'REASSIGNED'
+       AND e."toBranchId" = $2
+       AND ${LIVE_AT_BRANCH}
+       AND po."scheduledFor" IS NULL
+       AND e."at" = (SELECT max(e2."at")
+                       FROM "PhoneOrderEvent" e2
+                      WHERE ${reassignedIntoCurrentBranch('e2')})
+  UNION
+    SELECT po.id
+      FROM "PhoneOrder" po
+     WHERE ${LIVE_AT_BRANCH}
+       AND po."scheduledFor" IS NULL
+       AND po."createdAt" >= $3
+       AND po."createdAt" < $4
+       AND NOT EXISTS (SELECT 1
+                         FROM "PhoneOrderEvent" e3
+                        WHERE ${reassignedIntoCurrentBranch('e3')})`;
 
 // Raw SQL rather than prisma.phoneOrder.count because the anchor is a
 // correlated subquery, which the query builder cannot express. Takes a client
@@ -146,20 +238,25 @@ const SLOT_ANCHOR = `
 // that caused this defect.
 export const countBookedInSlot = async (client, { companyId, branchId, start, end }) => {
   const rows = await client.$queryRawUnsafe(
-    `SELECT count(*)::int AS n
-       FROM "PhoneOrder" po
-       CROSS JOIN LATERAL (SELECT ${SLOT_ANCHOR} AS anchor) a
-      WHERE po."companyId" = $1
-        AND po."routedBranchId" = $2
-        AND po.status IN ('SUBMITTED','ACCEPTED')
-        AND a.anchor >= $3
-        AND a.anchor < $4`,
+    `SELECT count(*)::int AS n FROM (${SLOT_ARMS}) booked`,
     companyId,
     branchId,
     start,
     end,
   );
   return rows[0].n;
+};
+
+// The anchor of ONE order, by the readable rule rather than the fast one. Used
+// by the tests to assert the rule directly, which keeps SLOT_ANCHOR live: if
+// the arms above ever stop agreeing with it, a test says so rather than the
+// expression quietly rotting into a comment.
+export const anchorOf = async (client, { phoneOrderId }) => {
+  const rows = await client.$queryRawUnsafe(
+    `SELECT ${SLOT_ANCHOR} AS anchor FROM "PhoneOrder" po WHERE po.id = $1`,
+    phoneOrderId,
+  );
+  return rows[0]?.anchor ?? null;
 };
 
 // Advisory-lock namespace for "one (store, slot) at a time". MUST stay non-zero:
