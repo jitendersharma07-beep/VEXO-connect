@@ -470,7 +470,7 @@ cannot drift. This table is what the *lane* did not do.
 | **BLOCKED** | Reelo's real export format — the importer's column mapping is written to the documented shape and unconfirmed against a real file. |
 | **BLOCKED** | Reelo's auth-header scheme — needs written confirmation. |
 | **BLOCKED** | Tally voucher reconciliation against a real TallyPrime instance; credit-note, receipt, purchase, GST and cost-centre tags need an XML export of a real voucher before those posting types are enabled. |
-| **BLOCKED** | Independent confirmation of the `github` remote's URL and visibility. `git ls-remote` is refused by this environment's command classifier, and `git push` is deny-listed for the lane, so neither can be run here. Recorded as blocked rather than retried under another spelling. |
+| **BLOCKED** | Independent confirmation of the `github` remote's **visibility**. Its URL is confirmed and `x/providers` is confirmed absent from it (§8.1), but public-vs-private cannot be read from an SSH alias, and `git ls-remote` is refused by this environment's command classifier while `git push` is deny-listed for the lane. Recorded as blocked rather than retried under another spelling. |
 | **NEEDS OWNER** | Live activation of anything. Production activation, live financial transactions, real-customer bulk imports and external messages are reserved to the owner. |
 | **NEEDS OWNER** | `git push` — see §8.1. The commits are local on `x/providers` and have not been pushed. |
 | **NOT DONE** | The portal screen does not render `IntegrationDiscrepancy`. The rows are created, the API returns them, and the tests assert on them — but an operator cannot see one without calling the API. This is the largest functional gap in the UI and the most likely thing to be mistaken for "no discrepancies exist". |
@@ -490,18 +490,30 @@ recorded here so it does not have to be reconstructed later:
 git -C /home/atc-noc/vexo-connect-x-lanes/providers push -u github x/providers
 ```
 
-It creates a new remote branch and touches no existing one. `x/integration`
-already on the remote is the deploy/CI lane (rate limiter, e2e scripts), not this
-one — the two share no files, so the similar name is not a collision.
+It creates a new remote branch and touches no existing one. That much is
+established rather than assumed: the remote-tracking cache was fetched on
+2026-09-25 and holds 26 branches, and `x/providers` is not among them.
+`x/integration`, which is, is the deploy/CI lane (rate limiter, e2e scripts) and
+not this one — the two share no files, so the similar name is not a collision.
+
+The remote resolves through an SSH host alias:
+
+```
+github → git@github-vexo-connect:jitendersharma07-beep/VEXO-connect.git
+```
 
 **Before running it, check the remote's visibility yourself.** The first revision
 of this document stated flatly that the remote `VEXO-connect` is public. That was
-carried over from an earlier session's report and **has not been verified here**:
-`git ls-remote` is refused by this environment's command classifier and `git push`
-is deny-listed for the lane, so there is no route from this worktree to check. It
-matters, because if the remote is public then the branch and its full diff become
-visible to anyone the moment it lands and cannot be un-published. Whoever pushes
-is the first person able to confirm it, and should.
+carried over from an earlier session's report and **has not been verified here**.
+Note what the line above does and does not tell you: it gives the account and
+repository name, and because it is an SSH alias it says nothing at all about
+whether that repository is public. Visibility is a property of the repository, not
+of the URL used to reach it. `git ls-remote` is refused by this environment's
+command classifier and `git push` is deny-listed for the lane, so there is no
+route from this worktree to check. It matters, because if the remote is public
+then the branch and its full diff become visible to anyone the moment it lands and
+cannot be un-published. Whoever pushes is the first person able to confirm it, and
+should.
 
 Nothing in the diff is a credential either way — that was checked, and is not the
 same question as who can read it.
