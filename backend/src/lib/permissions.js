@@ -230,6 +230,28 @@ export const SUPPORT_GRANT_REQUIRED = Object.freeze(['permission.write', 'suppor
 
 export const ROLES = Object.freeze(Object.keys(ROLE_ACTIONS));
 
+// English names, kept in step with frontend/src/lib/roles.js. A second copy
+// exists because invitation and security emails are composed on this side —
+// no browser is in the loop when one is sent — and "You are invited as
+// BRANCH_MANAGER" is not something to put in front of a customer.
+export const ROLE_LABELS = Object.freeze({
+  POS_SUPER_ADMIN: 'VEXO Admin',
+  CUSTOMER_OWNER: 'Owner',
+  COMPANY_ADMIN: 'Company Admin',
+  FINANCE: 'Finance',
+  REGIONAL_MANAGER: 'Regional Manager',
+  BRANCH_MANAGER: 'Store Manager',
+  CASHIER: 'Cashier',
+  CAPTAIN: 'Captain',
+  KITCHEN: 'Kitchen',
+  INVENTORY: 'Inventory',
+  PURCHASE: 'Purchase',
+  DELIVERY: 'Delivery',
+  AUDITOR: 'Auditor',
+});
+
+export const roleLabel = (role) => ROLE_LABELS[role] ?? role;
+
 const BASELINE = new Map(
   Object.entries(ROLE_ACTIONS).map(([role, keys]) => [role, new Set(keys)]),
 );

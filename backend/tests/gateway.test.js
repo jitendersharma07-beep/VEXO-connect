@@ -71,6 +71,7 @@ const wipe = async () => {
   // DiscountPolicy's foreign keys are RESTRICT, so it goes before the branch,
   // user and company rows it points at.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -711,7 +712,10 @@ describe('the shipped, unconfigured state', () => {
     // The registry's gate is a whitelist, so an unfamiliar NODE_ENV such as
     // "staging" refuses rather than quietly allowing a settle-on-command
     // adapter. This is the second, independent gate behind the boot check.
-    await withEnv({ NODE_ENV: 'staging' }, async () => {
+    // SMTP_HOST is cleared only so config/env.js gets far enough to be read:
+    // the lane's mail settings are loopback-plaintext, which that file rightly
+    // refuses outside development and test, and this test is about the gateway.
+    await withEnv({ NODE_ENV: 'staging', SMTP_HOST: undefined }, async () => {
       const { getAdapter } = await import('../src/lib/gateway/index.js');
       expect(() => getAdapter()).toThrowError(/not enabled on this deployment/i);
     });

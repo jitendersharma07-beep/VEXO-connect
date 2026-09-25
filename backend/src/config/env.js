@@ -43,9 +43,34 @@ export const env = {
   // A provider call that never returns must not hold a cashier, or a request
   // handler, forever. Exceeding this is UNKNOWN, never "refused".
   POS_GATEWAY_TIMEOUT_MS: Number(process.env.POS_GATEWAY_TIMEOUT_MS || 20000),
+
+  // --- Transactional email (contract: accounts lane) ------------------------
+  // Unset is the shipped state, exactly like the gateway: with no SMTP host
+  // named, mail is disabled and every flow that would send one refuses loudly
+  // instead of pretending. Bootstrapping the platform administrator is the
+  // first thing that needs it, so an unconfigured deployment cannot silently
+  // create an administrator nobody can reach.
+  SMTP_HOST: process.env.SMTP_HOST || null,
+  SMTP_PORT: process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : null,
+  // 'starttls' (587), 'tls' (465), or 'none' — plaintext, refused outside dev
+  // and test because it would put the mailbox password on the wire.
+  SMTP_SECURITY: process.env.SMTP_SECURITY || 'starttls',
+  SMTP_USERNAME: process.env.SMTP_USERNAME || null,
+  SMTP_PASSWORD: process.env.SMTP_PASSWORD || null,
+  // Envelope + header sender. The provider must be authorised to send as this
+  // domain (SPF/DKIM), or the mail is accepted here and dropped there.
+  MAIL_FROM: process.env.MAIL_FROM || null,
+  MAIL_REPLY_TO: process.env.MAIL_REPLY_TO || null,
+  // Outside production, a comma-separated allowlist of recipient patterns
+  // ("*@example.com", "someone@vexoconnect.com"). A dev run that tries to mail
+  // anyone else is refused before the socket opens, so a copied-in production
+  // database cannot turn a test into a message to a real customer.
+  MAIL_ALLOWED_RECIPIENTS: process.env.MAIL_ALLOWED_RECIPIENTS || null,
+  SMTP_TIMEOUT_MS: Number(process.env.SMTP_TIMEOUT_MS || 20000),
 };
 
 export const gatewayEnabled = Boolean(env.POS_GATEWAY_PROVIDER);
+export const mailEnabled = Boolean(env.SMTP_HOST);
 
 if (env.POS_JWT_SECRET.length < 32) {
   throw new Error('POS_JWT_SECRET must be at least 32 characters');
@@ -106,4 +131,58 @@ if (env.POS_GATEWAY_API_BASE) {
 }
 if (!Number.isFinite(env.POS_GATEWAY_TIMEOUT_MS) || env.POS_GATEWAY_TIMEOUT_MS <= 0) {
   throw new Error('POS_GATEWAY_TIMEOUT_MS must be a positive number of milliseconds');
+}
+
+// --- mail configuration, refused at boot rather than at the first send ------
+// The failure mode this guards against is specific: a half-configured mailer
+// accepts the invitation request, records it, and then cannot deliver it. The
+// administrator is created, the customer is told to check their inbox, and
+// nothing arrives. Refusing here means that state cannot be reached.
+const MAIL_SECURITIES = new Set(['starttls', 'tls', 'none']);
+if (mailEnabled) {
+  if (!MAIL_SECURITIES.has(env.SMTP_SECURITY)) {
+    throw new Error(`SMTP_SECURITY must be one of: ${[...MAIL_SECURITIES].join(', ')}`);
+  }
+  if (!Number.isFinite(env.SMTP_PORT) || env.SMTP_PORT <= 0) {
+    throw new Error('SMTP_HOST is set but SMTP_PORT is missing or not a port number');
+  }
+  if (!env.MAIL_FROM) {
+    throw new Error('SMTP_HOST is set but MAIL_FROM is missing');
+  }
+  // Credentials are a pair. One without the other is a paste that lost a line,
+  // and the server would answer with a 535 at the worst possible moment.
+  if (Boolean(env.SMTP_USERNAME) !== Boolean(env.SMTP_PASSWORD)) {
+    throw new Error('SMTP_USERNAME and SMTP_PASSWORD must be set together');
+  }
+  // Plaintext submission sends the mailbox password in the clear. A local
+  // capture sink on loopback is the only legitimate use, and that only happens
+  // on a developer's machine.
+  if (env.SMTP_SECURITY === 'none' && env.NODE_ENV !== 'development' && env.NODE_ENV !== 'test') {
+    throw new Error("SMTP_SECURITY 'none' is only allowed in development and test");
+  }
+  // Production sends to real customers, so the allowlist is a development-only
+  // safety rail — but outside production its ABSENCE is the danger, because
+  // that is when a restored customer database is sitting in front of a mailer
+  // that would happily reach every address in it.
+  if (env.NODE_ENV !== 'production' && !env.MAIL_ALLOWED_RECIPIENTS) {
+    throw new Error(
+      'MAIL_ALLOWED_RECIPIENTS is required outside production: name the addresses this ' +
+        'deployment may mail, so a test cannot reach a real customer',
+    );
+  }
+}
+// A recovery link built from anything but trusted configuration is a way to
+// send a customer's reset token to a host the attacker picked — which is why
+// nothing in this codebase reads the request Host header. Its correctness
+// therefore matters enough to check.
+if (mailEnabled) {
+  let appUrl;
+  try {
+    appUrl = new URL(env.APP_URL);
+  } catch {
+    throw new Error('APP_URL must be an absolute URL — email links are built from it');
+  }
+  if (env.NODE_ENV === 'production' && appUrl.protocol !== 'https:') {
+    throw new Error('APP_URL must be https:// in production — email links are built from it');
+  }
 }

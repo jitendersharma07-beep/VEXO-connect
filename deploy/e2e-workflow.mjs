@@ -13,10 +13,12 @@
 
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { waitForCode, redeemEmailedCode } from '../backend/scripts/lib/maildrop.js';
 
 const BASE = process.env.E2E_BASE;
 const DB = process.env.E2E_DB ?? '';
+const MAILDIR = process.env.E2E_MAILDIR ?? '';
 const refuse = (why) => {
   console.error(`REFUSED: ${why}`);
   process.exit(2);
@@ -27,6 +29,10 @@ if (!['127.0.0.1', 'localhost'].includes(baseUrl.hostname)) refuse(`${baseUrl.ho
 if (baseUrl.port === '8110') refuse('8110 is the production edge port');
 if (os.hostname() === 'atc-noc') refuse('this host runs production');
 if (!DB.startsWith('atc_pos_e2e_')) refuse('E2E_DB must name a throwaway atc_pos_e2e_* database');
+// Staff are seated from mail, so a missing mailbox is a missing prerequisite,
+// not something to discover forty lines into the money path.
+if (!MAILDIR) refuse('E2E_MAILDIR is not set — run deploy/e2e-isolated.sh, which starts the capture sink');
+if (!existsSync(MAILDIR)) refuse(`E2E_MAILDIR ${MAILDIR} does not exist`);
 
 const env = process.env;
 for (const k of ['POS_SEED_OWNER_PASSWORD', 'POS_SEED_MANAGER_PASSWORD', 'POS_SEED_CASHIER_PASSWORD']) {
@@ -105,43 +111,80 @@ const sku = (s) => {
   return p.id;
 };
 
+// LANE accounts — THIS HARNESS NEEDS A MAIL-ENABLED STACK, AND HAS ONE.
+//
+// It used to create its two Cyber Hub staff through POST /api/users, read the
+// temporary password out of the response, sign in with it and change it. There
+// is no longer a password in that response: the route creates the account with
+// a hash no string satisfies and emails the PERSON an 8-digit code, so the only
+// way to a first session is the recipient's mailbox. That is the point of the
+// change, and a harness must not be given a back door around it — a back door
+// that exists for tests exists in production.
+//
+// So this harness reads the mailbox, exactly as the person would. Its stack
+// (deploy/e2e-isolated.sh) runs a capture sink that drops every message into
+// $E2E_MAILDIR, and the two calls below are the two the recovery screen makes.
+// Nothing here reaches into the database or past the API to seat an account.
 const createStaff = async (role, tag, branchId) => {
   const email = `e2e.${tag}.${RUN}@atcpos.example`;
   const body = must(
     await api(owner.token, 'POST', '/users', { email, fullName: `E2E ${tag}`, role, branchId }),
     `create ${tag}`,
   );
-  return { email, temp: body.tempPassword, id: body.user.id };
+  // `passwordSetup` describes the delivery — sent, to whom, for how long. It
+  // carries no code, which is why it is safe to hold and useless for signing in.
+  return { email, id: body.user.id, setup: body.passwordSetup, response: body };
 };
+
+// Redeem the emailed code and choose a password, which is the only way this
+// account has ever been openable. The steps are the shared ones, so they can be
+// tested on a host this harness refuses to run on; the password is generated
+// here and never printed.
+const seatByEmailedCode = async (acct) => {
+  const password = await redeemEmailedCode({
+    dir: MAILDIR,
+    email: acct.email,
+    password: newPassword(),
+    post: (path, body) => api(null, 'POST', path, body),
+  });
+  return login(acct.email, password);
+};
+
 const chCashAcct = await createStaff('CASHIER', 'cashier-ch', CH.id);
 const chMgrAcct = await createStaff('BRANCH_MANAGER', 'manager-ch', CH.id);
 
 // --- 1. accounts -------------------------------------------------------------
 
-const chCashTemp = await login(chCashAcct.email, chCashAcct.temp);
-check('AUTH-1', 'accounts', 'a new staff account must change its temporary password',
-  chCashTemp.user.mustChangePassword === true);
+// AUTH-1 and AUTH-2 keep the meaning they had when docs/RELEASE-V1.1-RC.md
+// recorded them as passing; the two new claims below are AUTH-3 and AUTH-4, so
+// that citation still says what it said.
+check('AUTH-1', 'accounts', 'creating a staff account hands its creator no credential',
+  chCashAcct.setup?.sent === true && chCashAcct.setup?.sentTo === chCashAcct.email);
 
-const early = await api(chCashTemp.token, 'POST', '/orders', {
-  type: 'TAKEAWAY',
-  items: [{ productId: sku('CHA-01'), qty: 1 }],
-});
-if (early.status === 201) {
-  observe('OBS-1', 'The first-login password change is enforced by the browser only',
-    `POST /orders with the unchanged temporary password → HTTP 201; the API accepts work before the change`);
-}
-
-const changePassword = async (acct) => {
-  const s = await login(acct.email, acct.temp);
-  const pw = newPassword();
-  must(await api(s.token, 'POST', '/auth/change-password', { currentPassword: acct.temp, newPassword: pw }),
-    `change password ${acct.email}`);
-  return login(acct.email, pw);
-};
-const chCash = await changePassword(chCashAcct);
-const chMgr = await changePassword(chMgrAcct);
-check('AUTH-2', 'accounts', 'after the change the account signs in without the flag',
+const chCash = await seatByEmailedCode(chCashAcct);
+const chMgr = await seatByEmailedCode(chMgrAcct);
+check('AUTH-2', 'accounts', 'a seated account signs in with the password its owner chose',
   chCash.user.mustChangePassword === false && chMgr.user.mustChangePassword === false);
+
+// The delivery receipt is safe to show the person who did the hiring precisely
+// because the code is not in it. Asserted rather than assumed: the only copy
+// that ever existed was the one in the recipient's mailbox.
+check('AUTH-3', 'accounts', 'the create response named the address but carried no code',
+  !/\b\d{8}\b/.test(JSON.stringify(chCashAcct.response)));
+
+// And a code is spendable once. If it were not, a forwarded or shoulder-read
+// mail would stay live after the account was opened.
+//
+// `spent` is asserted alongside the refusal on purpose: an empty mailbox would
+// send `null` here, be refused as malformed, and turn this check green while
+// proving nothing. A check that cannot tell those two apart is not a check.
+const spent = await waitForCode(MAILDIR, chCashAcct.email);
+const replay = await api(null, 'POST', '/auth/forgot-password/verify', {
+  email: chCashAcct.email,
+  code: spent,
+});
+check('AUTH-4', 'accounts', 'the code that opened the account does not open it twice',
+  spent !== null && replay.status >= 400, spent === null ? 'no code in the maildrop' : say(replay));
 
 // --- 2. sale + deny-by-default ----------------------------------------------
 
