@@ -3,36 +3,52 @@
 What is built, what is proven, and by what. One document; if something is not in
 here it has not been done.
 
-**Tested source identity.** Branch `x/payments` in the VEXO Connect Expansion
-repository, on top of `d5b1cb0` ("Let phone orders carry modifiers, and share the
-rules with the till (D-3)"). Delivered commit is recorded at the bottom of this
-file under "Delivered commit".
+**Tested source identity.** The payment and peripheral work was built on branch
+`x/payments` on top of `d5b1cb0`, and has since been merged onto `main` — which
+by then carried the accounts lane — as the combined candidate. Every number in
+this document was re-measured on that merge, not carried over from the lane.
+Both commits are recorded at the bottom under "Delivered commit".
 
-**Where the work was done.** On the POS host, in the worktree
-`~/vexo-connect-x-lanes/payments`, against lane-private databases
-`vcx_payments{,_test,_shadow}` on `127.0.0.1:5440`. No production database, no
-`vexo-lab`, and no real customer transaction was involved at any point. The one
-exception is the Razorpay **test** account named in the sandbox column below,
-which was read — never written — using credentials that live outside this
-repository.
+**Where the work was done.** On the POS host. The lane was built in
+`~/vexo-connect-x-lanes/payments` against `vcx_payments{,_test,_shadow}`; the
+merge was integrated and re-verified in `~/vexo-connect-x-lanes/int-payments`
+against `vcx_payint{,_test,_shadow,_fresh,_pop}`, all on `127.0.0.1:5440`. No
+production database, no `vexo-lab`, and no real customer transaction was
+involved at any point.
+
+The one external system touched is the Razorpay **test** account named in the
+sandbox columns below, using credentials that live outside this repository. It
+has now been **written** to as well as read: tier 3 below creates unpaid orders
+of ₹1.00 on that test account. No live key is reachable by any of those scripts
+— each refuses anything but an `rzp_test_` key before its first request — and no
+payment was ever captured or refunded.
 
 ---
 
 ## 1. How to read the matrix
 
-Four different things get called "tested", and conflating them is how a shop
-ends up discovering at a counter that something was never tried. They are kept
-in separate columns and never merged:
+Several different things get called "tested", and conflating them is how a shop
+ends up discovering at a counter that something was never tried. **Built** says
+the code exists and is wired into a route or a command the product actually
+calls; it is not evidence that anything works. Evidence is graded in five tiers,
+kept separate and never merged:
 
-| Column | What a tick means |
-| --- | --- |
-| **Built** | The code exists and is wired into a route or a command the product actually calls. |
-| **Automated** | Covered by the test suite in this repository, run on this host. Simulated providers and devices. Proves our logic, proves nothing about anyone else's hardware. |
-| **Sandbox** | Exercised against a real provider **test** account over the network. Proves the provider's wire format really is what we assumed. |
-| **Hardware** | A physical terminal, printer or drawer did the thing. **Nothing in this document claims this.** |
+| Tier | What it means | Where it stands |
+| --- | --- | --- |
+| **1 — Automated / simulator** | Covered by the test suite in this repository, run on this host, against simulated providers and devices. Proves our logic; proves nothing about anyone else's wire format or hardware. | **923 tests, all passing** on the merge. §6 |
+| **2 — Provider sandbox, reads** | Real Razorpay **test** account, over the network, GET only. Proves the provider's wire format really is what we assumed. | **9 checks, all passing.** §6 |
+| **3 — Provider sandbox, writes** | Real Razorpay **test** account, creating real orders. Proves the provider *accepts* what we send, not merely that our stub echoes it. | **16 checks, all passing.** §6 |
+| **4 — Physical device** | A physical card terminal, printer or cash drawer did the thing. | **Nothing in this document claims this.** §8, §9 |
+| **5 — Live activation** | Real money, real customers, a `LIVE` credential on a production server. | **Not reachable.** §8 |
 
-A fifth state — live payment acceptance, real money, real customers — is not in
-the matrix because it is not reachable yet. See §8.
+Tiers 1–3 are software verification and are done. Tier 4 needs hardware and, for
+card terminals, a vendor SDK that does not exist in this build. Tier 5 needs
+tier 4 plus a commercial onboarding. Neither is a coding task.
+
+A specific consequence worth stating in the matrix' own terms: a simulator
+passing tier 1 is **not** a working card or tap-to-pay integration. The only
+terminal connector that runs in this build is a simulator, and it is labelled as
+one in code, in the operator-facing catalogue and in §4.
 
 ---
 
@@ -274,16 +290,33 @@ that is `drawer.open.manual`.
 
 ## 6. Test evidence
 
-Run on this host, against `vcx_payments_test`, on 2026-09-25:
+### Tier 1 — the combined regression gate
+
+The whole suite on the merged candidate, on this host, against
+`vcx_payint_test`, on 2026-09-25:
 
 ```
-Test Files  25 passed (25)
-     Tests  761 passed (761)
-  Duration  168.72s
+Test Files  32 passed (32)
+     Tests  923 passed (923)
+  Duration  201.49s
 ```
 
-**761 passed, 0 failed, 0 skipped.** The 656-test baseline this lane started
-from still passes unchanged; the 105 new tests are:
+**923 passed, 0 failed, 0 skipped.** That is this lane's 761 plus the accounts
+lane's files, with nothing lost on either side: 32 files and the per-file counts
+sum to exactly 923.
+
+An earlier run of the same gate reported the same 923 but printed
+`[test-db-lock] LOST the lock mid-run — results are not trustworthy, re-run
+alone` partway through, so it was **discarded rather than reported**. The run
+above holds the advisory lock for its whole duration. That was not taken on
+trust: `pg_stat_activity` was sampled every two seconds throughout, and the only
+`vcx-test-lock:*` identity on the database was this run's own — a competing run
+registers that name before it takes the lock, so a second one would have
+appeared. The cause of the first run's report was not established and is
+recorded in §8 as a tooling item; what matters here is that the gate of record
+is one whose own harness did not disown it.
+
+The 105 tests this lane added are:
 
 | Suite | Tests | Covers |
 | --- | --- | --- |
@@ -294,11 +327,109 @@ from still passes unchanged; the 105 new tests are:
 Existing suites carrying the gateway: `tests/razorpay.test.js` (53),
 `tests/razorpayFlow.test.js` (32).
 
-Sandbox, read-only, against the real Razorpay test account on 2026-09-25:
-**9 checks passed, 0 failed.**
+#### The five behaviours, named individually
 
-Migrations reproduce the schema with no drift — verified by diffing the applied
-migrations against the Prisma schema on a throwaway shadow database.
+The gate's default reporter prints only slow tests, so "923 passed" is an
+aggregate and not evidence for any particular claim. The four behaviour-bearing
+suites were therefore re-run with `--reporter=verbose` — **137 passed, 0
+failed** — so each of these is a named passing line in a run log rather than an
+inference:
+
+| Behaviour | Proven by | Its control |
+| --- | --- | --- |
+| The right tenant's and store's merchant account is selected | *binds an attempt to its OWN company's account*; *prefers the store account over the company one*; *uses the environment pair only for a tenant that has configured nothing* | the three are mutually exclusive: each asserts the other two did **not** happen |
+| An inactive or missing account cannot borrow another merchant's credentials | *does NOT climb past a switched-off store account to the company one*; *refuses outright rather than falling back to the shared environment pair*; *does not start taking payments the moment a credential is stored*; *refuses to settle A's attempt on a delivery signed with B's secret* | *still honours the deployment-wide secret for a tenant with no account* — the fallback does exist, so refusing it above is a decision and not an outage |
+| Duplicate, delayed and out-of-order callbacks do not duplicate settlement | *applies a redelivered capture exactly once*; *applies a capture redelivered under a NEW event id exactly once too*; *stores a refund.processed that arrives before the reference was recorded*; *ignores a payment.failed that arrives after the capture*; *will not settle a refund twice, however often refund.processed arrives*; *polling twice cannot pay twice*; *two tills polling the same attempt at the same instant record it once* | *records refund.created without settling anything*, and *does not settle on payment.authorized* — events that must land and change nothing |
+| An uncertain terminal outcome stays unresolved until something verifies it | *leaves an UNCERTAIN attempt open, unresolved, and says so in words*; *an unreachable reader changes NOTHING about the attempt*; *never treats a word it does not recognise as approval*; *refuses to record a success the reader would not name a charge for*; *an UNCERTAIN attempt that later turns out to have been charged is still recorded once* | *reports PENDING while nobody has presented a card* — the same path reaching a definite answer |
+| A retried drawer command cannot fire a second pulse | *a double-clicked cash sale is one command*; *five sequential clicks are still one command*; *a replayed claim returns the same commands rather than leasing them twice*; *an expired command is EXPIRED, and an agent reconnecting later never gets it*; *a lease that runs out is UNCERTAIN, never back in the queue*; *a confirmed command is not re-fired for the same sale either*; *a failed delivery is FAILED and is never retried on its own* | *a command still in date is dispatched — the control for the next test*, and *two genuinely different manual opens are two commands* — suppression is not the answer to everything |
+
+The drawer row has a second control that matters more than the rest: *an agent
+claiming a drawer opened cannot make it so without a declared sensor*. An
+acknowledgement is recorded as an acknowledgement. Only a declared sensor
+promotes it to "opened", and *with a declared sensor, open and not-open are told
+apart* is the pair that shows the sensor path is real rather than always-true.
+
+### Tier 2 — provider sandbox, reads
+
+Against the real Razorpay test account, re-run from the merged tree on
+2026-09-25: **9 checks passed, 0 failed.** GET only.
+`scripts/razorpay-sandbox-read-probe.mjs`.
+
+Its load-bearing control: `verifyCredentials` is asked with a deliberately wrong
+secret and must come back false **for the stated reason** that Razorpay rejected
+the credentials. "Rejected" and "could not be asked" are different answers, and a
+function returning `{ok:true}` unconditionally would have passed the positive
+check alone.
+
+### Tier 3 — provider sandbox, writes
+
+New in this integration, and the tier the delivery had listed as unproven.
+Against the real Razorpay test account on 2026-09-25: **16 checks passed, 0
+failed.** `scripts/razorpay-sandbox-write-probe.mjs`. Three unpaid orders of
+₹1.00 are created per run; nothing is captured or refunded.
+
+What it establishes that the stubs could not:
+
+- `createSession` creates an order Razorpay accepts, and the **amount in paise,
+  the currency, our receipt and the `pos_order_id` note all round-trip onto the
+  entity** — so a settlement arriving later can be traced back to its bill.
+- A fresh order reads back as unpaid: `getStatus` answers `PENDING` and
+  `fetchSettlement` answers unsettled **with a reason** rather than throwing.
+- A create whose answer was lost **adopts the order already under its receipt
+  instead of posting a second one**, and exactly one order exists afterwards.
+- Two orders under one receipt is a state Razorpay permits, and the adapter
+  **raises rather than picking one** — and does not report that as a provider
+  refusal, so no reserved money is released on it.
+- A create Razorpay refuses is classified as refused, carrying the provider 4xx
+  that is the evidence for the claim, and is not marked retryable.
+
+The last two are the ones worth having: `providerRefused` is the flag
+`orders.js` decides an intent's fate on, and it is now measured true when the
+provider really refused and false when the provider never answered.
+
+**A defect this tier found, which no stub could have.** Razorpay's
+`GET /v1/orders?receipt=` is a *lagging* index. Fetch-by-id answers immediately,
+but the same order does not appear under its own receipt for **7.7 s, 16.0 s,
+30.0 s and 32.8 s** across four samples, with no ceiling established.
+`findOrderByReceipt` runs immediately after the failed POST it is recovering
+from, so in practice it returns nothing and the original error is rethrown.
+
+No retry loop was added, and that is a deliberate choice rather than an omission:
+waiting an unbounded index out would hold a cashier at the till at the one moment
+the payment has already gone wrong. The failure is in the safe direction and
+stays there — the intent is left open with `providerRef` null, so nothing is
+recorded as settled, and the customer is never handed the unseen order's id, so
+the orphan cannot be paid. What it costs is an unpaid order left at Razorpay,
+which wants a reconciliation sweep somewhere waiting is free. That is item 1 in
+§8.
+
+### Migrations
+
+Migrations reproduce the schema with no drift — verified on the merge by diffing
+the applied migrations against the Prisma schema on a throwaway shadow database,
+which returned an empty migration. Two rehearsals were run on isolated
+databases, neither of them the one the tests use:
+
+- **Fresh** (`vcx_payint_fresh`, dropped and recreated first): all 27 migrations
+  applied from empty, this lane's three last. Migration numbering needed no
+  renumbering — they sort after the accounts lane's, so history stays
+  append-only and nothing already applied was rewritten.
+- **Populated** (`vcx_payint_pop`): main's 22 migrations applied first, then four
+  payment cases seeded in raw SQL, money fingerprinted, then this lane's three
+  migrations applied on top. **16 of 16 properties held.** The payment and refund
+  digests were byte-identical before and after, so the backfill moved no money;
+  a cash receipt stayed `MANUAL_ENTRY`, a cashier-typed card payment stayed
+  `MANUAL_ENTRY`, a webhook-evidenced one became `PROVIDER_CONFIRMED` and a
+  recovery-evidenced one became `RECONCILED` — the two gateway rows distinguished
+  rather than stamped alike — and the new CHECK constraint came out `convalidated
+  = t`, so it was proven against the existing rows and not merely trusted.
+
+  The populated rehearsal carries a positive control, because it needs one: a
+  staging mistake that applies *nothing* reads exactly like a database already up
+  to date. It asserts the pre-state tables exist before seeding. That control
+  fired during development and caught precisely that — Prisma does not follow a
+  symlinked migration directory, and reports "No pending migrations to apply"
+  when handed one.
 
 Two things worth naming because they were found by these tests rather than by
 reading the code:
@@ -395,62 +526,95 @@ no vendor connector has been implemented — see §8.
 
 ## 8. What is still needed, and from whom
 
-Everything below is outside this repository's control. Nothing here is a coding
-task; each is a credential, an approval, an SDK or a piece of hardware.
+Items 1–3 are work in this repository. Everything from 4 onwards is outside it —
+a credential, an approval, an SDK or a piece of hardware — and no amount of
+coding moves them.
+
+### In this repository
+
+1. **A reconciliation sweep for orders created by a lost create.** Established by
+   measurement in §6, tier 3: Razorpay's receipt index lags a create by seconds
+   to tens of seconds, so the inline recovery in `findOrderByReceipt` usually
+   misses and leaves an unpaid order at the provider. Nothing is mis-settled and
+   the orphan cannot be paid, so this is tidiness and reconciliation rather than a
+   money bug — which is why it is not being fixed inline, where the wait would be
+   charged to a cashier standing at a till. The sweep wants to run somewhere
+   waiting is free: for each intent left open with `providerRef` null and a
+   `failureReason`, look the receipt up once the index has caught up, and either
+   adopt the single order found or record the ambiguity.
+2. **One sandbox payment through a tenant-configured account.** Tier 3 proves the
+   write paths with credentials handed to the adapter directly; the resolution
+   from a tenant's stored row is proven only at tier 1. Closing this needs
+   somebody to open Checkout on a test tenant and pay it with a test card. It is
+   the cheapest outstanding item and it needs no new access. Until it is done,
+   **automatic capture remains intended-but-unconfirmed** — the Orders API does
+   not echo the capture settings back, so acceptance of them is not evidence they
+   are honoured, and the only proof is a real payment arriving as
+   `payment.captured` rather than `payment.authorized`.
+3. **The `[test-db-lock] LOST the lock mid-run` report in `tests/globalSetup.js`
+   is not trustworthy as a signal.** It fired once (§6) on a run where no
+   competing run existed, and did not reproduce. The heartbeat asks whether
+   *this backend* holds the lock via `pg_backend_pid()`, so a pool that reconnects
+   reports a lost lock indistinguishably from a lock genuinely taken by someone
+   else. Both are worth knowing and they are not the same thing. This is shared
+   test tooling that arrived with the accounts lane and is deliberately left
+   untouched here rather than changed inside a payments integration.
 
 ### Provider credentials and onboarding
 
-1. **Razorpay live merchant onboarding**, per customer whose settlements must go
-   to their own bank account. Sandbox is proven; live is a commercial and KYC
-   step, not a technical one.
-2. **One sandbox payment through a tenant-configured account**, to close the
-   last gap in §4 — the write paths were proven when credentials came from the
-   environment, and this tree changed them to come from the tenant's row. This
-   needs someone to open checkout on a test tenant and pay it. It is the
-   cheapest outstanding item and it needs no new access.
-3. **Which wallets and payment methods each merchant account enables** — this is
+4. **Razorpay live merchant onboarding**, per customer whose settlements must go
+   to their own bank account. Sandbox is proven, reads and writes both; live is a
+   commercial and KYC step, not a technical one.
+5. **Which wallets and payment methods each merchant account enables** — this is
    a dashboard setting per account, and it decides what the wallet row in §2
    actually means for a given shop.
 
 ### Card terminal — the largest gap
 
-4. **A vendor decision.** Pine Labs, Ezetap and Mswipe are registered as
-   connectors with no implementation. Which one a customer uses is usually
-   decided by their acquiring bank, so this is a commercial choice first.
-5. **That vendor's integration documentation**, which is generally released only
-   under a partner agreement and is not publicly available.
-6. **Merchant credentials for that vendor**, separate from Razorpay's.
-7. **A physical test device of the exact model** the shops will use. Terminal
-   SDKs differ per model, not just per vendor.
-8. **Certification**, where the vendor requires it before a device may run a
-   third-party integration.
+There is **no terminal-provider adapter in this build.** Pine Labs, Ezetap and
+Mswipe are registered as connectors that each refuse and name their missing
+dependency; the only connector that runs is a simulator, and it is labelled one.
+Nothing below is optional if physical card or tap acceptance is wanted.
 
-Until 4–8 exist, the shared backend is complete and the vendor adapter is a
+6. **A vendor decision.** Which one a customer uses is usually decided by their
+   acquiring bank, so this is a commercial choice first.
+7. **That vendor's integration documentation**, which is generally released only
+   under a partner agreement and is not publicly available.
+8. **That vendor's device SDK or local-network protocol specification** — the
+   thing an adapter is actually written against. This is the single missing input
+   that makes items 6–10 a sequence rather than a shopping list.
+9. **Merchant credentials for that vendor**, separate from Razorpay's.
+10. **A physical test device of the exact model** the shops will use. Terminal
+    SDKs differ per model, not just per vendor.
+11. **Certification**, where the vendor requires it before a device may run a
+    third-party integration.
+
+Until 6–11 exist, the shared backend is complete and the vendor adapter is a
 stated dependency rather than a stub pretending to work.
 
 ### SoftPOS / tap-to-phone
 
-9. **A certified tap-to-phone SDK licence**, plus **per-device-model
-   certification**. This is a separate certification regime from the terminal
-   SDKs above and is usually the slowest item on this list.
+12. **A certified tap-to-phone SDK licence**, plus **per-device-model
+    certification**. This is a separate certification regime from the terminal
+    SDKs above and is usually the slowest item on this list.
 
 ### Hardware for physical acceptance
 
-10. A **receipt printer** with a drawer connector — exact model, for the pulse
+13. A **receipt printer** with a drawer connector — exact model, for the pulse
     profile.
-11. A **cash drawer** with the matching cable, and whether it is wired to pin 2
+14. A **cash drawer** with the matching cable, and whether it is wired to pin 2
     or pin 5.
-12. Whether that drawer has an **open sensor**. Without one, the product can
+15. Whether that drawer has an **open sensor**. Without one, the product can
     only ever report "the printer accepted the pulse", and the §5 status
     vocabulary is the honest ceiling.
-13. A **card terminal**, once 4–8 are settled.
+16. A **card terminal**, once 6–11 are settled.
 
 ### Then, and only then
 
-14. **Physical acceptance** — §9.
-15. **Live payment acceptance**: switch a verified account to `LIVE` mode on a
+17. **Physical acceptance** — §9.
+18. **Live payment acceptance**: switch a verified account to `LIVE` mode on a
     production server, and take one real payment under supervision with a
-    refund rehearsed. Not reachable until 1 and 14 are done.
+    refund rehearsed. Not reachable until 4 and 17 are done.
 
 No secret, key, or credential appears anywhere in this document or in this
 repository. The Razorpay test credentials the sandbox probe reads live outside
@@ -510,10 +674,24 @@ drawer and hold a card. Each line is a yes/no with a witness.
 
 | | |
 | --- | --- |
-| Branch | `x/payments` |
-| Tested from | `d5b1cb0` — "Let phone orders carry modifiers, and share the rules with the till (D-3)" |
-| Delivered | `1703cd6` — "Complete the payment and peripheral backend, and separate what each tender proves" |
+| Lane branch | `x/payments`, built from `d5b1cb0` |
+| Lane delivered | `1703cd6` — "Complete the payment and peripheral backend, and separate what each tender proves" |
+| Lane head | `86a6762` |
+| Merged onto | `584de37` on `main`, which carries the accounts lane |
+| Merge commit | `54a55f3` — "Merge x/payments into main: tenders that say what confirmed them, and a drawer that admits what it does not know" |
+| Integration branch | `x/payments-integration` |
+| **Tested SHA** | recorded below |
 
-The 761-test run and the 9-check sandbox probe in §6 were both taken from the
-tree that became `1703cd6`. This line, and the commit that adds it, are the only
-difference.
+Two conflicts, both additive, resolved by keeping both sides: `config/env.js`,
+where the accounts lane's SMTP block and this lane's payment-secret and
+terminal-connector keys were appended at the same point and both boot-time
+validation blocks shared one closing brace; and `schema.prisma`, where `Company`
+gained relations from both lanes and both appended models to the end of the file.
+`app.js`, `permissions.js` and `tests/phase2.test.js` merged without conflict and
+were checked rather than assumed — all 46 permission keys survive, every payment
+route is still mounted, and `prisma migrate diff` reports an empty migration.
+
+Two contracts were checked against the newer `main` and deliberately left alone:
+licensing already gates every `/api` route through `rbac.js`'s `licenseUsable`
+call, so the payment routes inherit it; and `licenseHasModule` has no callers, so
+there is no payments entitlement to honour and inventing one would be a guess.

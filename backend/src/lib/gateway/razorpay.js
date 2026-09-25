@@ -215,8 +215,29 @@ const paiseFrom = (value) => (Number.isSafeInteger(value) && value >= 0 ? value 
 // Razorpay's Orders API has no idempotency header (unlike its refunds). What it
 // does have is `receipt`, our own id for the order, which is returned on the
 // entity and is queryable. So the key is sent as the receipt, and a create that
-// fails in a way that might still have created something is resolved by looking
-// the receipt up rather than by posting again.
+// fails in a way that might still have created something is looked up here
+// rather than posted again.
+//
+// MEASURED, and it changes what this is worth: the receipt query is a lagging
+// index. An order fetched by id answers at once, but the same order does not
+// appear under ?receipt= for a while — 7.7 s, 16.0 s, 30.0 s and 32.8 s on four
+// samples against the sandbox, with no ceiling established. This function runs
+// immediately after the POST it is recovering from, so it will usually return
+// null and createSession will rethrow the original error.
+//
+// That is why no retry loop was put here. Waiting the index out would hold a
+// cashier at the till for an unbounded time, at the one moment the payment has
+// already gone wrong. The failure is in the safe direction and stays there: the
+// caller leaves the intent open with providerRef null, so nothing is recorded as
+// settled, and the customer is never handed the unseen order's id — the frontend
+// opens Checkout on the providerRef, which is still null — so the orphan cannot
+// be paid. The cost is an unpaid order left at Razorpay, which wants a
+// reconciliation sweep somewhere waiting is free, not this code path.
+//
+// Verified against the real API once the index has caught up, which is what
+// makes the branch below worth keeping: with one order under the receipt it is
+// adopted and no second is posted, and with two it raises rather than guessing.
+// See scripts/razorpay-sandbox-write-probe.mjs.
 const findOrderByReceipt = async (receipt, credentials) => {
   const page = await request('GET', `/v1/orders?receipt=${encodeURIComponent(receipt)}&count=2`, { credentials });
   const items = Array.isArray(page?.items) ? page.items : [];
