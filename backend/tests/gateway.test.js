@@ -715,7 +715,13 @@ describe('the shipped, unconfigured state', () => {
     // SMTP_HOST is cleared only so config/env.js gets far enough to be read:
     // the lane's mail settings are loopback-plaintext, which that file rightly
     // refuses outside development and test, and this test is about the gateway.
-    await withEnv({ NODE_ENV: 'staging', SMTP_HOST: undefined }, async () => {
+    //
+    // POS_QR_BASE_URL is cleared because importing the registry pulls in
+    // config/env.js, which refuses a localhost card URL anywhere but test and
+    // development. That refusal is correct, but it belongs to the QR lane and
+    // not to this test — without the override, anyone running the suite with
+    // the dev stack's base URL exported sees this fail for the wrong reason.
+    await withEnv({ NODE_ENV: 'staging', SMTP_HOST: undefined, POS_QR_BASE_URL: undefined }, async () => {
       const { getAdapter } = await import('../src/lib/gateway/index.js');
       expect(() => getAdapter()).toThrowError(/not enabled on this deployment/i);
     });

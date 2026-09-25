@@ -128,6 +128,10 @@ model Company {
   // LANE payments
   paymentAccounts PaymentProviderAccount[]
   deviceCommands  DeviceCommand[]
+  // LANE floorplan
+  tableQrCodes  TableQrCode[]
+  diningVisits  DiningVisit[]
+  qrSubmissions QrSubmission[]
 }
 
 model Branch {
@@ -214,6 +218,11 @@ model Branch {
 
   // LANE inventory
   inventoryLocations InventoryLocation[]
+  // LANE floorplan
+  floors        Floor[]
+  tableQrCodes  TableQrCode[]
+  diningVisits  DiningVisit[]
+  qrSubmissions QrSubmission[]
 
   @@unique([companyId, code])
   // Referenced by everything that happens AT a store — terminals, devices,
@@ -319,6 +328,13 @@ model PosUser {
   phoneOrdersOperated PhoneOrder[]          @relation("PhoneOrderOperator")
   phoneOrdersAccepted PhoneOrder[]          @relation("PhoneOrderAcceptedBy")
   phoneOrdersRejected PhoneOrder[]          @relation("PhoneOrderRejectedBy")
+
+  // LANE floorplan
+  qrCodesIssued        TableQrCode[]  @relation("TableQrIssuedBy")
+  qrCodesRevoked       TableQrCode[]  @relation("TableQrRevokedBy")
+  visitsOpened         DiningVisit[]  @relation("DiningVisitOpenedBy")
+  visitsClosed         DiningVisit[]  @relation("DiningVisitClosedBy")
+  qrSubmissionsDecided QrSubmission[] @relation("QrSubmissionDecidedBy")
 
   // Referenced by PermissionRule and UserStoreAssignment so a tenant's rule or
   // assignment can only name a principal of that same tenant.
@@ -768,7 +784,18 @@ model DiningTable {
 
   orders Order[]
 
+  // LANE floorplan
+  placements   FloorLayoutTable[]
+  qrCodes      TableQrCode[]
+  visits       DiningVisit[]
+  qrSubmissions QrSubmission[]
+
   @@unique([branchId, name])
+  // Lets a QR code, a visit and a submission reference (tableId, branchId) in
+  // one foreign key, so the database itself refuses a card that points at
+  // another store's table. Cross-store resolution is then impossible rather
+  // than merely checked.
+  @@unique([id, branchId])
   @@index([branchId])
 }
 
@@ -833,6 +860,24 @@ model Order {
   deviceId        String?
   device          Device?   @relation(fields: [deviceId, branchId], references: [id, branchId], onDelete: Restrict)
 
+  // ---- LANE floorplan -----------------------------------------------------
+  // Where the order came from. TILL is the default so every order that existed
+  // before this column reads as what it was — rung up at the counter. The
+  // migration backfills PHONE from the phone-order sidecar; nothing infers QR
+  // retrospectively, because no QR order existed.
+  source   OrderSource  @default(TILL)
+  // The seating of the party this order belongs to. Null for takeaway, for
+  // phone orders, and for dine-in rung up at the till without a visit. Not a
+  // substitute for tableId: tableId is where the food goes and survives the
+  // visit closing, visitId is who is sitting there now.
+  visitId  String?
+  visit    DiningVisit? @relation(fields: [visitId], references: [id], onDelete: Restrict)
+  // Which printed card was scanned. Kept even after that card is revoked, so
+  // "which QR did this order come in on" stays answerable — which is the whole
+  // point of being able to revoke one.
+  qrCodeId String?
+  qrCode   TableQrCode? @relation(fields: [qrCodeId], references: [id], onDelete: Restrict)
+
   items       OrderItem[]
   kots        Kot[]
   payments    Payment[]
@@ -840,6 +885,8 @@ model Order {
   intents     PaymentIntent[]
   redemptions PromotionRedemption[]
   phoneOrder  PhoneOrder?
+
+  qrSubmissions QrSubmission[]
 
   @@unique([companyId, invoiceNumber])
   // Lets a payment reference (orderId, branchId), which is what ties the money
@@ -854,6 +901,8 @@ model Order {
   @@index([discountApprovedById])
   @@index([terminalId])
   @@index([deviceId])
+  @@index([visitId])
+  @@index([qrCodeId])
 }
 
 model OrderItem {
@@ -895,8 +944,24 @@ model OrderItem {
 
   modifiers OrderItemModifier[]
 
+  // ---- LANE floorplan -----------------------------------------------------
+  // Which phone at the table added this line. Null for anything a member of
+  // staff rang up. Guests in one visit share the order by the approved policy,
+  // so this is how "your items" is told from "the table's" without splitting
+  // the bill into per-guest orders the kitchen would then have to reassemble.
+  addedByGuestId String?
+  addedByGuest   DiningVisitGuest? @relation(fields: [addedByGuestId], references: [id], onDelete: Restrict)
+  // Which submission brought this line in. A foreign key rather than a list of
+  // ids in the submission's payload, because rejecting a submission has to void
+  // exactly the lines it added and nothing a guest sent a minute later. Null for
+  // every line rung up at the till.
+  qrSubmissionId String?
+  qrSubmission   QrSubmission?     @relation(fields: [qrSubmissionId], references: [id], onDelete: Restrict)
+
   @@index([orderId])
   @@index([productId])
+  @@index([addedByGuestId])
+  @@index([qrSubmissionId])
 }
 
 model Kot {
@@ -4758,4 +4823,361 @@ model DeviceCommand {
   @@index([companyId, createdAt])
   @@index([branchId, createdAt])
   @@index([causeRefId])
+}
+
+// Floor Plan workstream (TQ-1) — blocks to APPEND to backend/prisma/schema.prisma
+// in the x/floorplan lane. Two back-relation edits to existing models are also
+// required (see README.md):
+//   model Branch      → add:  floors Floor[]
+//   model DiningTable → add:  placements FloorLayoutTable[]
+// DiningTable itself is otherwise untouched: table identity (id) stays stable,
+// so QR and order links survive renames and moves. Geometry lives in layout
+// versions, never on the table row.
+
+enum AreaKind {
+  INDOOR
+  OUTDOOR
+  PATIO
+  ROOFTOP
+  CUSTOM
+}
+
+enum TableShape {
+  ROUND
+  SQUARE
+  RECT
+}
+
+enum LayoutStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum LayoutObjectKind {
+  WALL
+  ENTRANCE
+  PILLAR
+  KITCHEN
+  COUNTER
+}
+
+model Floor {
+  id        String      @id @default(cuid())
+  branchId  String
+  branch    Branch      @relation(fields: [branchId], references: [id])
+  name      String
+  sortOrder Int         @default(0)
+  status    TableStatus @default(ACTIVE)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  areas   DiningArea[]
+  layouts FloorLayout[]
+
+  @@unique([branchId, name])
+  @@index([branchId])
+}
+
+model DiningArea {
+  id        String      @id @default(cuid())
+  floorId   String
+  floor     Floor       @relation(fields: [floorId], references: [id])
+  name      String
+  kind      AreaKind    @default(INDOOR)
+  sortOrder Int         @default(0)
+  status    TableStatus @default(ACTIVE)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  placements FloorLayoutTable[]
+
+  @@unique([floorId, name])
+  @@index([floorId])
+}
+
+model FloorLayout {
+  id              String       @id @default(cuid())
+  floorId         String
+  floor           Floor        @relation(fields: [floorId], references: [id])
+  status          LayoutStatus @default(DRAFT)
+  // Publish sequence per floor; assigned at publish (drafts carry 0).
+  version         Int          @default(0)
+  // Optimistic-concurrency counter for concurrent-edit detection while DRAFT.
+  revision        Int          @default(0)
+  gridSize        Int          @default(20)
+  canvasWidth     Int          @default(1200)
+  canvasHeight    Int          @default(800)
+  // Optional data-URL background floor-plan image (size-capped in the route).
+  backgroundImage String?
+  createdById     String
+  updatedById     String?
+  publishedAt     DateTime?
+  archivedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  tables  FloorLayoutTable[]
+  objects FloorLayoutObject[]
+
+  @@index([floorId, status])
+}
+
+model FloorLayoutTable {
+  id       String      @id @default(cuid())
+  layoutId String
+  layout   FloorLayout @relation(fields: [layoutId], references: [id])
+  tableId  String
+  table    DiningTable @relation(fields: [tableId], references: [id])
+  areaId   String?
+  area     DiningArea? @relation(fields: [areaId], references: [id])
+  shape    TableShape  @default(SQUARE)
+  x        Int
+  y        Int
+  width    Int         @default(80)
+  height   Int         @default(80)
+  rotation Int         @default(0)
+  seats    Int?
+
+  @@unique([layoutId, tableId])
+  @@index([tableId])
+  @@index([areaId])
+}
+
+model FloorLayoutObject {
+  id       String           @id @default(cuid())
+  layoutId String
+  layout   FloorLayout      @relation(fields: [layoutId], references: [id])
+  kind     LayoutObjectKind
+  label    String?
+  x        Int
+  y        Int
+  width    Int              @default(100)
+  height   Int              @default(20)
+  rotation Int              @default(0)
+
+  @@index([layoutId])
+}
+
+// Table QR ordering (TQ-3). Table identity is DiningTable.id and nothing here
+// changes that: a card is bound to the table row, so renaming "T4" or dragging
+// it to another area on the floor plan does not invalidate a printed card, and
+// Order.tableId keeps meaning the same seat. Moving a table between FLOORS is
+// the one case a card's printed wording goes stale — the card still resolves,
+// and the staff API reports the mismatch so it can be reprinted deliberately.
+
+enum OrderSource {
+  TILL
+  PHONE
+  QR
+}
+
+enum QrCodeStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum DiningVisitStatus {
+  OPEN
+  CLOSED
+}
+
+enum QrSubmissionStatus {
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+}
+
+model TableQrCode {
+  id            String       @id @default(cuid())
+  companyId     String
+  company       Company      @relation(fields: [companyId], references: [id])
+  branchId      String
+  branch        Branch       @relation(fields: [branchId, companyId], references: [id, companyId])
+  tableId       String
+  // Composite: the card, the table and the store must agree, enforced by the
+  // foreign key rather than by whoever wrote the row.
+  table         DiningTable  @relation(fields: [tableId, branchId], references: [id, branchId])
+  // The opaque value that appears in the printed URL. Stored as issued, not
+  // hashed, and that is a deliberate trade: the card is a public object glued to
+  // a table, and bulk export and reprint have to be able to reproduce the exact
+  // URL already in print. Hashing it would mean a lost export forces every card
+  // in the store to be reprinted. What stops a guessed or stolen token being
+  // worth anything is that it buys only a menu view and a submission that a
+  // member of staff must accept — never a price, a discount or a payment.
+  token         String       @unique
+  status        QrCodeStatus @default(ACTIVE)
+  // 1 for the first card cut for a table, +1 on every regeneration. Printed on
+  // the card so a table found with two cards can be told apart by eye.
+  rotation      Int          @default(1)
+  // Holds tableId while ACTIVE and NULL once revoked. Postgres treats NULLs as
+  // distinct, so this single unique column IS the rule "at most one live card
+  // per table" — a partial unique index would say the same thing but Prisma
+  // cannot express one, and hand-writing it makes `migrate diff` want to drop
+  // it on every run. The CHECK in the migration stops it naming a table other
+  // than its own.
+  activeTableId String?      @unique
+
+  issuedById    String
+  issuedBy      PosUser      @relation("TableQrIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict)
+  revokedAt     DateTime?
+  revokedById   String?
+  revokedBy     PosUser?     @relation("TableQrRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  revokedReason String?
+  // Rotation lineage, newest last. Set on the OLD row when it is replaced, so
+  // an order that came in on a long-dead card can still be traced forward to
+  // the card now on the table.
+  replacedById  String?      @unique
+  replacedBy    TableQrCode? @relation("TableQrRotation", fields: [replacedById], references: [id], onDelete: Restrict)
+  replaces      TableQrCode? @relation("TableQrRotation")
+
+  // What the card was printed as saying, captured at issue time. A card printed
+  // "Ground floor · Indoor" that is now on the roof is a real-world problem the
+  // software cannot fix, only report.
+  printedPlace  String?
+  lastPrintedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  visits      DiningVisit[]
+  orders      Order[]
+  submissions QrSubmission[]
+
+  @@unique([tableId, rotation])
+  @@index([companyId, branchId, status])
+  @@index([tableId])
+  @@index([issuedById])
+  @@index([revokedById])
+}
+
+// One party seated at one table. A visit is what makes two groups at the same
+// table over one evening separable: the printed card never changes, the visit
+// does. Created on the first SUBMISSION, never on a scan — scanning is anonymous
+// and read-only, so a passer-by reading the menu leaves nothing behind and does
+// not make the table look occupied.
+model DiningVisit {
+  id          String            @id @default(cuid())
+  companyId   String
+  company     Company           @relation(fields: [companyId], references: [id])
+  branchId    String
+  branch      Branch            @relation(fields: [branchId, companyId], references: [id, companyId])
+  tableId     String
+  table       DiningTable       @relation(fields: [tableId, branchId], references: [id, branchId])
+  // Which card opened it. Null when a member of staff seated the party from the
+  // floor plan, which is the same visit either way.
+  qrCodeId    String?
+  qrCode      TableQrCode?      @relation(fields: [qrCodeId], references: [id], onDelete: Restrict)
+  status      DiningVisitStatus @default(OPEN)
+  // Same device-level trick as TableQrCode.activeTableId: tableId while OPEN,
+  // NULL once CLOSED, so the database holds "at most one open visit per table"
+  // and the next party cannot be silently merged into the last one's basket.
+  openTableId String?           @unique
+
+  // Short code the first guest is shown and reads out to the rest of the party.
+  // A second phone must present it to join, so being within scanning distance of
+  // the card is not enough to see what the table has ordered. Plaintext on
+  // purpose: staff have to be able to re-read it to a guest whose phone slept.
+  joinCode     String
+  // Wrong guesses, ever, on this visit. The route refuses past a cap rather than
+  // resetting per minute, because the code is 4 digits and a visit is hours.
+  joinAttempts Int    @default(0)
+  guestSeq     Int    @default(0)
+
+  openedById   String?
+  openedBy     PosUser?  @relation("DiningVisitOpenedBy", fields: [openedById], references: [id], onDelete: Restrict)
+  openedAt     DateTime  @default(now())
+  closedAt     DateTime?
+  closedById   String?
+  closedBy     PosUser?  @relation("DiningVisitClosedBy", fields: [closedById], references: [id], onDelete: Restrict)
+  closedReason String?
+
+  guests      DiningVisitGuest[]
+  orders      Order[]
+  submissions QrSubmission[]
+
+  @@index([companyId, branchId, status])
+  @@index([tableId, status])
+  @@index([qrCodeId])
+  @@index([openedById])
+  @@index([closedById])
+}
+
+// One phone in one party. The token is hashed exactly like PosSession's: it is a
+// bearer credential, and the plaintext only ever exists in the guest's browser.
+// No name, no phone number, no email — a guest is a seat at a table, and there
+// is nothing here to leak to the next party.
+model DiningVisitGuest {
+  id         String      @id @default(cuid())
+  visitId    String
+  visit      DiningVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  tokenHash  String      @unique
+  // Display only: "Guest 1", "Guest 2". Shown to the party and on the KOT line
+  // so the kitchen and the server know which seat asked for no onion.
+  seq        Int
+  // The guest that opened the visit. Holds the join code and may close the tab.
+  isHost     Boolean     @default(false)
+  createdAt  DateTime    @default(now())
+  lastSeenAt DateTime?
+
+  items OrderItem[]
+
+  @@unique([visitId, seq])
+  @@index([visitId])
+}
+
+// The submission sidecar. It exists so that "the guest pressed send" and "a
+// member of staff accepted it" are two different facts with two different
+// timestamps: the order rows are written at submit so the table is honestly
+// occupied and the POS has something to look at, but no KOT is cut until
+// acceptance, and the kitchen therefore never sees an unaccepted order.
+model QrSubmission {
+  id        String             @id @default(cuid())
+  companyId String
+  company   Company            @relation(fields: [companyId], references: [id])
+  branchId  String
+  branch    Branch             @relation(fields: [branchId, companyId], references: [id, companyId])
+  tableId   String
+  table     DiningTable        @relation(fields: [tableId, branchId], references: [id, branchId])
+  qrCodeId  String
+  qrCode    TableQrCode        @relation(fields: [qrCodeId], references: [id], onDelete: Restrict)
+  visitId   String
+  visit     DiningVisit        @relation(fields: [visitId], references: [id], onDelete: Restrict)
+  guestId   String?
+  status    QrSubmissionStatus @default(SUBMITTED)
+
+  // Supplied by the guest's browser and unique per tenant, so a phone that
+  // retries on a flaky connection gets the first answer back instead of a second
+  // order. requestHash is sha256 over the normalised line list: the same key
+  // with a DIFFERENT basket is a client bug and is refused, rather than being
+  // quietly answered with the wrong order.
+  idempotencyKey String
+  requestHash    String
+
+  orderId   String?
+  order     Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  // How many lines the guest asked for, as submitted. The order is the truth
+  // about what was accepted; this is the truth about what was asked.
+  lineCount Int     @default(0)
+  payload   Json
+
+  decidedById    String?
+  decidedBy      PosUser?  @relation("QrSubmissionDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
+  decidedAt      DateTime?
+  rejectedReason String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // The lines this submission added, so a rejection voids its own and only its
+  // own. Restrict, not Cascade: an accepted line is part of a real order and a
+  // submission row must never be deletable in a way that takes order history
+  // with it.
+  items OrderItem[]
+
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, branchId, status])
+  @@index([visitId])
+  @@index([qrCodeId])
+  @@index([orderId])
+  @@index([tableId])
+  @@index([decidedById])
 }

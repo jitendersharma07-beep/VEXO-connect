@@ -16,6 +16,7 @@ import {
   Landmark,
   Layers,
   LayoutDashboard,
+  LayoutGrid,
   ListChecks,
   LogOut,
   Map,
@@ -166,6 +167,7 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
               <NavItem to="/orders" icon={ReceiptText} label="Orders" />
               <NavItem to="/catalog" icon={Package} label="Catalog" />
               <NavItem to="/tables" icon={Armchair} label="Tables" />
+              <NavItem to="/floor-designer" icon={LayoutGrid} label="Floor plan" />
               <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
               <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
               <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
@@ -198,6 +200,9 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
                 <NavItem to="/phone-orders" icon={PhoneCall} label="Phone orders" />
               ) : null}
               {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
+              {canWriteTables(user) ? (
+                <NavItem to="/floor-designer" icon={LayoutGrid} label="Floor plan" />
+              ) : null}
               {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
               {canSeeReports(user) ? (
                 <>
