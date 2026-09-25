@@ -122,6 +122,7 @@ const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const tokens = {};
 let productId;
+let branchId;
 
 const wipe = async () => {
   // Shared test database: another suite's kitchen/print rows RESTRICT the
@@ -184,7 +185,12 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
     },
   });
+  // Union of both sides: the candidate's publicId (the accounts lane made it
+  // part of the branch fixture) and the lane's branchId capture (the gateway
+  // refund print tests place their PrintAgent on this branch explicitly,
+  // because targetsFor matches on branchId and the owner carries none).
   const branch = await prisma.branch.create({ data: { companyId: company.id, publicId: 'VC-RZ-0001', name: 'Rz One', code: 'Z1' } });
+  branchId = branch.id;
   const mk = (d) => prisma.posUser.create({ data: { passwordHash, ...d } });
   await mk({ email: 'owner.z@test.local', fullName: 'Owner Z', role: 'CUSTOMER_OWNER', companyId: company.id });
   await mk({ email: 'cashier.z@test.local', fullName: 'Cashier Z', role: 'CASHIER', companyId: company.id, branchId: branch.id });
@@ -905,5 +911,158 @@ describe('the checkout handoff', () => {
     });
     expect(log).not.toBeNull();
     expect(log.meta.chargeRef).toBe(payRef);
+  });
+});
+
+// refundLabelFor has five branches; four of them are about gateway money, and
+// they exist to stop a receipt saying the customer's money is back before the
+// provider has sent it. Until now only the MANUAL branch was pinned on a
+// printed document (printJobs.test.js, row 5b), and the one gateway label with
+// any coverage was asserted on the ORDER VIEW. A wrong label on a screen is an
+// argument; on paper in the customer's hand it is the shop's written word, so
+// each branch is pinned here on a stored PrintJob.document.
+describe('what the printed receipt says about gateway refund money', () => {
+  let receiptTargetId;
+
+  beforeAll(async () => {
+    // The owner here carries no branch of its own, so the agent is placed
+    // explicitly on the branch the cashier's orders belong to — targetsFor
+    // matches on branchId and would otherwise find nothing.
+    const agent = await request(app).post('/api/print-agents').set(auth(tokens.owner))
+      .send({ name: 'Counter PC', branchId });
+    expect(agent.status, JSON.stringify(agent.body)).toBe(201);
+    // Enrolment is what makes the agent ACTIVE, and targetsFor requires it.
+    const enrolled = await request(app).post('/api/print-agents/enrol')
+      .send({ code: agent.body.enrolCode, platform: 'linux', hostname: 'rz-till' });
+    expect(enrolled.status, JSON.stringify(enrolled.body)).toBe(201);
+    const target = await request(app).post(`/api/print-agents/${agent.body.agent.id}/targets`)
+      .set(auth(tokens.owner))
+      .send({ name: 'Front receipt', purpose: 'RECEIPT', transport: 'TCP', host: '10.0.0.10' });
+    expect(target.status, JSON.stringify(target.body)).toBe(201);
+    receiptTargetId = target.body.target.id;
+  });
+
+  // The document is a snapshot taken at enqueue, so the refund has to be in its
+  // final state before this is called.
+  const printedReceipt = async (orderId) => {
+    const res = await request(app).post('/api/print-jobs').set(auth(tokens.cashier))
+      .send({ orderId, kind: 'RECEIPT' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // queued:0 is a 201 with an empty jobs array — no RECEIPT target matched,
+    // and every assertion below would then be made about nothing.
+    expect(res.body.queued, JSON.stringify(res.body)).toBe(1);
+    const row = await prisma.printJob.findUnique({ where: { id: res.body.jobs[0].id } });
+    expect(row.targetId).toBe(receiptTargetId);
+    return row.document;
+  };
+
+  it('prints PAID OUT only once the provider has confirmed the refund', async () => {
+    const order = await paidOrder();
+    const refundRef = nextId('rfnd_');
+    queue(answer(200, refundBody(order.totalPaise, refundRef, order.payRef)));
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: order.totalPaise / 100, reason: 'order cancelled' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(201);
+
+    const hook = await deliver(refundOutcome(refundRef, order.payRef, order.totalPaise));
+    expect(hook.body.applied).toBe(true);
+    expect((await refundOf(order.id)).status).toBe('SUCCEEDED');
+
+    const doc = await printedReceipt(order.id);
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: order.totalPaise / 100,
+      reason: 'order cancelled',
+      status: 'SUCCEEDED',
+      channel: 'GATEWAY',
+      label: 'REFUND PAID OUT — confirmed by the provider',
+    });
+  });
+
+  it('prints REQUESTED, not paid out, while the provider holds the request', async () => {
+    const order = await paidOrder();
+    const refundRef = nextId('rfnd_');
+    queue(answer(200, refundBody(10000, refundRef, order.payRef)));
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'spilled drink' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(201);
+
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('PENDING');
+    // The reference is what separates this branch from the unanswered one.
+    expect(row.providerRef).toBe(refundRef);
+
+    const doc = await printedReceipt(order.id);
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: 100,
+      reason: 'spilled drink',
+      status: 'PENDING',
+      channel: 'GATEWAY',
+      label: 'REFUND REQUESTED — not yet paid out by the provider',
+    });
+    // The statement this branch exists to prevent, asserted as an absence too:
+    // Razorpay accepting the request is not Razorpay having paid it.
+    expect(doc.refunds[0].label).not.toMatch(/PAID OUT|HANDED BACK/);
+  });
+
+  it('prints SENT — awaiting confirmation when the provider never answered', async () => {
+    const order = await paidOrder();
+    // Opens the response and never finishes it: the refund may be paying out
+    // this second, and we hold no reference to ask about later.
+    queue(({ res }) => { res.writeHead(200, { 'content-type': 'application/json' }); return undefined; });
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'customer changed mind' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(202);
+
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('PENDING');
+    expect(row.providerRef).toBeNull();
+
+    const doc = await printedReceipt(order.id);
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: 100,
+      reason: 'customer changed mind',
+      status: 'PENDING',
+      channel: 'GATEWAY',
+      label: 'REFUND SENT — awaiting confirmation from the provider',
+    });
+    // Unanswered is not refused, and it is not paid either. The customer may
+    // already have this money, so the paper claims neither.
+    expect(doc.refunds[0].label).not.toMatch(/PAID OUT|FAILED|REQUESTED/);
+  }, 15000);
+
+  it('prints no refund line at all when the provider refused it', async () => {
+    const order = await paidOrder();
+    queue(
+      answer(400, { error: { description: 'the payment has been fully refunded already' } }),
+      // The empty collection is the evidence that makes the refusal safe to
+      // act on: no refund under our key exists on the charge.
+      answer(200, { entity: 'collection', count: 0, items: [] }),
+    );
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'duplicate charge' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(202);
+
+    // The refund row EXISTS and is FAILED. Without this the empty array below
+    // would be evidence of nothing: a refund nobody ever raised prints
+    // identically.
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('FAILED');
+    expect(row.channel).toBe('GATEWAY');
+
+    const doc = await printedReceipt(order.id);
+    // buildReceipt filters FAILED out of the document, so this branch is pinned
+    // by absence rather than by its label. Nothing moved, so there is nothing
+    // to tell the customer about their money — and "REFUND FAILED" on paper
+    // they keep is the shop announcing an attempt that changed nothing.
+    expect(doc.refunds).toEqual([]);
+    // Nowhere else either. Matched on the label vocabulary rather than the bare
+    // word, which would trip on a legitimate REFUNDED order status later.
+    expect(JSON.stringify(doc)).not.toMatch(/REFUND (PAID OUT|FAILED|SENT|REQUESTED|HANDED BACK)/);
+    // The bill is still settled in full: a refused refund returned nothing.
+    expect(doc.amountPaid).toBe(order.totalPaise / 100);
+    expect(doc.amountDue).toBe(0);
   });
 });
