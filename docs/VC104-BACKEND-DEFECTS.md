@@ -748,6 +748,24 @@ transfer against the slot it ARRIVES in`, `occupies only the slot it arrived in,
 not also the slot it was called in`, and `re-anchors to the latest move when an
 order returns to a store it left`.
 
+Result: **88/88, 0 skipped, nothing not-passing**, at `2026-09-25T02:29:17Z`;
+artifacts in `/tmp/vc104-accept/frontend/qa/screens/` (`results-vc104.json`,
+screenshot `15c-transfer-release-and-return.png`).
+
+**What that artifact's own provenance stamp says, and what it does not.** It
+records `baseSha 4b0ea9f`, `branch HEAD`, `dirty: true` — *not* `82c355b` —
+because the browser run was taken in `/tmp/vc104-accept`, which is a detached
+copy at `4b0ea9f` carrying the lane owner's then-uncommitted diff. So the stamp
+alone does **not** place this run on the commit. What places it there is a
+separate check: `md5sum` of the four sources the run exercised
+(`backend/prisma/schema.prisma` `2dca7971`, `backend/src/lib/phoneOrders.js`
+`7e9bcaeb`, `backend/src/api/routes/phoneOrders.js` `660f4074`,
+`backend/tests/phoneOrders.test.js` `4f6fa551`) is identical to `git show`
+of the same four paths at `82c355b`. Stated this way round on purpose: a stamp
+that disagrees with the claim is the exact failure D-4 was about, and the
+honest reading is that the stamp is stale for a known reason, with the
+equivalence proved by content rather than asserted.
+
 **Migration identity.** One `migration.sql`, checksum
 `4eb9c24c…d34412ca`, has been applied under **two different names**, and Prisma's
 ledger keys on the *name*:
