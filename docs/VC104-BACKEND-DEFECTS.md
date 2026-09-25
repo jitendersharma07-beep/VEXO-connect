@@ -535,7 +535,51 @@ The first of the three also printed `[test-db-lock] LOST the lock mid-run —
 results are not trustworthy, re-run alone`, so it was discarded on the suite's
 own instruction rather than on judgement. `pg_stat_activity` grouped by database
 was checked at the time and showed connections on this lane's DB only, all of
-them this session's — so the contention is CPU, not shared fixtures.
+them this session's.
+
+**Correction, 09-25 (acceptance).** The sentence that used to close that
+paragraph — *"so the contention is CPU, not shared fixtures"* — does not follow,
+and the server log says otherwise. `pg_stat_activity` lists who is connected
+**now**; a foreign session that has already done its damage and disconnected
+leaves it empty, so an empty snapshot is not evidence that nothing else touched
+the database. What the server actually logged, on the container these databases
+live in:
+
+```
+01:12:44.618 FATAL:  terminating connection due to administrator command
+01:12:44.722 LOG:  checkpoint starting: immediate force wait
+01:12:46.575 FATAL:  terminating connection due to administrator command
+01:12:46.677 LOG:  checkpoint starting: immediate force wait
+01:12:48.191 FATAL:  terminating connection due to administrator command
+01:12:48.291 LOG:  checkpoint starting: immediate force wait
+```
+
+CPU load does not produce that line. Administrator termination followed ~100 ms
+later by an *immediate forced* checkpoint, three times over, is the signature of
+`DROP DATABASE … WITH (FORCE)`. No checked-in script on this server drops
+databases, so it was an ad-hoc command from another session. Load may well have
+caused the two **timeouts**; it did not cause the **lock loss**, and the two were
+being explained as one thing.
+
+The mechanism follows from the existing artifact, with no new experiment. The
+lock is a **session** lock, so it dies with the backend; Prisma then
+transparently reconnects and the new backend holds nothing. That the run
+*printed* `LOST` is itself the proof: `held()` had to **succeed** and return
+false to reach that branch. Had the connection merely errored, the
+`.catch(() => {})` beside it would have swallowed the error and the run would
+have continued with no message at all.
+
+**The gap this leaves open.** The heartbeat only *notes* the loss — it never
+aborts. `note()` writes one line to stderr and the run continues to completion,
+so a run can lose its database lock in its first minute and still print a green
+summary in its third. "Discard it" is an instruction addressed to a human
+reading the log afterwards, and nothing enforces it. Until the heartbeat fails
+the run, **"no `LOST` line" has to be checked explicitly** and cannot be inferred
+from exit 0. Every run in the table above and in *Independent acceptance* below
+was checked that way, and the check is meaningful because `[test-db-lock]
+acquired …` is itself written to stderr — its presence in each log proves that
+stream was captured, so the absence of `LOST` is a reading rather than a blind
+spot.
 
 *Recorded because "green on the third try" is only honest if the first two are
 shown.*
@@ -645,6 +689,108 @@ because they are known, not because they are acceptable.
    announce, not a bug report to expect. D-4 is still open (no VC-105 browser QA
    harness for this tree), so the UI has not been re-driven to confirm it
    renders the larger number sensibly.
+
+#### Independent acceptance, 09-25 — taken against the commit, not a working tree
+
+Everything above was measured on an uncommitted tree. This section re-takes the
+load-bearing gates against **`82c355b`** itself, from a separate worktree and a
+database created for the purpose.
+
+**The commit is the thing that was fingerprinted.** The table in *What the
+numbers above were taken against* reproduces exactly against `82c355b`: all
+seven rows, and the rollup `b82c528d39c8ebd8e804a142ccaac639e0cabd545c48c05eaed1fea8150b02ee`,
+recomputed with `git show 82c355b:<path> | sha256sum`. The invitation in that
+section — *"every row must reproduce against the commit that carries this
+file"* — has been taken up, and it holds.
+
+| gate | result |
+|---|---|
+| backend full suite, `vitest run` | **675 passed / 675**, 22 files, **exit 0**, 112.68 s, start 02:32:07 — `tests/phoneOrders.test.js (71 tests)` |
+| database | `vcx_vc104accept_test`, **created for this run**, all 22 migrations applied from zero |
+| database lock | `[test-db-lock] acquired as vcx-test-lock:1849859`, **zero `LOST` lines** |
+| log | `/tmp/vc104-accept-suite.log` |
+| browser acceptance, `frontend/qa/run-all.sh` | **88 / 88 checks, 0 skipped** — closes limitation 6 above |
+
+**One acceptance run was discarded, and it matters why.** An earlier full suite
+captured at 01:57 reported `673 passed / 673` with
+`tests/phoneOrders.test.js (69 tests)`. The committed file carries **71**, and it
+was edited at 02:00 — *inside that run's window*. So the 673 belongs to bytes
+that were replaced while the run was in flight, and it is not evidence about this
+commit. It is recorded here rather than dropped, because a discarded run and a
+run that was never taken look identical afterwards. The `675 / 71` in the table
+above is correct; an intermediate draft of this document that said `673 / 69` was
+describing the superseded state.
+
+**Browser acceptance, and what it does and does not prove.** The run was driven
+against an authorized isolated stack on private ports and a private database
+(`:5482` / `:5483`, `atc_pos_vc104accept_demo`) — separate names on purpose,
+because `db_reset` issues `DROP DATABASE … WITH (FORCE)`, which does not merely
+race a peer's run, it terminates it. All six required scenarios are covered:
+initial and scheduled order, cross-store reassignment, **source-slot release**,
+destination capacity, **repeated transfer** (A→B→A), and the refusal display.
+The last two were missing and are new — `§11c` of `frontend/qa/vc104-browser-qa.mjs`,
+with the numbers it asserted on the run recorded here:
+
+| step | CH (cap 2) | CP (cap 6) |
+|---|---|---|
+| after §11b fills CH | 2 — refused, *Kitchen is full (2/2)* | 1 |
+| after moving one order CH → CP | **1**, offerable again | **2** |
+| after moving the same order CP → CH | **2**, refused again | **1** |
+
+The middle row is the release; the last row is the one worth reading twice. Once
+that order has a `REASSIGNED` event into CH, arm C excludes it and only arm B can
+count it, so `2` (not `1`, not `3`) is a live assertion that arm B finds the
+**latest** arrival. `§11c` states its own scope in the file: every event in it
+falls inside one slot, so it proves the journey through the real UI and guards
+the regression, but the *discrimination* against pre-fix behaviour lives in the
+backend suite, where the timestamps can be controlled — `counts a back-dated
+transfer against the slot it ARRIVES in`, `occupies only the slot it arrived in,
+not also the slot it was called in`, and `re-anchors to the latest move when an
+order returns to a store it left`.
+
+**Migration identity.** One `migration.sql`, checksum
+`4eb9c24c…d34412ca`, has been applied under **two different names**, and Prisma's
+ledger keys on the *name*:
+
+| name | database | applied |
+|---|---|---|
+| `20260925011249_vc104_slot_count_indexes` | `vcx_slotanchor_test` | 01:15:44 |
+| `20260924800001_vc104_slot_count_indexes` *(the committed name)* | `vcx_slotfresh_test` | 01:44:47 |
+| `20260924800001_vc104_slot_count_indexes` | `vcx_vc104accept_test` | this acceptance run |
+
+Nothing was published, so the old name is **not** shared identity and the rename
+into the lane's reserved range is safe. `vcx_slotanchor_test` is hereby recorded
+as a **superseded disposable rehearsal database**: it holds the retired name, and
+because `migration.sql` uses plain `CREATE INDEX` a later `migrate deploy` there
+would both report drift and fail on `relation already exists`. It is left exactly
+as it is — no ledger row was edited and no database was reset — and it should be
+dropped rather than reconciled. `vcx_slotfresh_test` and `vcx_vc104accept_test`
+carry the committed name and are clean.
+
+**The capacity policy is unchanged, and `booked` still is not kitchen load.**
+The counting fix changes *which orders are counted*, not whether the cap binds:
+capacity remains opt-in (`reserveSlot` returns early when a store has no
+`BranchPrepCapacity` row), the refusal is still `409 POS_BRANCH_UNAVAILABLE` with
+`AT_CAPACITY`, the `/branch-options` count is still taken outside any transaction
+and is still a forecast, and the binding check is still the one under
+`pg_advisory_xact_lock` inside the writing transaction. Two things keep `booked`
+from being a measure of how busy a kitchen is, and both were re-checked against
+the committed bytes: `branchPrepCapacity` is read **only** in
+`src/api/routes/phoneOrders.js` — the till route `src/api/routes/orders.js` has
+zero references — so **walk-in orders share the kitchen and are never counted**;
+and by limitation 1 above a live order is released only by rejection or by moving
+away, so a scheduled no-show holds its place. `booked` is an exact count of live
+**phone** orders anchored in the slot, and that is the only thing it is.
+
+**Cancellation and rescheduling are out of the accepted scope, not covered
+elsewhere.** Confirmed from the code rather than from this document: no route
+assigns `PhoneOrder.status = 'CANCELLED'` (the only `CANCELLED` writes in the
+tree are `KitchenItem.state`), and `scheduledFor` is written at exactly one site,
+the submit path. Neither appears in the approved requirements 1–9 of
+`docs/lanes/VC104-API.md`; requirement 4 covers *creating* a scheduled order, not
+changing one. Cancellation is deferred behind open owner blocker **C-6**.
+Rejection coverage is **not** offered as a substitute for either: it is a
+different event that happens to free a place.
 
 ---
 
