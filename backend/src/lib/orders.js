@@ -99,13 +99,34 @@ export const ORDER_INCLUDE = {
     include: { kot: { select: { seq: true } } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
+  // The id tie-break is not cosmetic. createdAt is TIMESTAMP(3) defaulting to
+  // CURRENT_TIMESTAMP, which Postgres evaluates once per TRANSACTION — so two
+  // rows written in one transaction are guaranteed to share a value, and two
+  // written in the same millisecond share one anyway. On createdAt alone the
+  // order within a tie is whatever the plan happens to emit.
+  //
+  // Sums are unaffected either way: every total here is a commutative reduce
+  // over amounts. What the tie does change is which row comes FIRST, and two
+  // readers care:
+  //   - the receipt and the API list the tenders in array order, so a split bill
+  //     can print its two lines either way round;
+  //   - pickRefundLeg takes the FIRST gateway leg with enough headroom, and
+  //     refundLegs builds that array from this one. With two provider charges
+  //     tied, which charge a refund posts against was undefined — same money
+  //     back to the customer, but a different Razorpay charge to reconcile.
+  // Same tie-break as items above, and ascending cuid follows insertion order,
+  // so this extends `createdAt: 'asc'` rather than introducing a new rule.
+  //
+  // It makes the choice STABLE, which is all a tie-break should do. Whether a
+  // tie *ought* to prefer some other charge — most headroom, oldest intent — is
+  // a business question and deliberately not answered here.
   payments: {
     include: { receivedBy: { select: { id: true, fullName: true } } },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
   refunds: {
     include: { by: { select: { id: true, fullName: true } } },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
 };
 
