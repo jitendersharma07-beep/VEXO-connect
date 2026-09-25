@@ -7,7 +7,7 @@ import { mailEnabled } from '../../config/env.js';
 import { recipientAllowed } from '../../lib/mail/mailer.js';
 import { requirePosAuth } from '../../middleware/auth.js';
 import { requireAtc } from '../../middleware/rbac.js';
-import { withDerived } from '../../lib/license.js';
+import { MODULE_KEYS, withDerived } from '../../lib/license.js';
 import { roleLabel } from '../../lib/permissions.js';
 import { requireAnotherActivePlatformAdmin } from '../../lib/userAuthority.js';
 import {
@@ -174,6 +174,21 @@ const licenseSchema = z.object({
   expiresAt: z.coerce.date(),
   startsAt: z.coerce.date().optional(),
   baseBranchLimit: z.number().int().min(1).max(500).optional(),
+  // Extension modules sold on top of core POS. Validated against the registry
+  // rather than accepted as free text, so a mistyped key is a 400 here instead
+  // of a customer who has paid for a module and cannot reach it — the column
+  // is an array of strings and the database cannot tell a typo from a product.
+  //
+  // Optional, and absent means none: every licence issued before this column
+  // existed says core POS only, and that has to keep being what it says.
+  // Issuing is create-only by design — ATC issues a NEW row to change a plan
+  // and history stays intact — so granting or withdrawing a module is the same
+  // operation as changing a plan, and is audited the same way.
+  // Bounded by a constant rather than by the registry size: a caller naming
+  // the same module twice is expressing one entitlement, not overflowing the
+  // list, and a limit of "however many products exist today" would turn that
+  // into a 400 the day it happened. Duplicates are collapsed on the way in.
+  modules: z.array(z.enum(MODULE_KEYS)).max(20).optional(),
   notes: z.string().trim().max(500).optional(),
 });
 
@@ -190,6 +205,10 @@ router.post(
         startsAt: data.startsAt,
         expiresAt: data.expiresAt,
         baseBranchLimit: data.plan === 'SINGLE_STORE' ? 1 : (data.baseBranchLimit ?? 1),
+        // Deduplicated: the same module named twice is one entitlement, and
+        // storing it twice would show up as two lines on whatever reads the
+        // column next.
+        modules: data.modules ? [...new Set(data.modules)] : [],
         notes: data.notes,
         createdById: req.user.id,
       },
@@ -200,7 +219,16 @@ router.post(
       entity: 'License',
       entityId: license.id,
       companyId: req.company.id,
-      meta: { plan: license.plan, expiresAt: license.expiresAt, baseBranchLimit: license.baseBranchLimit },
+      meta: {
+        plan: license.plan,
+        expiresAt: license.expiresAt,
+        baseBranchLimit: license.baseBranchLimit,
+        // What was sold, in the audit trail. A module grant is a commercial
+        // act and "who turned Inventory on for this customer, and when" has
+        // to be answerable from the record rather than from the current value
+        // of a column.
+        modules: license.modules,
+      },
     });
     const d = withDerived(license);
     res.status(201).json({ license: { ...license, status: d.effectiveStatus, branchLimit: d.branchLimit } });

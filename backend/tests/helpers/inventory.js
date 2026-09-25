@@ -83,6 +83,15 @@ export const buildBaseFixture = async ({ slug = 'inv-co' } = {}) => {
       status: 'ACTIVE',
       expiresAt: new Date(Date.now() + 365 * 86400000),
       baseBranchLimit: 10,
+      // The fixture company has bought Inventory. Every inventory route is
+      // gated on this — see requireInventoryAction — so without it the whole
+      // of these suites would answer 403 POS_MODULE_NOT_LICENSED.
+      //
+      // Granted here rather than in each suite, so the entitlement is the
+      // BACKGROUND of these tests and not something any of them is quietly
+      // asserting. The suite that tests the gate itself issues its own licence
+      // without the module; see inventoryApi.test.js.
+      modules: ['INVENTORY'],
     },
   });
 

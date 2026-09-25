@@ -61,6 +61,17 @@ const publicLicense = (license) =>
         startsAt: license.startsAt,
         expiresAt: license.expiresAt,
         branchLimit: license.branchLimit,
+        // What the customer has bought beyond core POS. Published because the
+        // portal has to decide whether to show a whole section of navigation,
+        // and a sidebar that offers Inventory to a company without it makes
+        // every click a 403.
+        //
+        // Safe to publish: it is the customer's own entitlement, it names no
+        // price and no other tenant, and it is not the control — the server
+        // refuses the routes whatever the browser believes. Defaulted rather
+        // than passed straight through, so a licence row predating the column
+        // reads as core POS only instead of as undefined.
+        modules: license.modules ?? [],
       }
     : null;
 

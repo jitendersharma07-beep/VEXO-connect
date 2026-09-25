@@ -17,7 +17,8 @@
 // these are role lists, checked with the same requireRole semantics the rest
 // of the product uses.
 
-import { forbidden, notFound, unauthorized } from '../errors.js';
+import { forbidden, moduleNotLicensed, notFound, unauthorized } from '../errors.js';
+import { licenseHasModule } from '../license.js';
 
 export const MODULE_KEY = 'INVENTORY';
 
@@ -105,11 +106,38 @@ export const rolesFor = (action) => {
   return roles;
 };
 
-// ENTITLEMENT(INVENTORY)
+// ENTITLEMENT(INVENTORY) — the module gate, and the reason it lives HERE.
+//
+// Every one of the inventory routes carries this guard; there is not one
+// without it. So putting the entitlement check inside it gates the whole
+// subsystem in one place and, unlike a router.use() on the inventory index,
+// the gate travels with the guard wherever a future route is mounted. A route
+// added on another router cannot forget it without also forgetting its own
+// authorisation, which is not a mistake that survives review.
+//
+// Entitlement is asked BEFORE the role. "Your company has not bought this" and
+// "your role may not do this" are different facts with different answers, and
+// the first is the true one when both hold: telling a manager at an unlicensed
+// company that their ROLE is the problem sends them to their owner to be given
+// a permission that would not help. It also declines to publish this module's
+// role policy to a tenant that is not entitled to the module.
+//
+// req.license is already on the request — resolveCompanyScope loads it for
+// every authenticated route — so this costs no query.
+//
+// What it does NOT gate: the sale-consumption hook in the billing transition.
+// That hook is not an inventory right, it is the ledger staying consistent
+// with itself, and switching it off for an unlicensed company would freeze
+// stock that is physically still moving. A company with no inventory module
+// has no sale-source location, so the hook already records every line
+// UNCOSTED and posts nothing.
 export const requireInventoryAction = (action) => {
   const roles = rolesFor(action);
   return (req, _res, next) => {
     if (!req.user) return next(unauthorized());
+    if (!licenseHasModule(req.license, MODULE_KEY)) {
+      return next(moduleNotLicensed(MODULE_KEY, 'Inventory'));
+    }
     if (!roles.includes(req.user.role)) {
       return next(forbidden('Your role cannot perform this inventory action'));
     }

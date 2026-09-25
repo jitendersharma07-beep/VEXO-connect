@@ -759,7 +759,143 @@ describe('authorisation across stores and tenants', () => {
     for (const path of ['/dashboard', '/stock', '/ledger', '/requests', '/reminders']) {
       const res = await request(app).get(`${API}${path}`).set(auth(tok.cashierA));
       expect(res.status, `${path} must refuse a cashier`).toBe(403);
+      // The CODE, not just the 403. There are now two ways to be refused with
+      // that status here, and this test is about the role — if the fixture
+      // ever stopped granting the module, every line above would still pass
+      // while proving nothing about roles at all.
+      expect(res.body.error?.code, `${path} must refuse the ROLE, not the licence`).toBe('POS_FORBIDDEN');
     }
+  });
+});
+
+/* ------------------------------------------------- the module entitlement */
+
+// Inventory is an extension module, not part of core POS. A company that has
+// not bought it must not reach the subsystem AT ALL — not by role, not by
+// scope, not by guessing a URL — and must be told why in a way that does not
+// send them to their owner for a permission, or to VEXO for a renewal, when
+// neither would help.
+//
+// Every assertion here names the refusal code. A test that accepted any 403
+// would pass on POS_FORBIDDEN, which is the wrong answer to this question and
+// the one the routes gave before the gate existed.
+describe('the inventory module entitlement', () => {
+  // The fixture company owns the module. Taking it away is the whole setup:
+  // the same tenant, the same users, the same tokens — only the entitlement
+  // changes, so nothing else can explain a difference in the result.
+  const revokeModule = async () => {
+    const license = await prisma.license.findFirst({
+      where: { companyId: fx.company.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    await prisma.license.update({ where: { id: license.id }, data: { modules: [] } });
+  };
+
+  // At least one route from every file under src/api/routes/inventory, reads
+  // and writes both. A gate that held on GET /stock but not on
+  // POST /goods-receipts would be no gate at all: the writes are the ones that
+  // matter. It is a sample rather than the full 89 routes because the guard is
+  // per-route and identical — what this proves is that every FILE is behind
+  // it, which is what a new route could plausibly escape.
+  const SURFACE = [
+    ['get', '/settings'], //      setup.js
+    ['get', '/locations'],
+    ['get', '/items'],
+    ['get', '/suppliers'],
+    ['get', '/batches'], //       batches.js
+    ['get', '/goods-receipts'], // receiving.js
+    ['get', '/purchase-orders'],
+    ['get', '/transfers'],
+    ['get', '/requests'], //      requests.js
+    ['get', '/issues'],
+    ['get', '/plans'], //         planning.js
+    ['get', '/reminders'],
+    ['get', '/notifications'],
+    ['get', '/scheduler'],
+    ['get', '/counts'], //        adjustments.js
+    ['get', '/recipes'], //       recipes.js
+    ['get', '/production'], //    production.js
+    ['get', '/dashboard'], //     reports.js
+    ['get', '/stock'],
+    ['get', '/ledger'],
+    ['get', '/valuation'],
+    ['post', '/items'],
+    ['post', '/locations'],
+    ['post', '/suppliers'],
+    ['post', '/goods-receipts'],
+    ['post', '/purchase-orders'],
+    ['post', '/requests'],
+    ['post', '/plans'],
+    ['post', '/counts'],
+    ['post', '/wastage'],
+    ['post', '/recipes'],
+    ['post', '/recipe-modifiers'],
+    ['post', '/production'],
+    ['post', '/ledger/rebuild'],
+  ];
+
+  const hit = (method, path, token) => request(app)[method](`${API}${path}`).set(auth(token)).send({});
+
+  it('refuses the entire subsystem, to every role, when the module is not licensed', async () => {
+    await revokeModule();
+
+    for (const [method, path] of SURFACE) {
+      // The OWNER, deliberately: the highest role in the company. The claim is
+      // not "some users are refused" but that no role opens this, which is
+      // exactly what distinguishes an entitlement from a permission.
+      const res = await hit(method, path, tok.owner);
+      const where = `${method.toUpperCase()} ${path}`;
+      expect(res.status, `${where} → ${JSON.stringify(res.body)}`).toBe(403);
+      expect(res.body.error?.code, `${where} must name the licence, not the role`).toBe('POS_MODULE_NOT_LICENSED');
+      expect(res.body.error?.details?.module, `${where} must say which module`).toBe('INVENTORY');
+      expect(res.body.error?.message).toMatch(/not included in your VEXO Connect licence/i);
+    }
+  });
+
+  // The positive control on the same surface. Without it the test above would
+  // pass just as well against a subsystem that was broken, unmounted or
+  // deleted — "everything 403s" is not evidence that the GATE did it.
+  it('and admits exactly the same requests once it is', async () => {
+    for (const [method, path] of SURFACE) {
+      const res = await hit(method, path, tok.owner);
+      const where = `${method.toUpperCase()} ${path}`;
+      // Not "is 200": an empty POST body is a 400 from the route's own schema,
+      // and that is the right answer — it means the request got PAST the gate
+      // and reached the handler. What must never appear is the gate's code.
+      expect(res.body.error?.code, `${where} → ${JSON.stringify(res.body)}`).not.toBe('POS_MODULE_NOT_LICENSED');
+      expect(res.status, `${where} must not be refused for entitlement`).not.toBe(403);
+    }
+  });
+
+  it('refuses a manager for the licence, not for their role', async () => {
+    await revokeModule();
+    // A manager may view stock when the module is licensed; with it revoked
+    // the reason has to be the licence. Getting POS_FORBIDDEN here would send
+    // them to their owner to be granted a right they already have.
+    const res = await request(app).get(`${API}/stock`).set(auth(tok.managerA));
+    expect(res.status).toBe(403);
+    expect(res.body.error?.code).toBe('POS_MODULE_NOT_LICENSED');
+  });
+
+  it('is not something a signed-out caller can reach either way', async () => {
+    await revokeModule();
+    const res = await request(app).get(`${API}/stock`);
+    expect(res.status, 'authentication is still asked first').toBe(401);
+  });
+
+  it('publishes the entitlement to the signed-in portal', async () => {
+    const withModule = await request(app)
+      .post('/api/auth/login')
+      .send({ email: fx.owner.email, password: TEST_PASSWORD });
+    expect(withModule.body.license.modules).toEqual(['INVENTORY']);
+
+    await revokeModule();
+    const without = await request(app)
+      .post('/api/auth/login')
+      .send({ email: fx.owner.email, password: TEST_PASSWORD });
+    // An empty array, not a missing key: the sidebar decides on this value and
+    // "undefined" is a shape it would have to guess about.
+    expect(without.body.license.modules).toEqual([]);
   });
 });
 

@@ -74,7 +74,7 @@ function NavItem({ to, icon: Icon, label, end = false }) {
 // atcScope). A second hand-maintained copy would drift, and the way it drifts
 // is that the drawer shows a cashier the owner's links. Render this; never
 // retype it.
-function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
+function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }) {
   const { can, canAny } = usePermissions();
   // LANE foundation — the organisation group, shown by held ACTION so the
   // list matches what the server will actually answer: Finance reaches Legal
@@ -196,8 +196,17 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               owner's and refused server-side for anyone else.
 
               Note these are links, not permissions. Removing one hides a
-              screen; it does not close an endpoint. */}
-          {canUseInventory(user) ? (
+              screen; it does not close an endpoint.
+
+              The licence is part of the condition now, not only the role: a
+              company whose licence does not include the INVENTORY module is
+              refused at the API with POS_MODULE_NOT_LICENSED whatever the
+              role, so showing the section would be showing twelve screens that
+              can only fill with the same refusal. Typing the URL still reaches
+              the route — the route gate is roles, as it was — and the screen
+              then shows the server's own sentence about the licence, which is
+              the accurate one. */}
+          {canUseInventory(user, license) ? (
             <>
               <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
                 Inventory
@@ -357,7 +366,11 @@ export default function Layout() {
     navigate('/atc/companies');
   };
 
-  const navProps = { user, isAtc, isOwner, atcScope, onExitAtcScope: exitAtcScope };
+  // license travels with user: the inventory section is gated on the module
+  // being licensed as well as on the role, and both sidebars render the same
+  // SidebarBody, so passing it here is what keeps the drawer and the sidebar
+  // from disagreeing about what exists.
+  const navProps = { user, license, isAtc, isOwner, atcScope, onExitAtcScope: exitAtcScope };
 
   return (
     <div className="flex min-h-screen">

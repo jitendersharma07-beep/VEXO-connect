@@ -242,8 +242,20 @@ export const movementLabel = (type) => MOVEMENT_LABEL[type] || type;
 // route re-checks on the server, including a request typed straight at the
 // API with no browser involved, which is what §8's "enforce all permissions on
 // the server" means. Deleting this file must weaken nothing.
-export const canUseInventory = (user) =>
-  ['CUSTOMER_OWNER', 'BRANCH_MANAGER'].includes(user?.role);
+// Two independent questions, the same two the server asks and in the same
+// order: is INVENTORY on this company's licence at all, and may this role use
+// it. They are not interchangeable. A company that has not bought the module
+// cannot be helped by any role, so a screen that reported it as a permission
+// problem would send a manager to an owner who is equally refused.
+//
+// `license` is the session licence from useAuth(). Undefined — a caller that
+// has not been updated — is treated as NOT entitled rather than as entitled,
+// so a forgotten call site hides a link instead of showing one that 403s.
+export const licenseHasInventory = (license) =>
+  Array.isArray(license?.modules) && license.modules.includes('INVENTORY');
+
+export const canUseInventory = (user, license) =>
+  licenseHasInventory(license) && ['CUSTOMER_OWNER', 'BRANCH_MANAGER'].includes(user?.role);
 
 export const isInventoryOwner = (user) => user?.role === 'CUSTOMER_OWNER';
 

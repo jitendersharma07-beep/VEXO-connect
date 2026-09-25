@@ -276,6 +276,8 @@ const buildTenant = async () => {
       status: 'ACTIVE',
       expiresAt: days(365),
       baseBranchLimit: 10,
+      // The pilot walks the inventory screens, which are gated on the module.
+      modules: ['INVENTORY'],
       notes: 'Inventory pilot tenant — synthetic data, not a commercial licence',
     },
   });
