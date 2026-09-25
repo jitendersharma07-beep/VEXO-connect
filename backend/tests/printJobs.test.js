@@ -14,6 +14,7 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
+const { ORDER_INCLUDE } = await import('../src/lib/orders.js');
 
 const app = createApp();
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
@@ -31,10 +32,30 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  // Integration wipe-UNION, 2026-09-25. This file came from the kitchen lane,
+  // whose schema had no promotions or modifiers, so its wipe had no statement
+  // for them. On the shared test database that is not optional:
+  // OrderItemModifier_orderItemId_fkey is RESTRICT, so one residue row from
+  // catalogModifiers or promotions makes the orderItem delete below throw in
+  // beforeAll and takes all 26 tests in this file with it.
+  //
+  // It was latent rather than absent before. Vitest orders files by size
+  // descending; this file sat at position 14 behind discountSettings, and
+  // nothing ahead of it left modifier rows. The two new tests grew the file,
+  // which moved it to position 8 directly behind promotions, and the same
+  // unchanged wipe then threw. File size is not a contract, so the wipe is
+  // completed here rather than left to depend on where the file lands.
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -45,6 +66,7 @@ const wipe = async () => {
   await prisma.licenseAddon.deleteMany();
   await prisma.license.deleteMany();
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -339,6 +361,192 @@ describe('printed documents carry the truth (pre-hardware checklist)', () => {
     expect(doc.amountPaid).toBe(0);
     expect(doc.amountDue).toBe(order.total);
     expect(doc.refunds).toEqual([]);
+  });
+
+  // The zero-state half of the test above is the control for this one: the same
+  // four fields, asserted empty when no money has moved. Together they show the
+  // document reports collection rather than defaulting to either shape.
+  it('a paid receipt document carries each tender, its change, and the refund', async () => {
+    const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
+      .send({ type: 'TAKEAWAY', items: [{ productId: burgerId, qty: 2 }, { productId: saladId, qty: 1 }] });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const orderId = created.body.order.id;
+    const bill = await request(app).post(`/api/orders/${orderId}/bill`)
+      .set(auth(tokens.cashier)).send({});
+    expect(bill.status, JSON.stringify(bill.body)).toBe(200);
+    expect(bill.body.order.total).toBe(315); // 300 + 5% GST, no discount
+
+    // Split deliberately: CARD stores no tendered, CASH does. They are the two
+    // branches of the receipt's change-due calculation, and change printed wrong
+    // is a dispute at the counter.
+    const card = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'CARD', amount: 115 });
+    expect(card.status, JSON.stringify(card.body)).toBe(201);
+    const cash = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'CASH', tendered: 250 });
+    expect(cash.status, JSON.stringify(cash.body)).toBe(201);
+    expect(cash.body.order.status).toBe('PAID');
+    expect(cash.body.changeDue).toBe(50); // 250 handed over against 200 still due
+
+    // Split bills have no single tender to infer, so the method is explicit.
+    const refund = await request(app).post(`/api/orders/${orderId}/refunds`)
+      .set(auth(tokens.owner)).send({ amount: 40, reason: 'salad sent back', method: 'CASH' });
+    expect(refund.status, JSON.stringify(refund.body)).toBe(201);
+
+    const res = await enqueue({ orderId, kind: 'RECEIPT' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const row = await prisma.printJob.findUnique({ where: { id: res.body.jobs[0].id } });
+    const doc = row.document;
+
+    // Found by method, not by index: payments are ordered on createdAt alone,
+    // with no id tie-break, so two tenders inside one millisecond have no
+    // defined print order.
+    expect(doc.payments).toHaveLength(2);
+    expect(doc.payments.find((p) => p.method === 'CARD')).toEqual({
+      method: 'CARD', channel: 'MANUAL', amount: 115, tendered: null, changeDue: null,
+      label: 'MANUAL PAYMENT RECORD — not gateway-verified',
+    });
+    expect(doc.payments.find((p) => p.method === 'CASH')).toEqual({
+      method: 'CASH', channel: 'MANUAL', amount: 200, tendered: 250, changeDue: 50,
+      label: 'MANUAL PAYMENT RECORD — not gateway-verified',
+    });
+    expect(doc.amountPaid).toBe(315);
+
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: 40, reason: 'salad sent back', status: 'SUCCEEDED', channel: 'MANUAL',
+      label: 'REFUND HANDED BACK — recorded by staff',
+    });
+
+    // Not 40. amountDue is what is still owed on the bill, and the bill was
+    // settled in full; the ₹40 back is its own line. Letting the refund reopen
+    // the balance would hand the customer paper saying they still owe it.
+    expect(doc.amountDue).toBe(0);
+    expect(doc.total).toBe(315);
+  });
+
+  // The test above finds its tenders by method precisely because their print
+  // order was undefined. This one removes that excuse.
+  //
+  // Payment.createdAt is TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP. Postgres
+  // evaluates CURRENT_TIMESTAMP once per transaction, so a tie is not a thought
+  // experiment — it is guaranteed for rows written together, and millisecond
+  // precision allows it for rows that merely land close.
+  //
+  // Both conditions below are forced, and the second one is the point. Written
+  // the obvious way — tie the timestamps, expect ascending id — this test passes
+  // with NO tie-break at all: Postgres hands back the two rows in insertion
+  // order, and Prisma's cuid is time-prefixed, so ascending id and insertion
+  // order are the same sequence. Measured, not assumed: on `createdAt` alone it
+  // was green. So the ids are rewritten to disagree with insertion order, which
+  // is the only arrangement in which the ORDER BY is observable at all.
+  it('two tenders sharing a createdAt still print in one defined, repeatable order', async () => {
+    const created = await request(app).post('/api/orders').set(auth(tokens.cashier))
+      .send({ type: 'TAKEAWAY', items: [{ productId: burgerId, qty: 2 }] });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const orderId = created.body.order.id;
+    const bill = await request(app).post(`/api/orders/${orderId}/bill`)
+      .set(auth(tokens.cashier)).send({});
+    expect(bill.status, JSON.stringify(bill.body)).toBe(200);
+    const total = bill.body.order.total;
+
+    // Through the route, so these are real payments: receivedBy set, order
+    // driven to PAID, amounts applied against the bill.
+    const first = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'CARD', amount: 100 });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const second = await request(app).post(`/api/orders/${orderId}/payments`)
+      .set(auth(tokens.cashier)).send({ method: 'UPI', amount: total - 100 });
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+    expect(second.body.order.status).toBe('PAID');
+
+    const card = await prisma.payment.findFirstOrThrow({ where: { orderId, method: 'CARD' } });
+    const upi = await prisma.payment.findFirstOrThrow({ where: { orderId, method: 'UPI' } });
+
+    // One instant for both, as a single transaction would have produced, and
+    // ids that run opposite to the order they were inserted in: UPI went in
+    // second and now sorts first. Nothing FK-references Payment.id — no
+    // `REFERENCES "Payment"` exists in any migration — so rewriting it here
+    // rearranges nothing else.
+    const tie = new Date('2026-09-24T12:00:00.000Z');
+    const LOW = 'zz-tie-aaa-sorts-first';
+    const HIGH = 'zz-tie-zzz-sorts-second';
+    // HIGH is rewritten first on purpose. An UPDATE writes a new row version at
+    // the end of the heap, so the rewrite order becomes the physical order, and
+    // an unordered read follows it. Doing LOW first lines the heap up with
+    // ascending id and the assertion below passes with no tie-break at all —
+    // observed, not theorised.
+    await prisma.payment.update({ where: { id: card.id }, data: { id: HIGH, createdAt: tie } });
+    await prisma.payment.update({ where: { id: upi.id }, data: { id: LOW, createdAt: tie } });
+
+    const tied = await prisma.payment.findMany({ where: { orderId }, orderBy: { id: 'asc' } });
+    expect(tied).toHaveLength(2);
+    expect(tied[0].createdAt.getTime()).toBe(tied[1].createdAt.getTime());
+    // The discriminator: ascending id must now be the reverse of insertion
+    // order, or this test is back to proving nothing.
+    expect(tied.map((p) => p.method)).toEqual(['UPI', 'CARD']);
+
+    // Ascending id is the declared tie-break, so that is the order both readers
+    // must show. Asserted against ids, not methods: with only two tenders a
+    // method assertion passes on a coin flip half the time.
+    const expectedIds = tied.map((p) => p.id);
+
+    // Read twice. A single read cannot distinguish a defined order from a
+    // coincidence — Postgres may return either row first when nothing breaks the
+    // tie, and will often be consistent about it within one plan. The pairing is
+    // what carries the claim: the ids fix WHICH order is correct, the repeat
+    // shows it was not luck.
+    const reads = [];
+    for (let i = 0; i < 2; i += 1) {
+      const got = await request(app).get(`/api/orders/${orderId}`).set(auth(tokens.cashier));
+      expect(got.status, JSON.stringify(got.body)).toBe(200);
+      reads.push(got.body.order.payments.map((p) => p.id));
+    }
+    expect(reads[0]).toEqual(expectedIds);
+    expect(reads[1]).toEqual(expectedIds);
+
+    // The receipt is the customer-visible half, and it drops the ids — so map
+    // the expected ids to their methods and assert the printed sequence.
+    const methodOf = new Map(tied.map((p) => [p.id, p.method]));
+    const expectedMethods = expectedIds.map((id) => methodOf.get(id));
+    expect(new Set(expectedMethods).size).toBe(2); // the sequence can distinguish an order at all
+
+    const receipt = await request(app).get(`/api/orders/${orderId}/receipt`).set(auth(tokens.cashier));
+    expect(receipt.status, JSON.stringify(receipt.body)).toBe(200);
+    expect(receipt.body.receipt.payments.map((p) => p.method)).toEqual(expectedMethods);
+
+    // And the document actually queued for the printer, which is the artifact
+    // the customer ends up holding.
+    const job = await enqueue({ orderId, kind: 'RECEIPT' });
+    expect(job.status, JSON.stringify(job.body)).toBe(201);
+    const row = await prisma.printJob.findUnique({ where: { id: job.body.jobs[0].id } });
+    expect(row.document.payments.map((p) => p.method)).toEqual(expectedMethods);
+
+    // The tie-break reorders rows; it must not revalue them. A stable print
+    // order bought at the cost of a wrong total would be a bad trade.
+    expect(row.document.amountPaid).toBe(total);
+    expect(row.document.amountDue).toBe(0);
+    expect(row.document.total).toBe(total);
+  });
+
+  // The behavioural test above needs help to fail. Without the tie-break it
+  // returns whatever order the read happens to produce, and that order is not
+  // stable across circumstances: with the two id rewrites applied in the other
+  // sequence it came back ascending anyway and the test was green on the
+  // unfixed code. The rewrite sequence is now chosen to make it RED, but that
+  // RED rests on heap layout — an implementation detail no test should depend
+  // on for its safety value.
+  //
+  // So assert the declaration itself. This cannot be satisfied by luck: drop
+  // the tie-break and it fails on the next run, whatever the planner decides.
+  // The two tests answer different questions — this one that the rule is
+  // declared, the one above that the declared rule reaches the paper.
+  it('the order include declares a tie-break for payments and refunds, not createdAt alone', () => {
+    const tieBroken = [{ createdAt: 'asc' }, { id: 'asc' }];
+    expect(ORDER_INCLUDE.payments.orderBy).toEqual(tieBroken);
+    expect(ORDER_INCLUDE.refunds.orderBy).toEqual(tieBroken);
+    // items already did this; payments and refunds were the outliers.
+    expect(ORDER_INCLUDE.items.orderBy).toEqual(tieBroken);
   });
 
   it('a KOT document carries the order note and per-line notes', async () => {

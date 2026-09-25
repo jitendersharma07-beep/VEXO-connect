@@ -49,6 +49,7 @@ import {
   paiseOf,
   settledRefundPaise,
   reservedRefundPaise,
+  REFUND_PAYMENT_INCLUDE,
   refundLegs,
   pickRefundLeg,
   largestRefundablePaise,
@@ -1859,18 +1860,10 @@ router.post(
 
 // --- refunds ----------------------------------------------------------------
 
-const REFUND_PAYMENT_INCLUDE = {
-  select: {
-    amount: true,
-    channel: true,
-    method: true,
-    intentId: true,
-    // The provider's id for the charge. Without it a gateway refund has no
-    // route to post to, so it has to travel with the leg.
-    providerRef: true,
-    intent: { select: { id: true, providerRef: true, provider: true } },
-  },
-};
+// REFUND_PAYMENT_INCLUDE now lives in lib/orders.js beside refundLegs and
+// pickRefundLeg, which are the only things that consume it — and it carries the
+// same [createdAt, id] tie-break as ORDER_INCLUDE, so which charge a refund
+// posts against is decided by a declared rule rather than by the query plan.
 
 const REFUND_STATE_SELECT = {
   select: { amount: true, status: true, channel: true, intentId: true, providerRef: true },

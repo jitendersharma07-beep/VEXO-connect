@@ -170,13 +170,34 @@ export const ORDER_INCLUDE = {
     include: { kot: { select: { seq: true } }, modifiers: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
+  // The id tie-break is not cosmetic. createdAt is TIMESTAMP(3) defaulting to
+  // CURRENT_TIMESTAMP, which Postgres evaluates once per TRANSACTION — so two
+  // rows written in one transaction are guaranteed to share a value, and two
+  // written in the same millisecond share one anyway. On createdAt alone the
+  // order within a tie is whatever the plan happens to emit.
+  //
+  // Sums are unaffected either way: every total here is a commutative reduce
+  // over amounts. What the tie does change is which row comes FIRST, and two
+  // readers care:
+  //   - the receipt and the API list the tenders in array order, so a split bill
+  //     can print its two lines either way round;
+  //   - pickRefundLeg takes the FIRST gateway leg with enough headroom, and
+  //     refundLegs builds that array from this one. With two provider charges
+  //     tied, which charge a refund posts against was undefined — same money
+  //     back to the customer, but a different Razorpay charge to reconcile.
+  // Same tie-break as items above, and ascending cuid follows insertion order,
+  // so this extends `createdAt: 'asc'` rather than introducing a new rule.
+  //
+  // It makes the choice STABLE, which is all a tie-break should do. Whether a
+  // tie *ought* to prefer some other charge — most headroom, oldest intent — is
+  // a business question and deliberately not answered here.
   payments: {
     include: { receivedBy: { select: { id: true, fullName: true } } },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
   refunds: {
     include: { by: { select: { id: true, fullName: true } } },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   },
   redemptions: {
     include: { appliedBy: { select: { id: true, fullName: true } } },
@@ -317,6 +338,36 @@ export const inferRefundMethod = (payments) => {
 };
 
 const holdsMoney = (r) => r.status === 'SUCCEEDED' || r.status === 'PENDING';
+
+// How the refund route must read payments before handing them to refundLegs.
+// It lives here, beside its consumer, because the two are one contract: the
+// only reason this include exists is to feed the leg picker, and the pieces it
+// selects are exactly what a leg needs.
+//
+// INTEGRATION FIX, 2026-09-25. The orderBy is the point. ORDER_INCLUDE gained a
+// `[createdAt, id]` tie-break so that a tie stops leaving the refund's target
+// charge undefined — but the leg picker never reads through ORDER_INCLUDE. Its
+// one call site loaded payments through a bare `select:` with no ORDER BY at
+// all, so the very outcome that change set out to make deterministic stayed at
+// the planner's discretion. Measured, not argued: with two tied gateway charges
+// the refund posted against whichever row the read happened to emit first.
+//
+// Exported so the rule can be asserted as a declaration. A behavioural test of
+// a tie can go green by luck when the planner happens to agree; dropping the
+// orderBy here must fail on the next run regardless of what the planner does.
+export const REFUND_PAYMENT_INCLUDE = {
+  select: {
+    amount: true,
+    channel: true,
+    method: true,
+    intentId: true,
+    // The provider's id for the charge. Without it a gateway refund has no
+    // route to post to, so it has to travel with the leg.
+    providerRef: true,
+    intent: { select: { id: true, providerRef: true, provider: true } },
+  },
+  orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+};
 
 // A refund has to come back out of the leg that took the money in. Provider-
 // collected money can only be returned by the provider, and cash can only be

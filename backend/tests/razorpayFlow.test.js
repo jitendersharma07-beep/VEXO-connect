@@ -122,6 +122,7 @@ const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const tokens = {};
 let productId;
+let branchId;
 
 const wipe = async () => {
   // Shared test database: another suite's kitchen/print rows RESTRICT the
@@ -184,7 +185,12 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
     },
   });
+  // Union of both sides: the candidate's publicId (the accounts lane made it
+  // part of the branch fixture) and the lane's branchId capture (the gateway
+  // refund print tests place their PrintAgent on this branch explicitly,
+  // because targetsFor matches on branchId and the owner carries none).
   const branch = await prisma.branch.create({ data: { companyId: company.id, publicId: 'VC-RZ-0001', name: 'Rz One', code: 'Z1' } });
+  branchId = branch.id;
   const mk = (d) => prisma.posUser.create({ data: { passwordHash, ...d } });
   await mk({ email: 'owner.z@test.local', fullName: 'Owner Z', role: 'CUSTOMER_OWNER', companyId: company.id });
   await mk({ email: 'cashier.z@test.local', fullName: 'Cashier Z', role: 'CASHIER', companyId: company.id, branchId: branch.id });
@@ -905,5 +911,353 @@ describe('the checkout handoff', () => {
     });
     expect(log).not.toBeNull();
     expect(log.meta.chargeRef).toBe(payRef);
+  });
+});
+
+// refundLabelFor has five branches; four of them are about gateway money, and
+// they exist to stop a receipt saying the customer's money is back before the
+// provider has sent it. Until now only the MANUAL branch was pinned on a
+// printed document (printJobs.test.js, row 5b), and the one gateway label with
+// any coverage was asserted on the ORDER VIEW. A wrong label on a screen is an
+// argument; on paper in the customer's hand it is the shop's written word, so
+// each branch is pinned here on a stored PrintJob.document.
+describe('what the printed receipt says about gateway refund money', () => {
+  let receiptTargetId;
+
+  beforeAll(async () => {
+    // The owner here carries no branch of its own, so the agent is placed
+    // explicitly on the branch the cashier's orders belong to — targetsFor
+    // matches on branchId and would otherwise find nothing.
+    const agent = await request(app).post('/api/print-agents').set(auth(tokens.owner))
+      .send({ name: 'Counter PC', branchId });
+    expect(agent.status, JSON.stringify(agent.body)).toBe(201);
+    // Enrolment is what makes the agent ACTIVE, and targetsFor requires it.
+    const enrolled = await request(app).post('/api/print-agents/enrol')
+      .send({ code: agent.body.enrolCode, platform: 'linux', hostname: 'rz-till' });
+    expect(enrolled.status, JSON.stringify(enrolled.body)).toBe(201);
+    const target = await request(app).post(`/api/print-agents/${agent.body.agent.id}/targets`)
+      .set(auth(tokens.owner))
+      .send({ name: 'Front receipt', purpose: 'RECEIPT', transport: 'TCP', host: '10.0.0.10' });
+    expect(target.status, JSON.stringify(target.body)).toBe(201);
+    receiptTargetId = target.body.target.id;
+  });
+
+  // The document is a snapshot taken at enqueue, so the refund has to be in its
+  // final state before this is called.
+  const printedReceipt = async (orderId) => {
+    const res = await request(app).post('/api/print-jobs').set(auth(tokens.cashier))
+      .send({ orderId, kind: 'RECEIPT' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // queued:0 is a 201 with an empty jobs array — no RECEIPT target matched,
+    // and every assertion below would then be made about nothing.
+    expect(res.body.queued, JSON.stringify(res.body)).toBe(1);
+    const row = await prisma.printJob.findUnique({ where: { id: res.body.jobs[0].id } });
+    expect(row.targetId).toBe(receiptTargetId);
+    return row.document;
+  };
+
+  it('prints PAID OUT only once the provider has confirmed the refund', async () => {
+    const order = await paidOrder();
+    const refundRef = nextId('rfnd_');
+    queue(answer(200, refundBody(order.totalPaise, refundRef, order.payRef)));
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: order.totalPaise / 100, reason: 'order cancelled' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(201);
+
+    const hook = await deliver(refundOutcome(refundRef, order.payRef, order.totalPaise));
+    expect(hook.body.applied).toBe(true);
+    expect((await refundOf(order.id)).status).toBe('SUCCEEDED');
+
+    const doc = await printedReceipt(order.id);
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: order.totalPaise / 100,
+      reason: 'order cancelled',
+      status: 'SUCCEEDED',
+      channel: 'GATEWAY',
+      label: 'REFUND PAID OUT — confirmed by the provider',
+    });
+  });
+
+  it('prints REQUESTED, not paid out, while the provider holds the request', async () => {
+    const order = await paidOrder();
+    const refundRef = nextId('rfnd_');
+    queue(answer(200, refundBody(10000, refundRef, order.payRef)));
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'spilled drink' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(201);
+
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('PENDING');
+    // The reference is what separates this branch from the unanswered one.
+    expect(row.providerRef).toBe(refundRef);
+
+    const doc = await printedReceipt(order.id);
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: 100,
+      reason: 'spilled drink',
+      status: 'PENDING',
+      channel: 'GATEWAY',
+      label: 'REFUND REQUESTED — not yet paid out by the provider',
+    });
+    // The statement this branch exists to prevent, asserted as an absence too:
+    // Razorpay accepting the request is not Razorpay having paid it.
+    expect(doc.refunds[0].label).not.toMatch(/PAID OUT|HANDED BACK/);
+  });
+
+  it('prints SENT — awaiting confirmation when the provider never answered', async () => {
+    const order = await paidOrder();
+    // Opens the response and never finishes it: the refund may be paying out
+    // this second, and we hold no reference to ask about later.
+    queue(({ res }) => { res.writeHead(200, { 'content-type': 'application/json' }); return undefined; });
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'customer changed mind' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(202);
+
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('PENDING');
+    expect(row.providerRef).toBeNull();
+
+    const doc = await printedReceipt(order.id);
+    expect(doc.refunds).toHaveLength(1);
+    expect(doc.refunds[0]).toMatchObject({
+      amount: 100,
+      reason: 'customer changed mind',
+      status: 'PENDING',
+      channel: 'GATEWAY',
+      label: 'REFUND SENT — awaiting confirmation from the provider',
+    });
+    // Unanswered is not refused, and it is not paid either. The customer may
+    // already have this money, so the paper claims neither.
+    expect(doc.refunds[0].label).not.toMatch(/PAID OUT|FAILED|REQUESTED/);
+  }, 15000);
+
+  it('prints no refund line at all when the provider refused it', async () => {
+    const order = await paidOrder();
+    queue(
+      answer(400, { error: { description: 'the payment has been fully refunded already' } }),
+      // The empty collection is the evidence that makes the refusal safe to
+      // act on: no refund under our key exists on the charge.
+      answer(200, { entity: 'collection', count: 0, items: [] }),
+    );
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: 100, reason: 'duplicate charge' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(202);
+
+    // The refund row EXISTS and is FAILED. Without this the empty array below
+    // would be evidence of nothing: a refund nobody ever raised prints
+    // identically.
+    const row = await refundOf(order.id);
+    expect(row.status).toBe('FAILED');
+    expect(row.channel).toBe('GATEWAY');
+
+    const doc = await printedReceipt(order.id);
+    // buildReceipt filters FAILED out of the document, so this branch is pinned
+    // by absence rather than by its label. Nothing moved, so there is nothing
+    // to tell the customer about their money — and "REFUND FAILED" on paper
+    // they keep is the shop announcing an attempt that changed nothing.
+    expect(doc.refunds).toEqual([]);
+    // Nowhere else either. Matched on the label vocabulary rather than the bare
+    // word, which would trip on a legitimate REFUNDED order status later.
+    expect(JSON.stringify(doc)).not.toMatch(/REFUND (PAID OUT|FAILED|SENT|REQUESTED|HANDED BACK)/);
+    // The bill is still settled in full: a refused refund returned nothing.
+    expect(doc.amountPaid).toBe(order.totalPaise / 100);
+    expect(doc.amountDue).toBe(0);
+  });
+});
+
+// REQUIRED INTEGRATION CHECK 2, 2026-09-25 — the payment ordering change tested
+// where it decides money, not where it decides layout.
+//
+// VC-103 gave ORDER_INCLUDE.payments a `[createdAt, id]` tie-break, and its
+// stated reason was pickRefundLeg: "with two provider charges tied, which charge
+// a refund posts against was undefined". Verifying that claim showed the change
+// did not reach the outcome it named. pickRefundLeg has exactly one call site,
+// the refund route, and that route did not read payments through ORDER_INCLUDE —
+// it used a bare `select:` with no ORDER BY at all. So the receipt's tender order
+// became deterministic while the refund's target charge stayed at the planner's
+// discretion. The include now lives in lib/orders.js beside refundLegs and
+// carries the same tie-break; these tests are what hold it there.
+//
+// What is asserted is DETERMINISM, and only that. Ascending cuid follows the
+// order rows were inserted by this system; it is NOT evidence of the order the
+// provider captured the charges in. Clock skew, a late capture on an earlier
+// attempt, or a redelivered webhook all put the provider's chronology at odds
+// with our insertion order, and nothing here claims otherwise.
+//
+// FINANCE POLICY, OPEN: whether a tie should prefer the first-inserted charge at
+// all. "Most headroom" would refuse fewer refunds; "oldest provider intent"
+// would reconcile more naturally against a statement. Either would be a
+// different rule, not a better tie-break, and neither is chosen here.
+describe('which gateway charge a refund posts against, when two are tied', () => {
+  // Two gateway charges on one order are built directly, and the reason is
+  // itself a finding worth recording. refundLegs supports the state explicitly
+  // ("two intents on one order are two distinct charges") but the write paths
+  // cannot currently reach it: the intent route always opens for the FULL
+  // remaining due, and applyGatewayEvent refuses a capture that is not exactly
+  // the intent's amount and refuses any capture beyond the amount due. So no
+  // sequence of routes and webhooks produces two partial gateway charges. The
+  // rows are therefore constructed at the database, and the REFUND is then
+  // driven entirely through the real route — which is the code under test.
+  const twoTiedGatewayCharges = async () => {
+    const order = await billedOrder();
+    const half = order.totalPaise / 2;
+    expect(Number.isInteger(half)).toBe(true);
+
+    const cashier = await prisma.posUser.findFirstOrThrow({ where: { email: 'cashier.z@test.local' } });
+    const mkLeg = async (payRef) => {
+      const intent = await prisma.paymentIntent.create({
+        data: {
+          orderId: order.id, provider: 'razorpay', providerRef: nextId('order_'),
+          amount: (half / 100).toFixed(2), currency: 'INR', status: 'SUCCEEDED',
+          idempotencyKey: crypto.randomUUID(), createdById: cashier.id,
+        },
+      });
+      return prisma.payment.create({
+        data: {
+          orderId: order.id, branchId, method: 'UPI', channel: 'GATEWAY',
+          amount: (half / 100).toFixed(2), intentId: intent.id, providerRef: payRef,
+        },
+      });
+    };
+
+    // Inserted first, and given the HIGHER id below, so insertion order and
+    // ascending id disagree. Without that the two are the same sequence — cuid
+    // is time-prefixed — and this test would pass with no tie-break at all,
+    // which is the false green the VC-103 test notes ran into.
+    const firstInserted = await mkLeg(nextId('pay_'));
+    const secondInserted = await mkLeg(nextId('pay_'));
+    await prisma.order.update({ where: { id: order.id }, data: { status: 'PAID' } });
+    return { order, half, firstInserted, secondInserted };
+  };
+
+  // One instant for both rows, as a single transaction would have produced, and
+  // ids chosen by the caller. Nothing FK-references Payment.id, so rewriting it
+  // rearranges nothing else.
+  const TIE = new Date('2026-09-24T12:00:00.000Z');
+  let tiePair = 0;
+  const tieAndRewrite = async (lowRow, highRow) => {
+    // Payment.id is unique across the table, so the pair is numbered — two tests
+    // in this file tie their own rows and would otherwise collide on the second.
+    // The number is shared by the pair, so 'a' before 'z' is what decides the
+    // sort, exactly as the literal names did.
+    const k = String(++tiePair).padStart(2, '0');
+    // High first. An UPDATE writes a new row version at the end of the heap, so
+    // the rewrite sequence becomes the physical order and an unordered read
+    // follows it — doing low first would line the heap up with ascending id and
+    // hide a missing ORDER BY.
+    await prisma.payment.update({ where: { id: highRow.id }, data: { id: `zz-tie-${k}-z-second`, createdAt: TIE } });
+    await prisma.payment.update({ where: { id: lowRow.id }, data: { id: `zz-tie-${k}-a-first`, createdAt: TIE } });
+    const rows = await prisma.payment.findMany({
+      where: { orderId: lowRow.orderId }, orderBy: { id: 'asc' },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0].createdAt.getTime()).toBe(rows[1].createdAt.getTime());
+    return { low: rows[0], high: rows[1] };
+  };
+
+  // Answers whatever charge it is asked about, so the CALL is the evidence
+  // rather than a queued expectation that would decide the answer in advance.
+  const echoRefunds = (amountPaise) => {
+    fallback = ({ path }) => {
+      const charge = path.split('/')[3];
+      return { status: 200, body: refundBody(amountPaise, nextId('rfnd_'), charge) };
+    };
+  };
+  const chargesCalled = () =>
+    calls.filter((c) => /\/refund$/.test(c.path)).map((c) => c.path.split('/')[3]);
+
+  it('posts against the charge the declared order names, and the un-named charge is never called', async () => {
+    const { order, half, firstInserted, secondInserted } = await twoTiedGatewayCharges();
+    // secondInserted gets the LOW id: the declared winner is the row that went
+    // in SECOND, so a pass cannot be insertion order in disguise.
+    const { low, high } = await tieAndRewrite(secondInserted, firstInserted);
+    expect(low.providerRef).toBe(secondInserted.providerRef);
+    expect(high.providerRef).toBe(firstInserted.providerRef);
+
+    // Half of one leg, so BOTH legs have the headroom and the tie is what
+    // decides. An amount only one leg could cover would be answered by
+    // arithmetic and prove nothing about ordering.
+    const amountPaise = half / 2;
+    expect(amountPaise).toBeLessThanOrEqual(half);
+    echoRefunds(amountPaise);
+
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: amountPaise / 100, reason: 'tied charges' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(201);
+
+    // THE SELECTED PROVIDER PAYMENT REFERENCE, read off the wire rather than
+    // inferred: this is the pay_… id in the URL the adapter posted to.
+    expect(chargesCalled()).toEqual([low.providerRef]);
+    expect(chargesCalled()).not.toContain(high.providerRef);
+
+    // The refund is attributed to that charge's intent in our own records too,
+    // so the row and the wire agree about which charge is being returned.
+    const row = await refundOf(order.id);
+    expect(row.intentId).toBe(low.intentId);
+    expect(row.channel).toBe('GATEWAY');
+
+    // UNCHANGED AMOUNT AND CAPS. A tie-break may reorder rows; it must not
+    // revalue them. Asserted on the money, not on the labels.
+    expect(Math.round(Number(row.amount) * 100)).toBe(amountPaise);
+    const after = await request(app).get(`/api/orders/${order.id}`).set(auth(tokens.owner));
+    expect(after.status).toBe(200);
+    expect(Math.round(after.body.order.amountPaid * 100)).toBe(order.totalPaise);
+    expect(after.body.order.amountDue).toBe(0);
+    expect(after.body.order.status).toBe('PAID'); // a PENDING gateway refund returns nothing yet
+    const collected = await prisma.payment.aggregate({ where: { orderId: order.id }, _sum: { amount: true } });
+    expect(Math.round(Number(collected._sum.amount) * 100)).toBe(order.totalPaise);
+
+    // The cap moved by exactly the amount reserved, on the selected leg only.
+    // Proved through the route's own refusal message, which quotes
+    // largestRefundablePaise — so this reads the real cap, not a re-derivation.
+    echoRefunds(order.totalPaise);
+    const tooBig = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: (half + 1) / 100, reason: 'more than one leg holds' });
+    expect(tooBig.status, JSON.stringify(tooBig.body)).toBe(400);
+    // The untouched leg still holds its full half; the selected one is down by
+    // the reservation. So the largest single-leg refund is still that full half.
+    expect(tooBig.body.error.message).toContain(`₹${(half / 100).toFixed(2)}`);
+    expect(chargesCalled()).toEqual([low.providerRef]); // refused before any second call
+  }, 20000);
+
+  // NEGATIVE CONTROL. Same fixture, ids the other way round. If the assertion
+  // above were passing on something incidental — heap order, intent creation
+  // order, which row the planner likes — this would post against the same
+  // charge and fail. It has to follow the ids to be green.
+  it('follows the declared order when the ids are the other way round', async () => {
+    const { order, half, firstInserted, secondInserted } = await twoTiedGatewayCharges();
+    const { low, high } = await tieAndRewrite(firstInserted, secondInserted);
+    expect(low.providerRef).toBe(firstInserted.providerRef);
+
+    const amountPaise = half / 2;
+    echoRefunds(amountPaise);
+    const raised = await request(app).post(`/api/orders/${order.id}/refunds`).set(auth(tokens.owner))
+      .send({ amount: amountPaise / 100, reason: 'tied charges, reversed' });
+    expect(raised.status, JSON.stringify(raised.body)).toBe(201);
+
+    expect(chargesCalled()).toEqual([low.providerRef]);
+    expect(chargesCalled()).not.toContain(high.providerRef);
+    expect(Math.round(Number((await refundOf(order.id)).amount) * 100)).toBe(amountPaise);
+  }, 20000);
+
+  // The behavioural tests above can only be as good as the planner's whim on
+  // the day: with the ORDER BY gone they may still come back in ascending id
+  // and go green on broken code. This one cannot. Drop the tie-break from the
+  // include the refund route reads and it fails on the next run, whatever
+  // Postgres decides — the same reason printJobs.test.js asserts
+  // ORDER_INCLUDE's declaration next to its behavioural test.
+  it('the refund route reads payments through a declared tie-break, not a bare select', async () => {
+    const { REFUND_PAYMENT_INCLUDE, ORDER_INCLUDE } = await import('../src/lib/orders.js');
+    const tieBroken = [{ createdAt: 'asc' }, { id: 'asc' }];
+    expect(REFUND_PAYMENT_INCLUDE.orderBy).toEqual(tieBroken);
+    // The same rule as the reader that prints the tenders, so a receipt and a
+    // refund can never disagree about which charge came first.
+    expect(ORDER_INCLUDE.payments.orderBy).toEqual(tieBroken);
+    // And it still carries what a leg needs: without providerRef the refund has
+    // no charge to post to, and the orderBy would be decorating nothing.
+    expect(REFUND_PAYMENT_INCLUDE.select.providerRef).toBe(true);
+    expect(REFUND_PAYMENT_INCLUDE.select.intent.select.providerRef).toBe(true);
   });
 });
