@@ -46,6 +46,13 @@ figure here describes code that is no longer in the tree.
 Every figure in §6 was measured after the merge, not on the pre-merge lane
 commit.
 
+**Those four paths are now committed as `b0b1e17`**, so the tree every figure
+below was measured on is a commit that can be checked out rather than a
+description of somebody's working directory — `git show --stat b0b1e17` lists
+exactly the four. The only change made after `b0b1e17` is this paragraph, which
+names it: a document cannot contain the hash of the commit that introduces it,
+so the sequence is two commits and this is the second.
+
 ### Files
 
 New, backend (5,786 lines):
