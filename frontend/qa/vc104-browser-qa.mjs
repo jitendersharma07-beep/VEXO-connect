@@ -78,19 +78,35 @@ const skip = (name, why) => {
 //
 // The tree stamp answers the other half: not "is this file complete" but
 // "which checkout produced it". See qa/tree-stamp.mjs and D-4.
+// `total` below is "checks that RAN", not "checks this harness contains", so an
+// abort silently shrinks the denominator and the artifact still reads as a clean
+// pass. That is not hypothetical either: the 2026-09-25 01:25 run died on a
+// navigation timeout and wrote `70/70 passed`, having never reached the last 5
+// checks. run-all.sh caught it on the exit code, but anyone reading
+// results-vc104.json on its own would have seen a pass. So the artifact now
+// carries whether the run finished, and says so in words.
 let resultsWritten = false;
-const writeResults = () => {
+let reachedEnd = false;
+const writeResults = (code = 0) => {
   if (resultsWritten) return;
   resultsWritten = true;
   const passed = results.filter((r) => r.pass).length;
   const skipped = results.filter((r) => r.skipped).length;
+  const aborted = !reachedEnd;
   const tree = treeStamp(import.meta.url);
   writeFileSync(join(OUT, 'results-vc104.json'), JSON.stringify({
     ui: UI, api: API, at: new Date().toISOString(), ...tree,
     runtime: runtimeStamp(API, tree.tree),
+    // aborted=true means the numbers below are a PARTIAL run and the suite's
+    // real verdict is unknown -- not that 'total' checks passed.
+    aborted, exitCode: code,
     passed, skipped, total: results.length, results,
   }, null, 2));
-  console.log(`\n${passed}/${results.length} browser checks passed (${skipped} skipped)`);
+  console.log(
+    aborted
+      ? `\nABORTED after ${results.length} checks (${passed} passed, ${skipped} skipped) — the run did not finish, so this is NOT a pass`
+      : `\n${passed}/${results.length} browser checks passed (${skipped} skipped)`,
+  );
 };
 process.on('exit', writeResults);
 
@@ -102,6 +118,21 @@ const inr = (v) =>
     : `₹${Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every wait budget in this file is written as the time the UI *ought* to need
+// on an idle box, then multiplied by this factor for the box we actually have.
+// One knob, so the budgets cannot drift apart again: QA_SLOW_FACTOR=1 restores
+// the original literals exactly.
+//
+// Why 4. On 2026-09-25 at 01:44 the reject POST was answered
+// `statusCode: 200, responseTime: 24806` (`/tmp/vcx-qa-20260925-014447/
+// vc104-backend.log`) -- the feature worked, the host took 24.8 s to say so --
+// while the wait for "Rejected by" allowed 10 s. That is not a marginal miss;
+// the budget was under half the observed server time, so it was measuring the
+// host's load and nothing else. 4x puts the smallest budget here (5 s -> 20 s)
+// near that observed figure and the largest at 60 s.
+const SLOW = Number(process.env.QA_SLOW_FACTOR || 4);
+const budget = (base) => Math.round(base * SLOW);
 
 const browser = await puppeteer.launch({
   executablePath: CHROME,
@@ -115,6 +146,32 @@ const newPage = async () => {
   // owner's session and pass for the wrong reason (VC-105 QA defect).
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
+  // Puppeteer's 30 s navigation default is a clock on a SHARED box, and this
+  // harness drives a vite DEV server (compile-on-request) rather than a built
+  // bundle. Measured, not predicted: the 2026-09-25 01:25 run died at
+  // `cash.goto('/phone-orders')` with "Navigation timeout of 30000 ms exceeded"
+  // at 1-minute/5-minute load average 33/77 on 12 cores -- peers' vitest suites
+  // -- after 70 of 75 checks had already PASSED. The identical run at load
+  // 29/73 was 75/75. So the 30 s budget was measuring the host, and losing the
+  // last 5 checks to it is a silent hole: the crash lands AFTER the results
+  // writer, so the artifact reads "70/70 passed" and looks like a pass.
+  //
+  // Raising these cannot hide a defect, which is the only reason it is
+  // legitimate. Every check downstream of a wait asserts on page CONTENT: if the
+  // cashier guard broke, `landedOn` still contains 'phone-orders' and the check
+  // fails in about a second; if a reject stopped working, the wait for
+  // "Rejected by" still expires, just later. A timeout is the one failure these
+  // checks cannot produce from a real regression -- exactly the argument used
+  // for RACE_TIMEOUT_MS in backend/tests/catalogModifiers.test.js. What it costs
+  // is wall-clock on a genuine break, not detection.
+  //
+  // setDefaultTimeout covers waitForSelector/waitForFunction calls that pass no
+  // timeout of their own; the ones that DO pass one are scaled individually by
+  // budget(), because an explicit option always wins over the default. Fixing
+  // only the navigation default was not enough: the 01:44 run cleared every
+  // goto() and then died on a hardcoded 10 s wait at the reject step.
+  page.setDefaultNavigationTimeout(budget(30_000));
+  page.setDefaultTimeout(budget(10_000));
   await page.setViewport({ width: 1440, height: 1000 });
   if (process.env.QA_DEBUG) {
     page.on('console', (m) => console.log('  [console]', m.type(), m.text().slice(0, 200)));
@@ -142,7 +199,7 @@ const login = async (page, email) => {
   if (typed !== email) throw new Error(`login form did not accept input (got "${typed}")`);
   await page.click('button[type="submit"]');
   try {
-    await page.waitForFunction(() => !window.location.pathname.endsWith('/login'), { timeout: 15000 });
+    await page.waitForFunction(() => !window.location.pathname.endsWith('/login'), { timeout: budget(15000) });
   } catch {
     const onScreen = await page.evaluate(() => document.body.innerText).catch(() => '');
     await page.screenshot({ path: join(OUT, `login-failed-${email.split('@')[0]}.png`) }).catch(() => {});
@@ -188,7 +245,7 @@ const pickCaller = async (page, term, fullName) => {
   await page.type('input[placeholder*="Search by name"]', term, { delay: 15 });
   await page.waitForFunction(
     (name) => [...document.querySelectorAll('button')].some((b) => b.innerText.includes(name)),
-    { timeout: 8000 },
+    { timeout: budget(8000) },
     fullName,
   );
   await page.evaluate((name) => {
@@ -196,7 +253,7 @@ const pickCaller = async (page, term, fullName) => {
   }, fullName);
   await page.waitForFunction(
     (name) => document.body.innerText.includes(name) && [...document.querySelectorAll('button')].some((b) => b.innerText.includes('Change caller')),
-    { timeout: 8000 },
+    { timeout: budget(8000) },
     fullName,
   );
   await sleep(300);
@@ -210,7 +267,7 @@ const pickCaller = async (page, term, fullName) => {
 const addItems = async (page, names) => {
   await page.waitForFunction(
     () => [...document.querySelectorAll('button')].filter((b) => (b.getAttribute('aria-label') || '').startsWith('Add ')).length > 0,
-    { timeout: 10000 },
+    { timeout: budget(10000) },
   );
   for (const name of names) {
     const clicked = await page.evaluate((n) => {
@@ -225,7 +282,7 @@ const addItems = async (page, names) => {
 
 const checkStores = async (page) => {
   await page.click('[data-testid="po-check-stores"]');
-  await page.waitForSelector('[data-testid="po-options"]', { visible: true, timeout: 10000 });
+  await page.waitForSelector('[data-testid="po-options"]', { visible: true, timeout: budget(10000) });
   await sleep(300);
   return page.$$eval('[data-testid="po-options"] > label', (els) =>
     els.map((el) => ({
@@ -324,7 +381,7 @@ owner.on('response', onRes);
 
 await selectStore(owner, 'BSC-CP');
 await owner.click('[data-testid="po-submit"]');
-await owner.waitForSelector('[data-testid="po-success"]', { visible: true, timeout: 15000 });
+await owner.waitForSelector('[data-testid="po-success"]', { visible: true, timeout: budget(15000) });
 await sleep(400);
 owner.off('request', onReq);
 owner.off('response', onRes);
@@ -390,7 +447,7 @@ owner.on('request', onReq2);
 owner.on('response', onRes2);
 await selectStore(owner, 'BSC-CP');
 await owner.click('[data-testid="po-submit"]');
-await owner.waitForSelector('[data-testid="po-success"]', { visible: true, timeout: 15000 });
+await owner.waitForSelector('[data-testid="po-success"]', { visible: true, timeout: budget(15000) });
 owner.off('request', onReq2);
 owner.off('response', onRes2);
 const po2 = submitRes2?.json?.phoneOrder ?? null;
@@ -413,11 +470,11 @@ await owner.type('#nc-phone', '+919876500011'); // Anita's seeded number
 await owner.evaluate(() => {
   [...document.querySelectorAll('button')].find((b) => b.innerText.includes('Save caller'))?.click();
 });
-await owner.waitForSelector('[data-testid="po-open-duplicate"]', { visible: true, timeout: 8000 });
+await owner.waitForSelector('[data-testid="po-open-duplicate"]', { visible: true, timeout: budget(8000) });
 check('a 409 duplicate offers to open the existing caller', true, true, '§5.2: POS_CONFLICT carries details.customerId');
 await shot(owner, '06-duplicate-caller');
 await owner.click('[data-testid="po-open-duplicate"]');
-await owner.waitForFunction(() => document.body.innerText.includes('Anita Rao'), { timeout: 8000 });
+await owner.waitForFunction(() => document.body.innerText.includes('Anita Rao'), { timeout: budget(8000) });
 check('opening the duplicate lands on Anita Rao', true, true);
 
 // --- 6. Out-of-area: Dev Menon (122001) — CP refuses, with reasons shown ----
@@ -451,7 +508,7 @@ await owner.evaluate((ref) => {
     if (tr.innerText.includes(ref)) { tr.click(); return; }
   }
 }, po1.reference);
-await owner.waitForSelector('[data-testid="po-detail"]', { visible: true, timeout: 8000 });
+await owner.waitForSelector('[data-testid="po-detail"]', { visible: true, timeout: budget(8000) });
 await sleep(600);
 const detailText = await owner.$eval('[data-testid="po-detail"]', (el) => el.innerText.replace(/\s+/g, ' '));
 check('detail shows the caller fetched by id', /Anita Rao/.test(detailText), true);
@@ -469,7 +526,7 @@ if (MANAGER) {
   await login(mgr, MANAGER);
   check('manager nav offers Phone orders', /Phone orders/.test(await navText(mgr)), true);
   await mgr.goto(`${UI}/phone-orders?open=${po1.id}`, { waitUntil: 'networkidle0' });
-  await mgr.waitForSelector('[data-testid="po-accept"]', { visible: true, timeout: 8000 });
+  await mgr.waitForSelector('[data-testid="po-accept"]', { visible: true, timeout: budget(8000) });
 
   // The owner's card still shows SUBMITTED (deliberately stale) with its own
   // Accept button. The manager decides first; the owner's click must then be
@@ -477,7 +534,7 @@ if (MANAGER) {
   await mgr.click('[data-testid="po-accept"]');
   await mgr.waitForFunction(
     () => document.querySelector('[data-testid="po-detail"]')?.innerText.includes('Accepted by'),
-    { timeout: 10000 },
+    { timeout: budget(10000) },
   );
   const mgrDetail = await mgr.$eval('[data-testid="po-detail"]', (el) => el.innerText.replace(/\s+/g, ' '));
   check('manager acceptance shows the decider BY NAME', /Accepted by/.test(mgrDetail), true, '§9: attribution is snapshotted names');
@@ -493,7 +550,7 @@ if (MANAGER) {
     `server 409 POS_PHONE_ORDER_ALREADY_DECIDED surfaced as a toast: ${JSON.stringify(toasts)}`);
   await owner.waitForFunction(
     () => document.querySelector('[data-testid="po-detail"]')?.innerText.includes('Accepted by'),
-    { timeout: 10000 },
+    { timeout: budget(10000) },
   );
   const ownerDetailNow = await owner.$eval('[data-testid="po-detail"]', (el) => el.innerText.replace(/\s+/g, ' '));
   check('after the refusal the owner sees the real decision', /Accepted by/.test(ownerDetailNow), true);
@@ -506,7 +563,7 @@ if (MANAGER) {
 // --- 9. Reject with a reason (manager), then owner moves the order ----------
 if (MANAGER) {
   await mgr.goto(`${UI}/phone-orders?open=${po2.id}`, { waitUntil: 'networkidle0' });
-  await mgr.waitForSelector('[data-testid="po-reject"]', { visible: true, timeout: 8000 });
+  await mgr.waitForSelector('[data-testid="po-reject"]', { visible: true, timeout: budget(8000) });
   await mgr.click('[data-testid="po-reject"]');
   await mgr.waitForSelector('#reason-field', { visible: true });
   await mgr.type('#reason-field', 'QA: kitchen cannot take this one');
@@ -515,7 +572,7 @@ if (MANAGER) {
   });
   await mgr.waitForFunction(
     () => document.querySelector('[data-testid="po-detail"]')?.innerText.includes('Rejected by'),
-    { timeout: 10000 },
+    { timeout: budget(10000) },
   );
   const rejText = await mgr.$eval('[data-testid="po-detail"]', (el) => el.innerText.replace(/\s+/g, ' '));
   check('rejection shows decider name and the typed reason', /Rejected by/.test(rejText) && /kitchen cannot take this one/.test(rejText), true);
@@ -526,13 +583,13 @@ if (MANAGER) {
 
 // Owner reassigns the rejected order to Cyber Hub — the quote must change.
 await owner.goto(`${UI}/phone-orders?open=${po2.id}`, { waitUntil: 'networkidle0' });
-await owner.waitForSelector('[data-testid="po-detail"]', { visible: true, timeout: 8000 });
+await owner.waitForSelector('[data-testid="po-detail"]', { visible: true, timeout: budget(8000) });
 await sleep(500);
 const moveBtn = await owner.$('[data-testid="po-move"]');
 check('owner is offered the move on a REJECTED order', Boolean(moveBtn), true, 'reassign is owner-only (rolesFor phone.order.reassign)');
 if (moveBtn && chOpen) {
   await owner.click('[data-testid="po-move"]');
-  await owner.waitForSelector('[data-testid="mv-option-BSC-CH"]', { visible: true, timeout: 10000 });
+  await owner.waitForSelector('[data-testid="mv-option-BSC-CH"]', { visible: true, timeout: budget(10000) });
   const currentBadge = await owner.$eval('[data-testid="mv-option-BSC-CP"]', (el) => el.innerText);
   check('the routed store is badged Current store and not selectable', /Current store/.test(currentBadge), true);
   const modalNote = await owner.evaluate(() => document.body.innerText);
@@ -547,7 +604,7 @@ if (moveBtn && chOpen) {
   // Caught, not naked: a missing banner must record a FAIL and let the rest of
   // the evidence run, not crash the harness (defect D-1 hid behind that crash).
   const bannerEl = await owner
-    .waitForSelector('[data-testid="po-move-banner"]', { visible: true, timeout: 12000 })
+    .waitForSelector('[data-testid="po-move-banner"]', { visible: true, timeout: budget(12000) })
     .catch(() => null);
   check('the re-price banner appears after the move', Boolean(bannerEl), true,
     'server priceChanged OR a payableQuote drift must raise it — the operator re-reads the quote');
@@ -619,7 +676,7 @@ const scheduleAt = async (page, t) => {
   await page.evaluate(() => {
     [...document.querySelectorAll('button')].find((b) => b.innerText.includes('Schedule for later'))?.click();
   });
-  await page.waitForSelector('input[type="datetime-local"]', { visible: true, timeout: 5000 });
+  await page.waitForSelector('input[type="datetime-local"]', { visible: true, timeout: budget(5000) });
   const pad = (n) => String(n).padStart(2, '0');
   const local = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
   await page.evaluate((v) => {
@@ -632,7 +689,7 @@ const scheduleAt = async (page, t) => {
   // React state proof, not DOM proof: in LATER mode the check button stays
   // disabled until scheduledLocal lands, so an enabled button IS the receipt.
   return page
-    .waitForFunction(() => !document.querySelector('[data-testid="po-check-stores"]')?.disabled, { timeout: 5000 })
+    .waitForFunction(() => !document.querySelector('[data-testid="po-check-stores"]')?.disabled, { timeout: budget(5000) })
     .then(() => true)
     .catch(() => false);
 };
@@ -652,7 +709,7 @@ if (chOpen) {
     if (!chRowNow?.available) { fillerProblem = `filler ${nth} refused: ${chRowNow?.text ?? 'no CH row'}`; break; }
     await selectStore(owner, 'BSC-CH');
     await owner.click('[data-testid="po-submit"]');
-    await owner.waitForSelector('[data-testid="po-success"]', { visible: true, timeout: 15000 });
+    await owner.waitForSelector('[data-testid="po-success"]', { visible: true, timeout: budget(15000) });
   }
   if (fillerProblem) {
     check('both scheduled fillers were accepted into the slot', fillerProblem, 'both accepted',
@@ -742,7 +799,7 @@ if (chOpen) {
           await selectStore(owner, 'BSC-CH');
           await owner.click('[data-testid="po-submit"]');
           const ok = await owner
-            .waitForSelector('[data-testid="po-success"]', { visible: true, timeout: 15000 })
+            .waitForSelector('[data-testid="po-success"]', { visible: true, timeout: budget(15000) })
             .then(() => true)
             .catch(() => false);
           if (!ok) { fillProblem = `an ASAP submission to CH was not accepted at ${seen}/${cap}`; break; }
@@ -819,5 +876,8 @@ await shot(owner, '18-responsive-entry-390');
 if (MANAGER) await mgr.close();
 await browser.close();
 
+// Every check has now been attempted. Anything that throws before this line
+// leaves reachedEnd false and stamps the artifact `aborted: true`.
+reachedEnd = true;
 writeResults();
 process.exit(results.every((r) => r.pass) ? 0 : 1);

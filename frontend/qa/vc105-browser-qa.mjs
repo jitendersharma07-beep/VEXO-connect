@@ -35,6 +35,15 @@ if (!PASSWORD || !OWNER || !CHROME) {
 }
 mkdirSync(OUT, { recursive: true });
 
+// Wait budgets are written as the time the UI ought to need on an idle box and
+// multiplied by this factor for the box we actually have; QA_SLOW_FACTOR=1
+// restores the original literals. Same knob, same default and same reasoning as
+// vc104-browser-qa.mjs — deliberately duplicated rather than shared, because
+// these two harnesses have no common module and one importing the other would
+// couple their lifecycles.
+const SLOW = Number(process.env.QA_SLOW_FACTOR || 4);
+const budget = (base) => Math.round(base * SLOW);
+
 const results = [];
 const check = (name, actual, expected, note = '') => {
   const pass = JSON.stringify(actual) === JSON.stringify(expected);
@@ -42,6 +51,50 @@ const check = (name, actual, expected, note = '') => {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}${pass ? '' : `\n        expected ${JSON.stringify(expected)}\n        actual   ${JSON.stringify(actual)}`}`);
   return pass;
 };
+
+// Lane-specific filename: a406 consolidation put this harness alongside
+// vc104-browser-qa.mjs in the same directory, both defaulting to a plain
+// results.json. Whichever ran second silently destroyed the other lane's
+// evidence, and the survivor still looked like a complete, passing run.
+// `at` is recorded so a stale file cannot pass for a fresh one, and the tree
+// stamp so a file produced in a LANE cannot pass for this tree's evidence.
+// That is D-4: this exact file, 48/48 and green, reached main as a merge
+// resolution and was evidence about a tree with no VC-104 in it. See
+// qa/tree-stamp.mjs and docs/VC104-BACKEND-DEFECTS.md.
+//
+// Written from an exit handler rather than straight-line at the end of the file,
+// which is where it used to live. Straight-line meant an abort wrote NOTHING and
+// left the PREVIOUS run's file sitting there — still saying 48/48, still green,
+// with only `at` to give it away. run-all.sh catches that on the exit code, but
+// the artifact read on its own does not, and `at` only helps someone who thinks
+// to check it. The VC-104 harness had the same hole in a louder form (it wrote a
+// shrunken denominator that read as a clean pass: the 2026-09-25 01:25 run
+// printed "70/70 passed" having reached 70 of 75 checks, and the 01:44 run
+// "50/50"). Neither has bitten here yet — this harness was 48/48 on the very run
+// that killed VC-104 — so this half is pre-emptive, and symmetric on purpose.
+let resultsWritten = false;
+let reachedEnd = false;
+const writeResults = (code = 0) => {
+  if (resultsWritten) return;
+  resultsWritten = true;
+  const passed = results.filter((r) => r.pass).length;
+  const aborted = !reachedEnd;
+  const tree = treeStamp(import.meta.url);
+  writeFileSync(join(OUT, 'results-vc105.json'), JSON.stringify({
+    ui: UI, api: API, at: new Date().toISOString(), ...tree,
+    runtime: runtimeStamp(API, tree.tree),
+    // aborted=true means the numbers below are a PARTIAL run and the suite's
+    // real verdict is unknown — not that 'total' checks passed.
+    aborted, exitCode: code,
+    passed, total: results.length, results,
+  }, null, 2));
+  console.log(
+    aborted
+      ? `\nABORTED after ${results.length} checks (${passed} passed) — the run did not finish, so this is NOT a pass`
+      : `\n${passed}/${results.length} browser checks passed`,
+  );
+};
+process.on('exit', writeResults);
 
 const browser = await puppeteer.launch({
   executablePath: CHROME,
@@ -55,6 +108,15 @@ const newPage = async () => {
   // owner's session and pass for the wrong reason.
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
+  // Same shared-box clock problem the VC-104 harness hit twice on 2026-09-25
+  // (see the comment above budget() in vc104-browser-qa.mjs for the two
+  // measurements). This harness has not failed that way yet -- it was 48/48 on
+  // the very run that killed VC-104 -- so this is pre-emptive rather than a fix
+  // for an observed break. It drives the same vite dev server on the same box,
+  // and its checks are content assertions too, so the budget can only ever cost
+  // wall-clock here, never hide a regression.
+  page.setDefaultNavigationTimeout(budget(30_000));
+  page.setDefaultTimeout(budget(10_000));
   await page.setViewport({ width: 1440, height: 1000 });
   // A harness that fails silently wastes more time than no harness: surface
   // what the page actually did whenever QA_DEBUG is set.
@@ -87,7 +149,7 @@ const login = async (page, email) => {
 
   await page.click('button[type="submit"]');
   try {
-    await page.waitForFunction(() => !window.location.pathname.endsWith('/login'), { timeout: 15000 });
+    await page.waitForFunction(() => !window.location.pathname.endsWith('/login'), { timeout: budget(15000) });
   } catch {
     const onScreen = await page.evaluate(() => document.body.innerText).catch(() => '');
     await page.screenshot({ path: join(OUT, `login-failed-${email.split('@')[0]}.png`) }).catch(() => {});
@@ -366,17 +428,8 @@ const dupes = Object.entries(
 check('every screenshot is a distinct image', dupes, [],
   `${digests.length} screenshots captured`);
 
-const passed = results.filter((r) => r.pass).length;
-// Lane-specific filename: a406 consolidation put this harness alongside
-// vc104-browser-qa.mjs in the same directory, both defaulting to a plain
-// results.json. Whichever ran second silently destroyed the other lane's
-// evidence, and the survivor still looked like a complete, passing run.
-// `at` is recorded so a stale file cannot pass for a fresh one, and the tree
-// stamp so a file produced in a LANE cannot pass for this tree's evidence.
-// That is D-4: this exact file, 48/48 and green, reached main as a merge
-// resolution and was evidence about a tree with no VC-104 in it. See
-// qa/tree-stamp.mjs and docs/VC104-BACKEND-DEFECTS.md.
-const tree = treeStamp(import.meta.url);
-writeFileSync(join(OUT, 'results-vc105.json'), JSON.stringify({ ui: UI, api: API, at: new Date().toISOString(), ...tree, runtime: runtimeStamp(API, tree.tree), passed, total: results.length, results }, null, 2));
-console.log(`\n${passed}/${results.length} browser checks passed`);
-process.exit(passed === results.length ? 0 : 1);
+// Every check has now been attempted. Anything that throws before this line
+// leaves reachedEnd false and stamps the artifact `aborted: true`.
+reachedEnd = true;
+writeResults();
+process.exit(results.every((r) => r.pass) ? 0 : 1);

@@ -1,19 +1,21 @@
 {
   "ui": "http://127.0.0.1:5383",
   "api": "http://127.0.0.1:5382",
-  "at": "2026-09-24T19:45:04.892Z",
+  "at": "2026-09-25T02:03:06.738Z",
   "tree": "/home/atc-noc/vexo-connect-x-lanes/w2-close",
   "branch": "x/w2-integration-close",
-  "baseSha": "66353698dad32060b03af94965766e9b0e4f39e1",
+  "baseSha": "71315d442c60541b91ae9bdf716bb44610f87eb6",
   "dirty": true,
-  "contentSha": "34e5e8da4f0589ec73e714e7af0e6cbed6cd2326",
+  "contentSha": "f0068313f8ad4fb510e7fbd3fc30e8a99a6a11b6",
   "runtime": {
     "backendCwd": "/home/atc-noc/vexo-connect-x-lanes/w2-close/backend",
     "backendInTree": true,
     "database": "atc_pos_vc104ui_demo",
-    "schemaDigest": "786fe58e8477",
-    "migrationsOnDisk": 21
+    "schemaDigest": "a4215343d532",
+    "migrationsOnDisk": 22
   },
+  "aborted": false,
+  "exitCode": 0,
   "passed": 75,
   "skipped": 0,
   "total": 75,
@@ -199,8 +201,8 @@
     {
       "name": "the replay returns the SAME order id",
       "pass": true,
-      "actual": "cmufxx7mp000byuut38ey7fhu",
-      "expected": "cmufxx7mp000byuut38ey7fhu",
+      "actual": "cmugbewsj000bt1sa7gxqq7mc",
+      "expected": "cmugbewsj000bt1sa7gxqq7mc",
       "note": ""
     },
     {
