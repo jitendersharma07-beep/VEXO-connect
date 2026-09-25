@@ -1,0 +1,461 @@
+{
+  "at": "2026-09-25T04:07:41.358Z",
+  "ui": "http://127.0.0.1:5188",
+  "api": "http://127.0.0.1:5560/api",
+  "results": [
+    {
+      "name": "1.0 the harness can ask the API as the same session the browser holds",
+      "pass": true,
+      "detail": "HTTP 200, 5 store rows, net 43169240 paise"
+    },
+    {
+      "name": "1.1 all eight headline figures are on the screen",
+      "pass": true,
+      "detail": "netSales, collected, orders, aov, dues, refunds, discounts, tax"
+    },
+    {
+      "name": "1.2 the net sales tile shows the figure the API computed",
+      "pass": true,
+      "detail": "screen \"NET SALES (EXCL. TAX) ₹4,31,692.40 -21.93% invoiced ₹4,53,277.01\" vs api ₹431692 (43169240 paise)"
+    },
+    {
+      "name": "1.3 the location comparison table renders one row per store in scope",
+      "pass": true,
+      "detail": "screen 5 rows vs api 5"
+    },
+    {
+      "name": "1.4 the table header is the API's column list, in order",
+      "pass": true,
+      "detail": "screen: #, STORE, NET SALES, SHARE… | api: #, Store, Net sales, Share…"
+    },
+    {
+      "name": "1.5 the table carries a consolidated total row",
+      "pass": true,
+      "detail": "total row: Company total |  | ₹4,31,692.40"
+    },
+    {
+      "name": "1.6 every store the API returned is named on the screen",
+      "pass": true,
+      "detail": "5 stores: Lower Parel, Cyber Hub, Connaught Place, Bandra West, New Town (opening soon)"
+    },
+    {
+      "name": "1.7 the dashboard names what it cannot show, instead of showing zero",
+      "pass": true,
+      "detail": "35 lines, e.g. \"These are absent rather than zero. A zero food cost or a zero wastage figure would be acte\""
+    },
+    {
+      "name": "1.8 no wastage or food-cost figure is rendered as a zero",
+      "pass": true,
+      "detail": "no zero-valued absent metric on screen"
+    },
+    {
+      "name": "1.9 nothing on the dashboard overflows its container",
+      "pass": true,
+      "detail": "no horizontal overflow"
+    },
+    {
+      "name": "1.10 the dashboard rendered with no console or page errors",
+      "pass": true,
+      "detail": "clean"
+    },
+    {
+      "name": "2.TODAY the Today view states its own window and matches the API row count",
+      "pass": true,
+      "detail": "stamp \"Today 2026-09-25 → 2026-09-25 Asia/Kolkata Week starts Monday In progress — not a full period as at 25/9/2026,\" — 1 rows vs api 1"
+    },
+    {
+      "name": "2.THIS_WEEK the This Week view states its own window and matches the API row count",
+      "pass": true,
+      "detail": "stamp \"This week 2026-09-21 → 2026-09-27 Asia/Kolkata Week starts Monday In progress — not a full period as at 25/9/2\" — 7 rows vs api 7"
+    },
+    {
+      "name": "2.THIS_MONTH the This Month view states its own window and matches the API row count",
+      "pass": true,
+      "detail": "stamp \"This month 2026-09-01 → 2026-09-30 Asia/Kolkata Week starts Monday In progress — not a full period as at 25/9/\" — 30 rows vs api 30"
+    },
+    {
+      "name": "2.LAST_MONTH the Last Month view states its own window and matches the API row count",
+      "pass": true,
+      "detail": "stamp \"Last month 2026-08-01 → 2026-08-31 Asia/Kolkata Week starts Monday as at 25/9/2026, 4:06:27 am\" — 31 rows vs api 31"
+    },
+    {
+      "name": "2.5 the four presets produced four different windows",
+      "pass": true,
+      "detail": "TODAY:1r THIS_WEEK:7r THIS_MONTH:30r LAST_MONTH:31r"
+    },
+    {
+      "name": "2.6 regrouping the same month changes the bucket count but not the total",
+      "pass": true,
+      "detail": "day 30 rows / week 5 / month 1; totals 4316924031513704543168061612665418760 = 4316924031513704543168061612665418760 = 4316924031513704543168061612665418760"
+    },
+    {
+      "name": "2.7 today-so-far discloses that it is compared against the same elapsed time",
+      "pass": true,
+      "detail": "\"Compared with Yesterday (2026-09-24 → 2026-09-24). Compared against the same elapsed time in the previous period.\""
+    },
+    {
+      "name": "3.1 the five consumption figures are listed as separate things",
+      "pass": true,
+      "detail": "THE FIVE FIGURES, KEPT APART Menu sales, expected recipe usage, physical depletion, recorded wastage and unexplained variance are five different measurements. Collapsing them is what turns a book bala"
+    },
+    {
+      "name": "3.2 the four unmeasured figures are labelled not measured, not shown as zero",
+      "pass": true,
+      "detail": "no zero variance rendered"
+    },
+    {
+      "name": "3.3 the menu quantities that ARE measured are shown on screen",
+      "pass": true,
+      "detail": "6 rows on screen, 6 from the API"
+    },
+    {
+      "name": "3.4 the consumption screen does not call a food margin a profit",
+      "pass": true,
+      "detail": "no \"net profit\" on screen"
+    },
+    {
+      "name": "4.1 every report in the catalog has a card on the screen",
+      "pass": true,
+      "detail": "21 cards vs 21 catalog entries"
+    },
+    {
+      "name": "4.2 every card the build cannot answer carries the server's own reason",
+      "pass": true,
+      "detail": "9 unbuildable cards all carry a reason"
+    },
+    {
+      "name": "4.3 opening an unavailable report (wastage) explains itself instead of showing an empty table",
+      "pass": true,
+      "detail": "\"Recorded wastage Not in this build Wastage recording is not part of this deployment. No figures are shown rather than zeros. A zero here wou\""
+    },
+    {
+      "name": "5.1 the branch manager sees their own store",
+      "pass": true,
+      "detail": "\"Connaught Place\" present"
+    },
+    {
+      "name": "5.2 and no other store appears anywhere on their dashboard",
+      "pass": true,
+      "detail": "4 foreign stores absent"
+    },
+    {
+      "name": "5.3 their comparison table has exactly one row",
+      "pass": true,
+      "detail": "1 row(s)"
+    },
+    {
+      "name": "5.4 the API gives the manager one store too, so the filtering is the server's",
+      "pass": true,
+      "detail": "api rows: [\"Connaught Place\"]"
+    },
+    {
+      "name": "5.5a the harness found another store to attempt",
+      "pass": true,
+      "detail": "Lower Parel"
+    },
+    {
+      "name": "5.5 naming another store in the request does not return it",
+      "pass": true,
+      "detail": "asked for \"Lower Parel\" → HTTP 404, rows []"
+    },
+    {
+      "name": "5.6 the regional manager sees several stores but not the whole company",
+      "pass": true,
+      "detail": "regional 3 of company 5"
+    },
+    {
+      "name": "5.7 the regional screen and the regional API agree on the store list",
+      "pass": true,
+      "detail": "screen 3 vs api 3"
+    },
+    {
+      "name": "5.8 the auditor can read the reporting settings",
+      "pass": true,
+      "detail": "settings visible"
+    },
+    {
+      "name": "5.9 but the screen offers them no way to save a change",
+      "pass": true,
+      "detail": "no enabled save control"
+    },
+    {
+      "name": "5.10 and the API refuses the change even when the screen is bypassed",
+      "pass": true,
+      "detail": "HTTP 403"
+    },
+    {
+      "name": "5.11 the cashier is refused the consolidated dashboard on screen",
+      "pass": true,
+      "detail": "VEXO Connect POINT OF SALE POINT OF SALE Sell Orders MANAGE Dashboard VEXO Connect Every payment shows how it was taken — recorded"
+    },
+    {
+      "name": "5.12 and the API refuses them too",
+      "pass": true,
+      "detail": "HTTP 403"
+    },
+    {
+      "name": "5.13 the other tenant sees their own store — so their session works",
+      "pass": true,
+      "detail": "api rows: [\"Kettle & Co Indiranagar\"]"
+    },
+    {
+      "name": "5.14 and none of this company's stores appear on their screen",
+      "pass": true,
+      "detail": "4 stores absent"
+    },
+    {
+      "name": "6.1 selecting the net sales figure opens the report behind it",
+      "pass": true,
+      "detail": "/reporting/sales?preset=TODAY&grouping=DAY"
+    },
+    {
+      "name": "6.2 selecting a store row opens that store, and the screen says which",
+      "pass": true,
+      "detail": "/reporting/sales?preset=TODAY&grouping=DAY&storeId=cmug1l9o6000l9znjzstlw41m — \"Cyber Hub\""
+    },
+    {
+      "name": "7.1 the exported columns are the columns on the screen, in order",
+      "pass": true,
+      "detail": "10 columns match: STORE, GROSS ITEMS, ITEM DISCOUNTS, BILL DISCOUNTS…"
+    },
+    {
+      "name": "7.2 the export has the rows the screen has",
+      "pass": true,
+      "detail": "csv 5 vs screen 5"
+    },
+    {
+      "name": "7.3 the export names the period it covers",
+      "pass": true,
+      "detail": "13 preamble lines"
+    },
+    {
+      "name": "7.4 the manager's export contains their store and none of the others",
+      "pass": true,
+      "detail": "34 lines, own store present, 4 others absent"
+    },
+    {
+      "name": "8.1 the dashboard shows a data-coverage strip",
+      "pass": true,
+      "detail": "DATA COVERAGE 0 of 5 stores reporting 1 never reported 4 stale A stale store's figures are incomplete, not low — treat its totals as unknown."
+    },
+    {
+      "name": "8.2 a store that never traded is named as such, and shows no zero figure",
+      "pass": true,
+      "detail": "\"— New Town (opening soon) — — — — — — — — Never reported\""
+    },
+    {
+      "name": "8.3 a silent store reports how long it has been silent, on the row itself",
+      "pass": true,
+      "detail": "\"1 Lower Parel ₹1,45,950.45 33.81% 5.39% 102 ₹1,430.89 ₹1,45,650.16 ₹20,323.80 1.46% Stale · silent 7 hours\""
+    },
+    {
+      "name": "10.1 the counts on screen are the counts the server answered",
+      "pass": true,
+      "detail": "open 13, critical 3, overdue 2"
+    },
+    {
+      "name": "10.2 on first load the screen names every kind of check that exists, not only what was found",
+      "pass": true,
+      "detail": "10 kinds declared, roll-call rendered: true"
+    },
+    {
+      "name": "10.3 a check that could not run shows a reason on its own row, never a zero",
+      "pass": true,
+      "detail": "4 undetectable, 0 falsely showing a count — e.g. \"Not in this build Items below their reorder level Stock levels are not recorded in this deployment, so low stock cannot \""
+    },
+    {
+      "name": "10.4 each group's heading counts every finding of that kind, not the rows on screen",
+      "pass": true,
+      "detail": "DELAYED_KITCHEN_ORDER 2 shown of 2, UNUSUAL_DISCOUNT 1 shown of 1, STALE_BRANCH_DATA 4 shown of 4, UNCLOSED_SHIFT 3 shown of 3, CASH_DIFFERENCE 2 shown of 2, UNUSUAL_REFUND 1 shown of 1"
+    },
+    {
+      "name": "10.7 every kind of finding names the role expected to act, and names the right one",
+      "pass": true,
+      "detail": "6 kinds: DELAYED_KITCHEN_ORDER→BRANCH_MANAGER, UNUSUAL_DISCOUNT→BRANCH_MANAGER, STALE_BRANCH_DATA→REGIONAL_MANAGER, UNCLOSED_SHIFT→BRANCH_MANAGER, CASH_DIFFERENCE→BRANCH_MANAGER, UNUSUAL_REFUND→FINANCE"
+    },
+    {
+      "name": "10.8 a branch manager's worklist names their own store and no other",
+      "pass": true,
+      "detail": "7 row(s), own: Connaught Place, leaked: none"
+    },
+    {
+      "name": "10.9 the worklist fits the screen it is drawn on",
+      "pass": true,
+      "detail": "[]"
+    },
+    {
+      "name": "11.1 the screen says whether anything sends on its own in this deployment",
+      "pass": true,
+      "detail": "scheduler.enabled=false"
+    },
+    {
+      "name": "11.2 the screen names the mechanism a delivery uses instead of implying email",
+      "pass": true,
+      "detail": "HOW A DELIVERY IS CARRIED FILE This build has no mail or messaging transport. A delivery is written to a spool file on the server, and only addresses "
+    },
+    {
+      "name": "11.3 a draft, an active and a paused schedule are told apart on the card itself",
+      "pass": true,
+      "detail": "Daily sales — every store,:A, Monthly tax summary (draft:D, Verification probe — month:D, Weekly location comparison:P"
+    },
+    {
+      "name": "11.4 a draft is not offered a send button it would be refused for",
+      "pass": true,
+      "detail": "2 draft(s), 0 offering \"Run now\""
+    },
+    {
+      "name": "11.5 the delivery history shows what was sent, by which transport, for which period",
+      "pass": true,
+      "detail": "2 delivery(ies), latest SENT for 2026-09-24"
+    },
+    {
+      "name": "11.6 the addresses written to, and the ones deliberately withheld, are both on screen",
+      "pass": true,
+      "detail": "wrote to reporting-qa@reporting.demo.local; withheld nothing"
+    },
+    {
+      "name": "11.7 a role with no schedule permission is refused by name rather than shown an empty list",
+      "pass": true,
+      "detail": "API 403, refusal named the screen: true"
+    },
+    {
+      "name": "12.1 every screenshot is a distinct image",
+      "pass": true,
+      "detail": "30 distinct images"
+    }
+  ],
+  "skipped": [
+    {
+      "name": "10.5 a group too long for one screen folds, and says how many it is hiding",
+      "why": "largest group is 4 rows, under the fold cap — this dataset cannot exercise it"
+    },
+    {
+      "name": "10.6 expanding a folded group shows every row it was hiding",
+      "why": "largest group is 4 rows, under the fold cap — this dataset cannot exercise it"
+    }
+  ],
+  "shots": [
+    {
+      "name": "01-hq-dashboard-owner",
+      "hash": "eefd8f9bcecc"
+    },
+    {
+      "name": "01b-hq-kpis",
+      "hash": "3c2688180151"
+    },
+    {
+      "name": "01c-hq-capability-panel",
+      "hash": "ec71c085df25"
+    },
+    {
+      "name": "02-salesByPeriod-today",
+      "hash": "5833d36cced7"
+    },
+    {
+      "name": "02-salesByPeriod-this_week",
+      "hash": "7cd592d94c39"
+    },
+    {
+      "name": "02-salesByPeriod-this_month",
+      "hash": "ab6f4e28ce91"
+    },
+    {
+      "name": "02-salesByPeriod-last_month",
+      "hash": "0ea39cb2ec00"
+    },
+    {
+      "name": "02b-grouping-day",
+      "hash": "075dd6173c20"
+    },
+    {
+      "name": "02b-grouping-week",
+      "hash": "f597db9ae686"
+    },
+    {
+      "name": "02b-grouping-month",
+      "hash": "5a1f83e60b0f"
+    },
+    {
+      "name": "03-consumption",
+      "hash": "250b85a036b6"
+    },
+    {
+      "name": "03b-consumption-figures",
+      "hash": "8449cc3c1cfb"
+    },
+    {
+      "name": "04-report-centre",
+      "hash": "4d6fb5f101d0"
+    },
+    {
+      "name": "04b-report-unavailable",
+      "hash": "4a2ebbd2233d"
+    },
+    {
+      "name": "05-dashboard-manager",
+      "hash": "5cc46ced20b4"
+    },
+    {
+      "name": "05b-dashboard-regional",
+      "hash": "855a198816d4"
+    },
+    {
+      "name": "05c-settings-auditor",
+      "hash": "526499145a9d"
+    },
+    {
+      "name": "05d-dashboard-cashier-refused",
+      "hash": "ab07ec4b28ac"
+    },
+    {
+      "name": "05e-dashboard-other-tenant",
+      "hash": "28e92202767a"
+    },
+    {
+      "name": "06-drilldown-from-kpi",
+      "hash": "22bcc8780db5"
+    },
+    {
+      "name": "06b-drilldown-store",
+      "hash": "2b2fff4ec39e"
+    },
+    {
+      "name": "07-sales-report-with-export",
+      "hash": "3227b2ad9b7d"
+    },
+    {
+      "name": "08-coverage-strip",
+      "hash": "764701a5364c"
+    },
+    {
+      "name": "08b-coverage-rows",
+      "hash": "565e862d1288"
+    },
+    {
+      "name": "10-exceptions-worklist",
+      "hash": "b9508a3973c5"
+    },
+    {
+      "name": "10b-detector-roll",
+      "hash": "e00534607665"
+    },
+    {
+      "name": "10d-exceptions-manager",
+      "hash": "754600dfced6"
+    },
+    {
+      "name": "11-schedules",
+      "hash": "bacc8507d608"
+    },
+    {
+      "name": "11b-delivery-history",
+      "hash": "3d6c7cf57d1e"
+    },
+    {
+      "name": "11c-schedules-manager-refused",
+      "hash": "770c8d86ec77"
+    }
+  ],
+  "passed": 64,
+  "failed": 0
+}

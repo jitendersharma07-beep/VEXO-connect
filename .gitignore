@@ -35,6 +35,17 @@ dist/
 # Evidence meant to outlive the lane belongs in docs/, not here.
 .devlogs/
 
+# Scratch from the reporting lane's demo stack, and its delivery spool. Neither
+# was ignored by anything above — `git check-ignore -v` returned no match — so
+# `git add -A` would have committed a PID file and, worse, the spool: a report
+# artifact holds the company's takings and is addressed to a named recipient,
+# which is not a thing to put in a PUBLIC repo because the send had nowhere else
+# to go. Not qa/screens/: those ARE the evidence and this repo tracks them (33
+# files from the VC-104 and VC-105 lanes), so ignoring the directory would have
+# hidden this lane's proof while keeping its predecessors'.
+.demo-run/
+.reporting-spool/
+
 # Captured mail. backend/scripts/mail-sink.mjs writes every message it accepts
 # as .eml, and those bodies hold live 8-digit sign-in codes until redeemed.
 # deploy/e2e-isolated.sh points it under .devlogs/ (ignored above), but the

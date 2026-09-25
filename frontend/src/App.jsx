@@ -25,6 +25,12 @@ import MenuProfitability from './pages/MenuProfitability.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
+import HqDashboard from './pages/HqDashboard.jsx';
+import ReportCentre from './pages/ReportCentre.jsx';
+import ReportView from './pages/ReportView.jsx';
+import ReportingSettings from './pages/ReportingSettings.jsx';
+import ReportSchedules from './pages/ReportSchedules.jsx';
+import ReportExceptions from './pages/ReportExceptions.jsx';
 import Discounts from './pages/Discounts.jsx';
 import Organisation from './pages/Organisation.jsx';
 import Brands from './pages/Brands.jsx';
@@ -219,6 +225,91 @@ export default function App() {
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <DayClose />
                   </RequireRoles>
+                }
+              />
+              {/* LANE reporting — the multi-location report centre, gated by
+                  ACTION rather than by the role list the legacy /reports routes
+                  use. That difference is the point: the permission catalog grants
+                  report.*.read to FINANCE, REGIONAL_MANAGER and AUDITOR, and the
+                  role list above refuses all three. The server gates each report
+                  on its own action, so the route admits anyone holding any of
+                  them and each screen shows only what its own action allows.
+                  Static paths are declared before ":key" so the settings and
+                  index routes are not swallowed by it. */}
+              <Route
+                path="reporting"
+                element={
+                  <RequireAction action="report.dashboard.read" what="the consolidated dashboard">
+                    <HqDashboard />
+                  </RequireAction>
+                }
+              />
+              <Route
+                path="reporting/reports"
+                element={
+                  <RequireAction
+                    action={[
+                      'report.sales.read',
+                      'report.tax.read',
+                      'report.payments.read',
+                      'report.inventory.read',
+                      'report.dashboard.read',
+                    ]}
+                    what="reports"
+                  >
+                    <ReportCentre />
+                  </RequireAction>
+                }
+              />
+              <Route
+                path="reporting/settings"
+                element={
+                  <RequireAction action="report.settings.read" what="the reporting periods">
+                    <ReportingSettings />
+                  </RequireAction>
+                }
+              />
+              {/* Reading the schedule list is the lower authority; creating and
+                  activating one needs report.schedule.write, which the screen
+                  checks for the buttons and the server checks for the request.
+                  BRANCH_MANAGER deliberately holds neither. */}
+              <Route
+                path="reporting/schedules"
+                element={
+                  <RequireAction action="report.schedule.read" what="scheduled reports">
+                    <ReportSchedules />
+                  </RequireAction>
+                }
+              />
+              <Route
+                path="reporting/exceptions"
+                element={
+                  <RequireAction action="report.exception.read" what="the exception worklist">
+                    <ReportExceptions />
+                  </RequireAction>
+                }
+              />
+              {/* One route for every report. The gate here is deliberately the
+                  broad "may read some report" test, because which action a given
+                  key needs is the server's mapping, not a list to be copied — and
+                  the server refuses the request itself with a 403 the page shows.
+                  Copying that map here is how the two would drift into a link
+                  that opens onto a refusal. */}
+              <Route
+                path="reporting/:key"
+                element={
+                  <RequireAction
+                    action={[
+                      'report.sales.read',
+                      'report.tax.read',
+                      'report.payments.read',
+                      'report.inventory.read',
+                      'report.dashboard.read',
+                    ]}
+                    what="reports"
+                  >
+                    <ReportView />
+                  </RequireAction>
                 }
               />
               {/* Owner only, and the server says so too. A branch manager who

@@ -56,6 +56,22 @@ export const env = {
   // done here.
   INVENTORY_NOTIFY_TRANSPORT: process.env.INVENTORY_NOTIFY_TRANSPORT || 'inapp',
 
+  // LANE reporting — scheduled report delivery.
+  //
+  // Where a produced report is written. Report delivery has no transport of its
+  // own: a delivery lands in a spool directory and the row, the screen and the
+  // export all say FILE. The SMTP settings below arrived with the accounts lane
+  // and are not wired to this — reports are not mail until somebody connects the
+  // two deliberately, and until then the honest label is the one that says where
+  // the file went. A transport that silently wrote to disk while the screen said
+  // "sent by email" would be worse than either.
+  REPORTING_SPOOL_DIR: process.env.REPORTING_SPOOL_DIR || null,
+  // The timer that fires due schedules. Off unless explicitly switched on, so
+  // deploying this lane cannot start sending anything on its own — a schedule
+  // still has to be activated by a person, and the process still has to be told
+  // to tick.
+  REPORTING_SCHEDULER: process.env.REPORTING_SCHEDULER === 'true',
+
   // --- Transactional email (contract: accounts lane) ------------------------
   // Unset is the shipped state, exactly like the gateway: with no SMTP host
   // named, mail is disabled and every flow that would send one refuses loudly
