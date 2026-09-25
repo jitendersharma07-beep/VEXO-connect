@@ -339,6 +339,36 @@ export const inferRefundMethod = (payments) => {
 
 const holdsMoney = (r) => r.status === 'SUCCEEDED' || r.status === 'PENDING';
 
+// How the refund route must read payments before handing them to refundLegs.
+// It lives here, beside its consumer, because the two are one contract: the
+// only reason this include exists is to feed the leg picker, and the pieces it
+// selects are exactly what a leg needs.
+//
+// INTEGRATION FIX, 2026-09-25. The orderBy is the point. ORDER_INCLUDE gained a
+// `[createdAt, id]` tie-break so that a tie stops leaving the refund's target
+// charge undefined — but the leg picker never reads through ORDER_INCLUDE. Its
+// one call site loaded payments through a bare `select:` with no ORDER BY at
+// all, so the very outcome that change set out to make deterministic stayed at
+// the planner's discretion. Measured, not argued: with two tied gateway charges
+// the refund posted against whichever row the read happened to emit first.
+//
+// Exported so the rule can be asserted as a declaration. A behavioural test of
+// a tie can go green by luck when the planner happens to agree; dropping the
+// orderBy here must fail on the next run regardless of what the planner does.
+export const REFUND_PAYMENT_INCLUDE = {
+  select: {
+    amount: true,
+    channel: true,
+    method: true,
+    intentId: true,
+    // The provider's id for the charge. Without it a gateway refund has no
+    // route to post to, so it has to travel with the leg.
+    providerRef: true,
+    intent: { select: { id: true, providerRef: true, provider: true } },
+  },
+  orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+};
+
 // A refund has to come back out of the leg that took the money in. Provider-
 // collected money can only be returned by the provider, and cash can only be
 // handed back from the till, so an order paid in two parts has two separate

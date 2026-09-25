@@ -1,5 +1,10 @@
 node_modules
-dist
+# dist* rather than dist. Any build output directory is a copy of publicDir, so
+# an unignored variant carries public/_proof/ into the context even though the
+# rule below excludes the original. qa/vite.config.negctl.mjs builds to
+# dist-negctl and did exactly that on the exclusion check's first run: 19 entries
+# in the context, from the scratch output rather than from public/ itself.
+dist*
 .env*
 *.md
 public/_proof/
