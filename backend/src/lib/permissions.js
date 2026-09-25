@@ -125,14 +125,30 @@ export const isKnownAction = (key) => ACTION_BY_KEY.has(key);
 // Modules that will add actions later. Declared so the permission screen can
 // show an honest "not available yet" instead of the module silently appearing
 // to be configurable — and so a future lane adds its keys in one place rather
-// than inventing a parallel scheme. Nothing here is implemented; nothing here
-// is enforced.
+// than inventing a parallel scheme. No module's actions exist yet; the licence
+// gate below is already wired, so the first lane to add keys here is enforced
+// on arrival rather than whenever somebody remembers.
 export const EXTENSION_POINTS = Object.freeze([
   { module: 'INVENTORY', prefix: 'inventory.', note: 'Stock, transfers and inventory locations — inventory lane' },
   { module: 'PURCHASE', prefix: 'purchase.', note: 'Vendors and purchase orders' },
   { module: 'KITCHEN', prefix: 'kitchen.', note: 'KDS routing and station rules — kitchen lane' },
   { module: 'DELIVERY', prefix: 'delivery.', note: 'Aggregator channels and rider handover — orders lane' },
 ]);
+
+// Which module an action belongs to, or null for core POS. This is the whole of
+// the mapping: `License.modules` is a list of these module names, and the prefix
+// is the join between an entitlement the customer bought and an action the
+// server is about to allow.
+//
+// The prefix carries its dot deliberately. On a bare 'inventory' an action key
+// like 'inventoryless.read' — or, more plausibly, a future 'inventory_count.x'
+// naming slip — would match the wrong module and be gated by an entitlement its
+// author never meant to require.
+export const requiredModuleFor = (action) => {
+  if (typeof action !== 'string') return null;
+  const point = EXTENSION_POINTS.find((p) => action.startsWith(p.prefix));
+  return point ? point.module : null;
+};
 
 // ---------------------------------------------------------------------------
 // Role baselines — the ceiling for each role
