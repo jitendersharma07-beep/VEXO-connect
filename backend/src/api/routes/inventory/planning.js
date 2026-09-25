@@ -415,10 +415,18 @@ router.get(
         title: n.title,
         body: n.body,
         channel: n.channel,
+        // FAILED and UNDELIVERABLE both mean it did not arrive, and the
+        // difference between them is whether anything is still being done
+        // about it. A reminder nobody received must not look like one that was
+        // ignored, and one that has been given up on must not look like one
+        // that is still being retried.
         state: n.state,
-        // A delivery that failed is shown as failed. A reminder nobody
-        // received must not look like one that was ignored.
         lastError: n.lastError,
+        attempts: n.attempts,
+        // Null wherever the transport has no id of its own, which includes
+        // every in-app message — there the row IS the message.
+        providerRef: n.providerRef,
+        deliveredAt: n.deliveredAt,
         createdAt: n.createdAt,
         readAt: n.readAt,
         reminderId: n.reminderId,

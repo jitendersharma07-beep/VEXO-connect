@@ -24,6 +24,11 @@ const { prisma } = await import('../src/lib/prisma.js');
 const { wipeAll, buildBaseFixture, TEST_PASSWORD } = await import('./helpers/inventory.js');
 const { postMovements } = await import('../src/lib/inventory/ledger.js');
 const { tickInventory, claimLease, releaseLease, JOB_NAME } = await import('../src/jobs/inventoryScheduler.js');
+const { raiseReminder } = await import('../src/lib/inventory/reminders.js');
+const { resolveTransport } = await import('../src/lib/inventory/notifyTransport.js');
+const { clearTestTransport, scriptTestTransport, testTransportSent } = await import(
+  '../src/lib/inventory/notifyTestTransport.js'
+);
 
 const app = createApp();
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
@@ -678,6 +683,223 @@ describe('a message that did not get through is visible, not silent', () => {
     const failed = body.notifications.find((x) => x.state === 'FAILED');
     expect(failed).toBeTruthy();
     expect(failed.lastError).toMatch(/No adapter/);
+  });
+});
+
+/* ====================================================== the delivery path */
+
+// Everything above proves what the ROWS say. None of it proves a message was
+// ever handed to anything, because in-app delivery is the row — storing it and
+// sending it are the same act, so a transport layer that did nothing at all
+// would pass every test in the block above.
+//
+// These drive the seam itself through a transport that records what it was
+// given. That is the difference between "the notification is marked DELIVERED"
+// and "the notification was delivered", and for a warning about stock going
+// out of date, nobody is standing at a counter to notice the gap.
+describe('a notification is actually handed to a transport', () => {
+  const withTransport = async (name, fn) => {
+    const before = process.env.INVENTORY_NOTIFY_TRANSPORT;
+    process.env.INVENTORY_NOTIFY_TRANSPORT = name;
+    try {
+      return await fn();
+    } finally {
+      // Restored even when the assertion throws. A leaked transport name would
+      // silently re-route every later test in this file, and they would still
+      // pass — which is the worst way for it to break.
+      if (before === undefined) delete process.env.INVENTORY_NOTIFY_TRANSPORT;
+      else process.env.INVENTORY_NOTIFY_TRANSPORT = before;
+    }
+  };
+
+  const raise = (over = {}) =>
+    raiseReminder(prisma, {
+      companyId: fx.company.id,
+      kind: 'BATCH_EXPIRING',
+      subjectType: 'InventoryBatch',
+      subjectId: `batch-${Math.random().toString(36).slice(2, 10)}`,
+      locationId: fx.roomA.id,
+      assigneeId: fx.owner.id,
+      dueAt: new Date(),
+      body: 'Two crates of milk go off on Thursday',
+      ...over,
+    });
+
+  const queued = async (over = {}) =>
+    prisma.inventoryNotification.create({
+      data: {
+        companyId: fx.company.id,
+        recipientId: fx.owner.id,
+        channel: 'TEST',
+        title: 'Stock due to be dispatched',
+        body: 'Nobody received this yet',
+        state: 'FAILED',
+        attempts: 1,
+        lastError: 'transient',
+        ...over,
+      },
+    });
+
+  beforeEach(() => clearTestTransport());
+
+  it('gives the transport the message, and keeps the reference it gets back', async () => {
+    await withTransport('test', async () => {
+      await raise();
+
+      const sent = testTransportSent();
+      expect(sent).toHaveLength(1);
+      expect(sent[0].recipientId).toBe(fx.owner.id);
+      expect(sent[0].title).toBe('Batch expiring');
+      expect(sent[0].body).toBe('Two crates of milk go off on Thursday');
+
+      const row = await prisma.inventoryNotification.findFirst({ where: { recipientId: fx.owner.id } });
+      expect(row.state).toBe('DELIVERED');
+      expect(row.channel).toBe('TEST');
+      expect(row.attempts).toBe(1);
+      // The provider's own id for the message. Without it, "delivered" is only
+      // this row's opinion of itself and there is nothing to check it against.
+      expect(row.providerRef).toBe(`testmsg_${row.id}_1`);
+    });
+  });
+
+  it('leaves in-app delivery with no provider reference, because there is no provider', async () => {
+    await withTransport('inapp', async () => {
+      await raise();
+      const row = await prisma.inventoryNotification.findFirst({ where: { recipientId: fx.owner.id } });
+      expect(row.state).toBe('DELIVERED');
+      // Null here is a fact, not a missing value: the row IS the message. The
+      // assertion exists so that a future transport quietly failing to return a
+      // reference cannot hide behind in-app's legitimate null.
+      expect(row.providerRef).toBeNull();
+    });
+  });
+
+  it('retries a transport that refused once, and the second attempt gets through', async () => {
+    await withTransport('test', async () => {
+      scriptTestTransport(fx.owner.id, [
+        { delivered: false, reason: 'mail server said try later' },
+        { delivered: true, providerRef: 'msg_second_try' },
+      ]);
+
+      const n = await queued();
+
+      const first = await tick();
+      expect(first.deliveryFailures).toBe(1);
+      let row = await prisma.inventoryNotification.findUnique({ where: { id: n.id } });
+      expect(row.state).toBe('FAILED');
+      expect(row.attempts).toBe(2);
+      expect(row.lastError).toBe('mail server said try later');
+      expect(row.deliveredAt).toBeNull();
+
+      const second = await tick();
+      expect(second.redelivered).toBe(1);
+      row = await prisma.inventoryNotification.findUnique({ where: { id: n.id } });
+      expect(row.state).toBe('DELIVERED');
+      expect(row.attempts).toBe(3);
+      expect(row.providerRef).toBe('msg_second_try');
+      // The reason the earlier attempt failed is cleared, because it is no
+      // longer true of this notification.
+      expect(row.lastError).toBeNull();
+
+      expect(testTransportSent()).toHaveLength(2);
+    });
+  });
+
+  it('stops asking when the transport says retrying cannot help', async () => {
+    await withTransport('test', async () => {
+      scriptTestTransport(fx.owner.id, [
+        { delivered: false, reason: 'no email address on file', permanent: true },
+      ]);
+
+      const n = await queued();
+
+      const first = await tick();
+      expect(first.abandoned).toBe(1);
+      expect(first.deliveryFailures).toBe(0);
+
+      let row = await prisma.inventoryNotification.findUnique({ where: { id: n.id } });
+      expect(row.state).toBe('UNDELIVERABLE');
+      expect(row.attempts).toBe(2);
+      expect(row.lastError).toBe('no email address on file');
+
+      // The point of the state. A second tick must not pick it back up — and
+      // the proof is not that the row is unchanged, which a no-op tick would
+      // also produce, but that the transport was never asked a second time.
+      const second = await tick();
+      expect(second.abandoned).toBe(0);
+      expect(second.deliveryFailures).toBe(0);
+      expect(testTransportSent()).toHaveLength(1);
+
+      row = await prisma.inventoryNotification.findUnique({ where: { id: n.id } });
+      expect(row.attempts).toBe(2);
+    });
+  });
+
+  it('records the reason when the deployment names a transport nothing implements', async () => {
+    await withTransport('whatsapp', async () => {
+      // Must not throw: raiseReminder runs on paths that have already moved
+      // stock, and a missing adapter may not undo a dispatch.
+      const reminder = await raise();
+      expect(reminder).not.toBeNull();
+
+      const row = await prisma.inventoryNotification.findFirst({ where: { recipientId: fx.owner.id } });
+      expect(row.state).toBe('FAILED');
+      expect(row.channel).toBe('WHATSAPP');
+      expect(row.lastError).toBe('No adapter configured for transport "whatsapp"');
+      expect(row.providerRef).toBeNull();
+      // Nothing was handed to anything.
+      expect(testTransportSent()).toHaveLength(0);
+    });
+  });
+
+  it('a transport that throws is recorded against the notification, not raised at the caller', async () => {
+    await withTransport('test', async () => {
+      scriptTestTransport(fx.owner.id, [
+        {
+          get delivered() {
+            throw new Error('socket hang up');
+          },
+        },
+      ]);
+
+      const reminder = await raise();
+      expect(reminder).not.toBeNull();
+
+      const row = await prisma.inventoryNotification.findFirst({ where: { recipientId: fx.owner.id } });
+      expect(row.state).toBe('FAILED');
+      expect(row.lastError).toMatch(/socket hang up/);
+    });
+  });
+
+  // The safety gate, asserted both ways. A gate is a claim about what it
+  // REFUSES, and a test that only exercises the allowed case proves nothing
+  // about the case that matters.
+  it('refuses the test transport outside test and development', () => {
+    const before = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      const refused = resolveTransport('test');
+      expect(refused.transport).toBeNull();
+      expect(refused.reason).toMatch(/not available outside test and development/);
+
+      // An unset or unexpected environment must refuse too — the whitelist is
+      // on the safe environments, so this is not the same assertion twice.
+      delete process.env.NODE_ENV;
+      expect(resolveTransport('test').transport).toBeNull();
+      process.env.NODE_ENV = 'staging';
+      expect(resolveTransport('test').transport).toBeNull();
+
+      // Positive control: the refusals above are the environment gate, not a
+      // transport that simply cannot be found by that name.
+      process.env.NODE_ENV = 'test';
+      expect(resolveTransport('test').transport).not.toBeNull();
+      // And in-app is reachable everywhere, including production.
+      process.env.NODE_ENV = 'production';
+      expect(resolveTransport('inapp').transport).not.toBeNull();
+    } finally {
+      if (before === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = before;
+    }
   });
 });
 

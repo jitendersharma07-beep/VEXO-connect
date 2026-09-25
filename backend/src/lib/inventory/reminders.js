@@ -14,6 +14,7 @@
 // FAILED with its error, so the portal can show it.
 
 import { logger } from '../logger.js';
+import { attemptDelivery, channelFor } from './notifyTransport.js';
 
 const OWNER = 'CUSTOMER_OWNER';
 const MANAGER = 'BRANCH_MANAGER';
@@ -92,28 +93,34 @@ export const responsibleUsers = async (client, { companyId, locationId, need }) 
   return out;
 };
 
+// Write the notification, then try to deliver it, then record what happened.
+//
+// The row is created BEFORE the attempt and updated after, rather than being
+// written once with the outcome already known. An external transport is a
+// network call that can hang or crash the process mid-flight, and a row that
+// exists in QUEUED is recoverable by the scheduler's retry pass, while an
+// attempt made before there is anything to update is simply lost. The extra
+// UPDATE buys the difference between "we will try this again" and "nobody
+// will ever know this was supposed to be sent".
 const queueNotification = async (client, { companyId, reminderId, recipientId, title, body }) => {
-  // In-app only. External transports are wired through their own adapters
-  // and are off in development by deliberate configuration, not by accident.
-  const transport = process.env.INVENTORY_NOTIFY_TRANSPORT || 'inapp';
-  if (transport !== 'inapp') {
-    await client.inventoryNotification.create({
-      data: {
-        companyId,
-        reminderId,
-        recipientId,
-        channel: transport.toUpperCase(),
-        title,
-        body,
-        state: 'FAILED',
-        attempts: 1,
-        lastError: `No adapter configured for transport "${transport}"`,
-      },
-    });
-    return;
-  }
-  await client.inventoryNotification.create({
-    data: { companyId, reminderId, recipientId, channel: 'INAPP', title, body, state: 'DELIVERED', attempts: 1, deliveredAt: new Date() },
+  const channel = channelFor();
+  const row = await client.inventoryNotification.create({
+    data: { companyId, reminderId, recipientId, channel, title, body, state: 'QUEUED', attempts: 0 },
+  });
+
+  const outcome = await attemptDelivery({
+    notificationId: row.id,
+    companyId,
+    recipientId,
+    channel,
+    title,
+    body,
+    attempt: 1,
+  });
+
+  await client.inventoryNotification.update({
+    where: { id: row.id },
+    data: { ...outcome, attempts: 1 },
   });
 };
 

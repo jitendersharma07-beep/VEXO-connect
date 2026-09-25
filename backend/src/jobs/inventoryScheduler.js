@@ -42,6 +42,7 @@ import { prisma as defaultPrisma } from '../lib/prisma.js';
 import { logger } from '../lib/logger.js';
 import { nextCycle, requirementKeyFor, suggestForPlan } from '../lib/inventory/replenish.js';
 import { escalateReminder, notifyReminder, raiseReminder, responsibleUsers } from '../lib/inventory/reminders.js';
+import { attemptDelivery } from '../lib/inventory/notifyTransport.js';
 import { nextDocNumber } from '../lib/inventory/docnum.js';
 import { BASE_UNIT_NAME, MILLI } from '../lib/inventory/units.js';
 
@@ -552,8 +553,19 @@ const escalateDue = async (client, { companyId, now }, out) => {
 // forward, never reset: a notification that failed four times and then
 // succeeded is a different fact from one that succeeded first time, and the
 // difference is the only evidence that the transport is sick.
+// Pick up notifications that have not been delivered and try again.
+//
+// QUEUED is a notification whose first attempt never finished — the process
+// died mid-send, or the row was written and the transport call never returned.
+// FAILED is one that was tried and refused. Both are worth another go.
+//
+// UNDELIVERABLE is deliberately absent from the scan: it means the transport
+// said retrying cannot help, and re-asking an address that does not exist
+// whether it exists yet produces a portal full of rows that look like they are
+// still being worked on. Exhausting MAX_NOTIFY_ATTEMPTS leaves a row FAILED
+// rather than UNDELIVERABLE, and that distinction is honest — we stopped
+// trying, but we never established that it could not arrive.
 const retryNotifications = async (client, { companyId, now }, out) => {
-  const transport = process.env.INVENTORY_NOTIFY_TRANSPORT || 'inapp';
   const stuck = await client.inventoryNotification.findMany({
     where: {
       state: { in: ['QUEUED', 'FAILED'] },
@@ -565,26 +577,25 @@ const retryNotifications = async (client, { companyId, now }, out) => {
   });
 
   for (const n of stuck) {
-    if (transport === 'inapp') {
-      await client.inventoryNotification.update({
-        where: { id: n.id },
-        data: { state: 'DELIVERED', attempts: { increment: 1 }, deliveredAt: new Date(), lastError: null },
-      });
-      out.redelivered += 1;
-      continue;
-    }
-    // Still no adapter. The attempt is counted and the reason is rewritten, so
-    // the portal shows a notification that has been failing for a day rather
-    // than one that looks merely unread.
+    const attempt = n.attempts + 1;
+    const outcome = await attemptDelivery({
+      notificationId: n.id,
+      companyId: n.companyId,
+      recipientId: n.recipientId,
+      channel: n.channel,
+      title: n.title,
+      body: n.body,
+      attempt,
+    });
+
     await client.inventoryNotification.update({
       where: { id: n.id },
-      data: {
-        state: 'FAILED',
-        attempts: { increment: 1 },
-        lastError: `No adapter configured for transport "${transport}"`,
-      },
+      data: { ...outcome, attempts: attempt },
     });
-    out.deliveryFailures += 1;
+
+    if (outcome.state === 'DELIVERED') out.redelivered += 1;
+    else if (outcome.state === 'UNDELIVERABLE') out.abandoned += 1;
+    else out.deliveryFailures += 1;
   }
 };
 
@@ -616,6 +627,12 @@ export const emptyTickResult = (name, now) => ({
   escalationRecipients: 0,
   redelivered: 0,
   deliveryFailures: 0,
+  // Counted apart from deliveryFailures because they mean different things to
+  // whoever reads the tick: a failure is something that may yet work, an
+  // abandonment is something that will not. A tick reporting 40 failures is a
+  // mail server having a bad hour; one reporting 40 abandonments is 40 people
+  // whose contact details are wrong.
+  abandoned: 0,
   errors: [],
 });
 

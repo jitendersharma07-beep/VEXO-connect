@@ -1976,6 +1976,13 @@ enum InventoryNotificationState {
   QUEUED
   DELIVERED
   FAILED
+  // FAILED means "did not arrive, and we will try again". UNDELIVERABLE means
+  // "did not arrive, and trying again cannot help" — the address does not
+  // exist, the recipient has opted out. They are kept apart because the
+  // scheduler must stop on one and not on the other, and because a portal
+  // that says "still trying" about a message that will never arrive is worse
+  // than one that admits it gave up.
+  UNDELIVERABLE
   READ
 }
 
@@ -2317,10 +2324,14 @@ model InventoryReminder {
   @@index([state, escalateAt])
 }
 
-// An in-app message. Delivery is a recorded fact with its own state, because a
-// reminder nobody received must not look like one that was ignored. External
-// transports attach here later; during development the only transport is
-// in-app and no message leaves the product.
+// A message to a person. Delivery is a recorded fact with its own state,
+// because a reminder nobody received must not look like one that was ignored.
+//
+// The seam an external transport attaches to is src/lib/inventory/
+// notifyTransport.js. No email or WhatsApp adapter is written: the transports
+// that exist are in-app, where the row is itself the message, and a test one
+// that never leaves the process. Nothing this product does today sends
+// anything to anybody outside it.
 model InventoryNotification {
   id         String                     @id @default(cuid())
   companyId  String
@@ -2333,6 +2344,11 @@ model InventoryNotification {
   state      InventoryNotificationState @default(QUEUED)
   attempts   Int                        @default(0)
   lastError  String?
+  // The transport's own id for the message. It is what lets "we delivered it"
+  // be checked against the provider later instead of only asserted from this
+  // row — the same job the charge reference does on a payment. Null for
+  // in-app, where the row is the message and there is no provider to ask.
+  providerRef String?
   deliveredAt DateTime?
   readAt     DateTime?
   createdAt  DateTime                   @default(now())

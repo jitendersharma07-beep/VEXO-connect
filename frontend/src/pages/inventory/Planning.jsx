@@ -48,6 +48,31 @@ const RUN_OUTCOME_STYLES = {
   FAILED: 'bg-red-100 text-red-700',
 };
 
+// Delivery states, in the words someone reads rather than the enum's.
+//
+// "Not delivered" and "Given up" are deliberately different sentences. The
+// first is a message still being retried; the second is one that will never
+// arrive, and telling someone their reminder is still in flight when it is not
+// is the failure this whole inbox exists to prevent.
+const NOTIFY_STATE_LABEL = {
+  QUEUED: 'Sending',
+  DELIVERED: 'Delivered',
+  FAILED: 'Not delivered',
+  UNDELIVERABLE: 'Given up',
+  READ: 'Read',
+};
+
+const NOTIFY_STATE_STYLES = {
+  QUEUED: 'bg-slate-100 text-slate-600',
+  DELIVERED: 'bg-emerald-100 text-emerald-700',
+  FAILED: 'bg-red-100 text-red-700',
+  // Amber, not red: red is the thing that still needs chasing. This one has
+  // stopped, and it needs a different action — fix the contact details —
+  // rather than more of the same waiting.
+  UNDELIVERABLE: 'bg-amber-100 text-amber-800',
+  READ: 'bg-slate-100 text-slate-600',
+};
+
 /* -------------------------------------------------------------- suggestion */
 
 function SuggestionPanel({ planId, onClose, onRan, canRun }) {
@@ -288,7 +313,11 @@ function Reminders({ onChanged }) {
 function NotificationInbox() {
   const { data, error, loading, reload } = useInventory('/inventory/notifications');
   const notifications = data?.notifications ?? [];
+  // Counted apart, because they ask for different things. A failure is still
+  // being retried and may yet arrive; an abandonment will not, and no amount
+  // of waiting changes it — somebody has to correct the contact details.
   const failed = notifications.filter((n) => n.state === 'FAILED');
+  const abandoned = notifications.filter((n) => n.state === 'UNDELIVERABLE');
 
   const markRead = async (id) => {
     await api.post(`/inventory/notifications/${id}/read`, {});
@@ -312,6 +341,18 @@ function NotificationInbox() {
         </Callout>
       ) : null}
 
+      {abandoned.length ? (
+        <Callout
+          tone="amber"
+          icon={MailWarning}
+          title={`${abandoned.length} message${abandoned.length === 1 ? ' will' : 's will'} never arrive`}
+        >
+          Delivery was refused for a reason that retrying cannot fix, so we stopped trying. The reason is
+          on each message below. Until it is corrected, the person these were addressed to is not being
+          told anything.
+        </Callout>
+      ) : null}
+
       <ErrorNote message={error} />
 
       <Table head={['Message', 'Channel', 'State', 'When', { key: 'a', label: '', right: true }]} empty="No messages">
@@ -324,17 +365,15 @@ function NotificationInbox() {
             </Td>
             <Td className="text-xs text-slate-500">{n.channel}</Td>
             <Td>
-              <span
-                className={`badge ${
-                  n.state === 'FAILED'
-                    ? 'bg-red-100 text-red-700'
-                    : n.state === 'DELIVERED'
-                      ? 'bg-emerald-100 text-emerald-700'
-                      : 'bg-slate-100 text-slate-600'
-                }`}
-              >
-                {n.state}
+              <span className={`badge ${NOTIFY_STATE_STYLES[n.state] ?? 'bg-slate-100 text-slate-600'}`}>
+                {NOTIFY_STATE_LABEL[n.state] ?? n.state}
               </span>
+              {/* How many goes it took. Shown only once it is more than one,
+                  because "1 attempt" on every delivered row is noise — but a
+                  message that took four is a transport worth looking at. */}
+              {n.attempts > 1 ? (
+                <div className="mt-1 text-[11px] text-slate-400">{n.attempts} attempts</div>
+              ) : null}
             </Td>
             <Td className="text-xs text-slate-500">{fmtDateTime(n.createdAt)}</Td>
             <Td right>

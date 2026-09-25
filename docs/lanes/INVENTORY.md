@@ -111,7 +111,7 @@ and is named. Nothing below is marked ACCEPTED on the strength of a file existin
 | 3 | Batches, FEFO, expiry blocking, shelf life, opened-container clock | ACCEPTED | pilot steps 13–22, 47, 48; screen 03; min-shelf-life refusal returns 409 |
 | 4 | Receiving, ledger attribution, reversals not edits | ACCEPTED | pilot steps 23–31; screens 07, 09; every one of 29 movements resolves to a named person |
 | 5 | Five-stage requests, damage/shortage, idempotency | ACCEPTED | pilot steps 32–36; screens 04, 05; reconciliation table shows dispatched ≠ accepted with the difference itemised; who raised and who decided is named on the request, its issues and every lifecycle event — `inventoryApi.test.js`, four tests incl. the deleted-account control |
-| 6 | Plans, suggestions, reminders, scheduler persistence | ACCEPTED | pilot steps 37, 44–46; screens 06, 24; the suggestion panel shows an unapproved request excluded from projected stock |
+| 6 | Plans, suggestions, reminders, scheduler persistence | ACCEPTED | pilot steps 37, 44–46; screens 06, 24; the suggestion panel shows an unapproved request excluded from projected stock; the scheduler has since run unattended as a daemon and redelivered a seeded-undelivered notification on its first tick — §11; delivery goes through one transport seam with a negative control — §12 |
 | 7 | Single deduction per sale, uncosted visible, no restock on refund | ACCEPTED | pilot steps 38–42; screen 10; `tests/inventorySales.test.js` |
 | 8 | Nine screens, scoped by role, server-enforced | ACCEPTED | 11 screens shipped, covering the nine the brief names; 24 screenshots, 15 walks, direct-API probes in §6 |
 | 9 | Repeatable synthetic pilot | ACCEPTED | `scripts/dev-inventory-pilot.mjs`, 48 steps, exit 0, run twice on two different database builds |
@@ -128,17 +128,18 @@ DATABASE_URL=<…vcx_inventory_test> NODE_ENV=test npm test
 
 ```
 Test Files  16 passed (16)
-     Tests  492 passed (492)
+     Tests  499 passed (499)
+   Duration  159.83s
 ```
 
 Zero failures, zero skipped. That is the same file count and the same test count as the
 pre-lane baseline plus this lane's four files — no test was removed, disabled or
-loosened to reach it. This lane contributes 108 of the 492:
+loosened to reach it. This lane contributes 115 of the 499:
 
 | File | Tests |
 | --- | --- |
 | `inventoryLedger.test.js` | 28 |
-| `inventoryScheduler.test.js` | 27 |
+| `inventoryScheduler.test.js` | 34 |
 | `inventoryApi.test.js` | 28 |
 | `inventorySales.test.js` | 25 |
 
@@ -207,10 +208,32 @@ because it has not. That is a real state surfaced rather than hidden.
 
 ## 8. Migrations
 
-Two, both additive: `20260924400000_inventory_core`,
-`20260924400100_inventory_location_access`. Every `ALTER TABLE` in either file is
+Three, all additive: `20260924400000_inventory_core`,
+`20260924400100_inventory_location_access`, and
+`20260925020000_inventory_notification_transport`. Every `ALTER TABLE` in the first two is
 `ADD CONSTRAINT … FOREIGN KEY` on a table the same migration just created. No pre-existing
 POS table is altered, narrowed or back-filled.
+
+The third touches only this lane's own `InventoryNotification`, adding a nullable
+`providerRef` and the `UNDELIVERABLE` value to `InventoryNotificationState`. Both are
+additions: no existing row changes meaning and no column becomes required, so applying it
+to a populated database rewrites nothing. It was applied with `prisma migrate deploy` to
+the test and dev databases; the rehearsal table below predates it and describes the first
+two.
+
+`ALTER TYPE … ADD VALUE` is the one statement here worth a second look, because on
+Postgres before 12 it cannot run inside a transaction block at all and Prisma wraps a
+migration in one. From 12 onwards it is permitted provided the new value is not *used* in
+the same transaction, which this migration does not do — it only adds the value, and the
+first row to carry it is written by application code long afterwards. The server was
+checked rather than assumed: **16.15**.
+
+Verified after applying, on the dev database:
+
+```
+enum InventoryNotificationState -> QUEUED DELIVERED FAILED READ UNDELIVERABLE
+_prisma_migrations              -> 20260925020000_inventory_notification_transport finished
+```
 
 Rehearsed both ways:
 
@@ -246,13 +269,13 @@ never enables the module bills exactly as it does today.
 
 ## 9. Delivery
 
-Branch `x/inventory`, eight commits on top of `ca5780d`, each one internally consistent
+Branch `x/inventory`, ten commits on top of `ca5780d`, each one internally consistent
 rather than a slice of a single blob — the import graph was traced first so that no commit
 mounts a router or boots a job that does not yet exist at that point in history:
 
 | Commit subject | Contents |
 | --- | --- |
-| `INVENTORY schema: …` | `schema.prisma`, both migrations |
+| `INVENTORY schema: …` | `schema.prisma`, the first two migrations |
 | `INVENTORY engine: …` | `lib/inventory/` |
 | `INVENTORY scheduler: …` | `jobs/inventoryScheduler.js`, `index.js` boot |
 | `INVENTORY api: …` | `api/routes/inventory/`, `app.js` mount |
@@ -260,6 +283,8 @@ mounts a router or boots a job that does not yet exist at that point in history:
 | `INVENTORY tests: …` | four test files, helper, pilot |
 | `INVENTORY portal: …` | screens, `App.jsx`, `Layout.jsx` |
 | `INVENTORY docs: …` | this file and the 24 captures |
+| `INVENTORY requests: …` | actor attribution on requests, issues and events (INV-B8) |
+| `INVENTORY notifications: …` | the transport seam, `UNDELIVERABLE`, `providerRef`, third migration (INV-B4) and the daemon evidence (INV-B3) |
 
 Every commit was made with an explicit pathspec, never `git add -A`, so nothing belonging
 to another lane could be swept in. The six pre-existing files this lane touches total
@@ -268,7 +293,7 @@ markers.
 
 Remote `github` → `jitendersharma07-beep/VEXO-connect`, branch `x/inventory`. The push is
 a fast-forward onto the existing remote tip; it is not a force-push and it is not the
-release branch. This document is inside the last of the eight commits, so it cannot state
+release branch. This document is inside the last of those commits, so it cannot state
 its own pushed SHA without being wrong. Verify it directly instead:
 
 ```
@@ -290,8 +315,8 @@ only the resulting cookie, so the password never reaches the page.
 | --- | --- | --- | --- | --- | --- |
 | INV-B1 | `requireModule('INVENTORY')` is not wired — routers are marked, the middleware belongs to firstlogin | PRO | firstlogin lane | BLOCKED | remove the markers; they are comments |
 | INV-B2 | `terminalId` is never populated — `Order` carries no terminal yet | PRO | foundation + orders lanes | BLOCKED | column is nullable; drop it |
-| INV-B3 | Scheduler has never run as a daemon. Its pass is proven by direct invocation and by tests, **not** by an unattended run | PRO | deployment decision | IMPLEMENTED-UNVERIFIED | `INVENTORY_SCHEDULER` unset |
-| INV-B4 | Notifications are in-app only. **No email or WhatsApp adapter exists** — the non-in-app branch writes a FAILED row reading "No adapter configured for transport …". See the correction below | PRO | owner approval of a transport | NOT STARTED | `INVENTORY_NOTIFY_TRANSPORT=inapp` |
+| INV-B3 | Scheduler has now run unattended as a daemon and did real work while it ran — see §11 | PRO | — | ACCEPTED | `INVENTORY_SCHEDULER` unset |
+| INV-B4 | **No email or WhatsApp adapter exists.** What now exists is the seam one plugs into, a complete in-app transport, and a test transport — so the missing piece is a provider, not wiring. Naming an absent transport writes a FAILED row reading "No adapter configured for transport …" rather than reporting a delivery that did not happen | PRO | owner approval of a provider | BLOCKED | `INVENTORY_NOTIFY_TRANSPORT=inapp` |
 | INV-B5 | Landed-cost apportionment (`GoodsReceiptLandedCost`) is modelled and stored but has no UI, and **no test exercises it** | PRO | — | IMPLEMENTED-UNVERIFIED | unused table |
 | INV-B6 | `ProductionBatch` / central-kitchen production is **schema-only** — zero references in `src/`. See the correction below | ENTERPRISE | — | NOT STARTED | unused table |
 | INV-B7 | A rejected CORS origin surfaces as 500 `POS_INTERNAL_ERROR` rather than a 403. Pre-existing in `app.js`, not this lane's, not changed | CORE | — | NOT STARTED | n/a |
@@ -307,6 +332,10 @@ read as a working feature.
   exists anywhere in the backend. The only adapter file, `src/lib/gateway/testAdapter.js`,
   belongs to payments. "Not exercised" implied a wiring gap; the real gap is the adapter
   itself, so the status moves from IMPLEMENTED-UNVERIFIED to NOT STARTED.
+  *Since that correction* the seam has been built and tested (§12), which is why the row
+  now reads BLOCKED rather than NOT STARTED: the work that is ours is done, and what
+  remains is a provider only the owner can choose. The row still does not claim an
+  adapter, because there still is not one.
 - **INV-B6 said `ProductionBatch` "is modelled with ledger support".** It is a table and
   nothing else: no route, no service, no ledger call, no reference of any kind under
   `src/`. It needs an API, ledger integration and a screen, from scratch.
@@ -326,3 +355,105 @@ verified arithmetic.
 - **Branch managers may approve requests they did not raise.** The spec asks for approval
   on sensitive adjustments; it does not say approval must always escalate to the owner.
   Counts and adjustments *are* owner-only.
+
+## 11. The scheduler has now run unattended (INV-B3)
+
+Previously this lane could only say the scheduler passed when something called it. That is
+a weaker claim than it sounds: the tick function being correct and the daemon that is
+supposed to call it every five seconds actually doing so are two different facts, and only
+the first had evidence.
+
+The daemon was run against the **dev** database on loopback port 5524, `INVENTORY_SCHEDULER=on`,
+a five-second interval, for five minutes, with nobody invoking anything.
+
+**A counter moving is not evidence of work.** An empty tick increments `runCount` exactly
+as happily as a useful one, so before starting the daemon one notification was seeded
+undelivered — `state=FAILED`, `attempts=1`, `lastError='seeded as undelivered'` — giving
+the run something real to find. The row count was read before and after the seed (10 → 11)
+so the write was verified rather than assumed.
+
+| | Before | After |
+| --- | --- | --- |
+| `job=inventory` | row did not exist | `runCount=59 failCount=0 lastError=none` |
+| `lastTickAt` | — | `2026-09-25T02:19:41.441Z` |
+| `lockedBy` | — | `free` |
+| notifications | `DELIVERED:10, FAILED:1` | `DELIVERED:11` |
+
+The only pre-existing state row was `job=inventory:cmufxh87e00009w9vhb1yi56w`, `runCount=1`,
+last ticked `2026-09-24T19:31:47Z` — the direct invocation from the earlier verification. It
+is **unchanged** by this run, which is itself the control: the daemon wrote its own row and
+did not touch the hand-run's.
+
+The seeded notification's own columns date the delivery:
+
+```
+seeded          createdAt   = 2026-09-25T02:14:30.701Z   state=FAILED    attempts=1
+daemon booted               = 2026-09-25T02:14:36.221Z
+delivered       deliveredAt = 2026-09-25T02:14:41.504Z   state=DELIVERED attempts=2
+```
+
+Delivery lands 5.3 s after boot — the first scheduled tick — with `attempts` incremented
+1 → 2 and `lastError` cleared. No command was issued in that window. This is why the
+evidence is the row and not the log: a row carries its own timestamps, so "the daemon did
+it" is checkable after the fact instead of resting on someone having watched.
+
+`failCount=0` and `lastError=none` across 59 consecutive ticks, and `lockedBy=free` at
+rest, also demonstrate the lease is released on every pass rather than leaking — the
+failure mode that would have stalled the job until its expiry.
+
+The daemon was then stopped and port 5524 confirmed released.
+
+## 12. How a notification reaches a person (INV-B4)
+
+**There is still no email adapter and no WhatsApp adapter.** What was built is the seam one
+plugs into, modelled on the payments adapter registry so the two look alike, plus a test
+transport that drives the seam without sending anything. No external message was sent at
+any point.
+
+The rule the module exists to keep is that **a message which did not arrive must leave a
+record saying so**. This is deliberately stricter than the payment gateway: a payment that
+quietly does nothing fails loudly because the customer is standing at the counter, whereas
+a notification that quietly does nothing is indistinguishable from one that was delivered
+and ignored. So naming a transport with no adapter behind it does not throw and does not
+silently pass — it writes the notification FAILED with the reason, which the portal shows.
+
+Three things were also fixed on the way:
+
+- **FAILED and UNDELIVERABLE are now different states.** A transport may answer
+  `permanent: true` for an address that does not exist or a recipient who opted out. That
+  row stops being retried, instead of burning the whole five-attempt budget rediscovering
+  the same answer while the portal says "still trying" about a message that will never
+  arrive. The portal shows these amber and separately counted, not red among the retries.
+- **`providerRef` is stored**, so "we delivered it" can later be checked against the
+  provider rather than merely asserted from our own row — the same reason a payment keeps
+  its charge reference. In-app stores null, because the row *is* the message and there is
+  no third party to ask. A null there is a fact, not a gap.
+- **The delivery decision existed twice and had already drifted.** `reminders.js` marked
+  in-app DELIVERED at creation; `inventoryScheduler.js` re-stamped `lastError` on every
+  pass whether or not anything had changed. Both now call one `attemptDelivery`. This is
+  the same duplication that INV-B8 removed from actor serialisation.
+
+`queueNotification` now writes the row QUEUED first and updates it after the attempt, so a
+crash mid-delivery leaves a recoverable row rather than nothing.
+
+**The safety gate refuses rather than allows when it cannot tell.** The test transport
+reports delivery on command, so production must never reach it. It is whitelisted to `test`
+and `development`, read from `process.env` at call time with **no fallback** to the
+boot-captured copy — and both halves are load-bearing. Call time, because `config/env.js`
+captures at import and the rate limiter in this codebase caches `NODE_ENV` the same way, at
+the cost of one debugging session already. No fallback, because `env.NODE_ENV` substitutes
+`'development'` when the variable is unset, so falling back would turn "we do not know what
+environment this is" into "it is a safe one" — the exact inversion the whitelist exists to
+prevent. A first attempt at this file *did* have that fallback, and the test for an unset
+`NODE_ENV` is what caught it.
+
+Seven tests cover the seam. The load-bearing evidence is a **negative control**: replacing
+`transport.send` with a stub returning `{ delivered: true }` fails exactly four of the
+seven — precisely those asserting that something was handed to a transport — while the
+other three continue to pass because they exercise genuinely different paths. That control
+matters more here than usual, because in-app delivery *is* the row, so a transport layer
+that did nothing at all would still pass every notification test written before this one.
+
+Schema additions: `InventoryNotification.providerRef`, and `UNDELIVERABLE` on
+`InventoryNotificationState` — migration
+`20260925020000_inventory_notification_transport`.
