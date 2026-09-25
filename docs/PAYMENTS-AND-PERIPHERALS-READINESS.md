@@ -35,7 +35,7 @@ kept separate and never merged:
 
 | Tier | What it means | Where it stands |
 | --- | --- | --- |
-| **1 — Automated / simulator** | Covered by the test suite in this repository, run on this host, against simulated providers and devices. Proves our logic; proves nothing about anyone else's wire format or hardware. | **923 tests, all passing** on the tested SHA `17d3bbd`. §6 |
+| **1 — Automated / simulator** | Covered by the test suite in this repository, run on this host, against simulated providers and devices. Proves our logic; proves nothing about anyone else's wire format or hardware. | **963 tests, all passing** on the tested SHA `c030ff2`. §6 |
 | **2 — Provider sandbox, reads** | Real Razorpay **test** account, over the network, GET only. Proves the provider's wire format really is what we assumed. | **9 checks, all passing.** §6 |
 | **3 — Provider sandbox, writes** | Real Razorpay **test** account, creating real orders. Proves the provider *accepts* what we send, not merely that our stub echoes it. | **16 checks, all passing.** §6 |
 | **4 — Physical device** | A physical card terminal, printer or cash drawer did the thing. | **Nothing in this document claims this.** §8, §9 |
@@ -292,31 +292,44 @@ that is `drawer.open.manual`.
 
 ### Tier 1 — the combined regression gate
 
-The gate of record is the whole suite on **`17d3bbd`**, the tested SHA, on this
+The gate of record is the whole suite on **`c030ff2`**, the tested SHA, on this
 host, against `vcx_payint_test`, on 2026-09-25:
 
 ```
-Test Files  32 passed (32)
-     Tests  923 passed (923)
-  Duration  186.33s
+Test Files  33 passed (33)
+     Tests  963 passed (963)
+  Duration  195.12s
 ```
 
-**923 passed, 0 failed, 0 skipped.** That is this lane's 761 plus the accounts
-lane's files, with nothing lost on either side: 32 files and the per-file counts
-sum to exactly 923. Nothing is skipped — vitest prints a separate `skipped`
-tally whenever anything is, and there is none. The only occurrence of the word
-in the log is inside a *passing* test's name, `globalLimiter skipped
-(NODE_ENV=test at load)`.
+**963 passed, 0 failed, 0 skipped**, and the per-file counts sum to exactly 963
+across 33 files, so nothing was lost from any of the three lanes now in the
+candidate. Nothing is skipped — vitest prints a separate `skipped` tally
+whenever anything is, and there is none. The only occurrence of the word in the
+log is inside a *passing* test's name, `globalLimiter skipped (NODE_ENV=test at
+load)`.
 
-The gate was re-run at each SHA rather than carried forward from the last one
-that passed, so the number recorded is never inherited from a parent:
+The payment suites are all present and intact in that total: `gateway` 76,
+`razorpay` 53, `terminal` 49, `drawer` 33, `razorpayFlow` 32,
+`paymentAccounts` 23.
+
+The gate was re-run at every SHA that changed anything executable, rather than
+carried forward from the last one that passed, so no number here is inherited
+from a parent commit:
 
 | SHA | Result | Duration |
 | --- | --- | --- |
-| `54a55f3` the merge | 32 files, 923 passed | 201.49s |
+| `54a55f3` merge of this lane into main | 32 files, 923 passed | 201.49s |
 | `d49b7b6` | 32 files, 923 passed | 210.35s |
 | `d49b7b6` again | 32 files, 923 passed | 195.55s |
-| **`17d3bbd` the tested SHA** | **32 files, 923 passed** | **186.33s** |
+| `17d3bbd` | 32 files, 923 passed | 186.33s |
+| **`c030ff2` merge of main `820a5a1`, the tested SHA** | **33 files, 963 passed** | **195.12s** |
+
+The jump from 923 to 963 is a peer's, not this lane's: `main` moved from
+`584de37` to `820a5a1` *during* this verification, landing the W2 integration
+close. It was merged in rather than delivered around — see the last section —
+and the gate re-run on the result rather than assumed to still hold. The +40 is
+their `branchHours` suite (33, a new file) plus additions to
+`catalogModifiers` and `vc105Profitability`.
 
 **Why any of that is trusted.** An earlier run reported the same 923 but printed
 `[test-db-lock] LOST the lock mid-run — results are not trustworthy, re-run
@@ -326,11 +339,11 @@ above are not trusted merely for the absence of that line either:
 
 - the complete output of each is kept, not just its tail. The heartbeat that
   prints the warning fires *mid-run*, so a clean tail proves nothing and the
-  whole log has to be searched. In `17d3bbd`'s log the only `[test-db-lock]`
-  lines are `acquired as vcx-test-lock:2193283` and `emptied 61 tables`.
+  whole log has to be searched. In `c030ff2`'s log the only `[test-db-lock]`
+  lines are `acquired as vcx-test-lock:2232425` and `emptied 61 tables`.
 - `pg_stat_activity` was sampled every two seconds throughout each run (315 to
-  343 samples). The only `vcx-test-lock:*` identity on the database was that
-  run's own, and it matches the `acquired as` line exactly — `2193283` here.
+  344 samples). The only `vcx-test-lock:*` identity on the database was that
+  run's own, and it matches the `acquired as` line exactly — `2232425` here.
   This is the load-bearing part: `globalSetup.js` sets `application_name`
   **before** it contends for the lock, so a competing run would appear in these
   samples whether or not it ever won, and none did.
@@ -352,7 +365,7 @@ Existing suites carrying the gateway: `tests/razorpay.test.js` (53),
 
 #### The five behaviours, named individually
 
-The gate's default reporter prints only slow tests, so "923 passed" is an
+The gate's default reporter prints only slow tests, so "963 passed" is an
 aggregate and not evidence for any particular claim. The four behaviour-bearing
 suites were therefore re-run with `--reporter=verbose` — **137 passed, 0
 failed** — so each of these is a named passing line in a run log rather than an
@@ -454,14 +467,14 @@ which wants a reconciliation sweep somewhere waiting is free. That is item 1 in
 
 ### Migrations
 
-Migrations reproduce the schema with no drift — verified on the merge by diffing
-the applied migrations against the Prisma schema on a throwaway shadow database,
-which returned an empty migration. Two rehearsals were run on isolated
-databases, neither of them the one the tests use:
+Migrations reproduce the schema with no drift — verified by diffing the applied
+migrations against the Prisma schema on a throwaway shadow database, which
+returned `-- This is an empty migration.` Both rehearsals were re-run on the
+tested SHA, on isolated databases, neither of them the one the tests use:
 
-- **Fresh** (`vcx_payint_fresh`, dropped and recreated first): all 27 migrations
-  applied from empty, this lane's three last. Migration numbering needed no
-  renumbering — they sort after the accounts lane's, so history stays
+- **Fresh** (`vcx_payint_fresh`, dropped and recreated first): all **25**
+  migrations applied from empty, this lane's three last. Migration numbering
+  needed no renumbering — they sort after the accounts lane's, so history stays
   append-only and nothing already applied was rewritten.
 - **Populated** (`vcx_payint_pop`): main's 22 migrations applied first, then four
   payment cases seeded in raw SQL, money fingerprinted, then this lane's three
@@ -731,16 +744,32 @@ drawer and hold a card. Each line is a yes/no with a witness.
 | Integration branch | `x/payments-integration` |
 | Verification commit | `d49b7b6` — "Verify the payment integration against the real provider, and correct what the sandbox disproved" |
 | Re-proof commit | `17d3bbd` — "Re-prove the sandbox tiers on the delivered tree, and record the fifth lag sample" |
-| **Tested SHA** | **`17d3bbd`** — 32 files, 923 tests, 0 failed, 0 skipped (§6) |
+| Second merge | `c030ff2` — main `820a5a1`, a peer's W2 integration close, merged in mid-verification |
+| **Tested SHA** | **`c030ff2`** — 33 files, 963 tests, 0 failed, 0 skipped (§6) |
+| Delivered as | branch `x/payments-integration` on `github`, verified by `git ls-remote` rather than the local ref |
 
-**`17d3bbd` is the tested SHA, and it is the last commit that changes anything
+**`c030ff2` is the tested SHA, and it is the last commit that changes anything
 executable.** The commit after it edits only the lines that name the SHA — this
-table's last two rows, the tier-1 block in §6 and the tier-1 row in §1. No
-source, no schema, no migration, no test. A document cannot state its own
-commit's hash, so one such commit is unavoidable; testing again to record a
-further SHA would only move the same gap along by one. What is avoidable is
-recording a SHA that was never tested, and that has not been done here — the
-gate was re-run at every commit that touched code, as the table in §6 shows.
+table's last rows, the tier-1 block in §6 and the tier-1 row in §1. No source,
+no schema, no migration, no test. A document cannot state its own commit's hash,
+so one such commit is unavoidable; testing again to record a further SHA would
+only move the same gap along by one. What is avoidable is recording a SHA that
+was never tested, and that has not been done here — the gate was re-run at every
+commit that touched code, as the table in §6 shows.
+
+**A peer moved `main` during this verification, and that was merged in rather
+than delivered around.** `main` went from `584de37` to `820a5a1` between the
+first push and the second. The honest options were to deliver a candidate whose
+base was already stale or to take the newer work and re-verify; the second was
+taken. The merge was clean — the peer's commits touch `catalog.js`, two test
+suites and the frontend QA harness, and no payments file at all: no
+`schema.prisma`, no migration, no `config/env.js`, no `orders.js`, no gateway, no
+`permissions.js`. That was checked rather than assumed, and then checked again
+from the other direction: `prisma migrate diff` still returns an empty
+migration, both migration rehearsals were re-run, and the full gate was re-run
+on the merge. Nothing of theirs was rewritten or force-pushed, and
+`git merge-base --is-ancestor` confirmed every commit they had pushed was
+contained before each of this branch's pushes.
 
 Two conflicts, both additive, resolved by keeping both sides: `config/env.js`,
 where the accounts lane's SMTP block and this lane's payment-secret and
