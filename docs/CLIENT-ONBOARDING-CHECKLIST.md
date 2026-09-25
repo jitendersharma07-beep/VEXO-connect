@@ -38,11 +38,17 @@ first live sale, not after.
 
 | Item | Where | Entered by | Status |
 |------|-------|-----------|--------|
-| Owner account (email, name) | `/team` | VEXO creates the first owner | BLOCKED — no staff list |
+| Owner account (email, name) | VEXO console → Invite owner | VEXO invites the first owner | BLOCKED — no staff list |
 | Branch managers (per branch) | `/team` | Owner | BLOCKED |
 | Cashiers (per branch) | `/team` | Owner | BLOCKED |
 | Discount policy: who may discount, up to how much | `/discounts` | Owner | BLOCKED — client's rule not supplied. Until set, the shipped default is deny: a cashier cannot discount at all. |
-| Every real account signs in once and changes its password | login | Each person | BLOCKED — depends on accounts above |
+| Each person sets their own first password from the email they were sent | their mailbox | Each person | BLOCKED — depends on accounts above |
+
+Staff addresses must be **real and reachable**: nobody is given a password to
+pass along, so an account whose mail bounces cannot be opened at all. The owner
+is invited by link; everyone added on `/team` afterwards gets an 8-digit code
+and shows as **Awaiting password** until they redeem it. Full flow, and the
+mail configuration it depends on, in `docs/ACCOUNTS-GO-LIVE.md`.
 
 ## 4 · Counter hardware (per counter)
 

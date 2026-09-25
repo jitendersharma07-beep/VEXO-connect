@@ -25,11 +25,22 @@ const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { signPayload, SIGNATURE_HEADER, testAdapter, setTestSettlement, clearTestSettlements } =
   await import('../src/lib/gateway/testAdapter.js');
+const { globalLimiter, loginLimiter, setRateLimitEnforcementForTest } =
+  await import('../src/middleware/rateLimit.js');
 
 const app = createApp();
 const SECRET = process.env.POS_GATEWAY_WEBHOOK_SECRET;
 
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   // Before PosUser and Branch, which it references. Shared test database:
   // another file's DayClose rows block this file's PosUser delete.
   await prisma.dayClose.deleteMany();
@@ -37,10 +48,17 @@ const wipe = async () => {
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -53,6 +71,7 @@ const wipe = async () => {
   // DiscountPolicy's foreign keys are RESTRICT, so it goes before the branch,
   // user and company rows it points at.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -128,7 +147,7 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() + 86400e3) } },
     },
   });
-  branch = await prisma.branch.create({ data: { companyId: company.id, name: 'Gw One', code: 'G1' } });
+  branch = await prisma.branch.create({ data: { companyId: company.id, publicId: 'VC-GW-0001', name: 'Gw One', code: 'G1' } });
   const mk = (data) => prisma.posUser.create({ data: { passwordHash, ...data } });
   await mk({ email: 'atc.g@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN' });
   await mk({ email: 'owner.g@test.local', fullName: 'Owner G', role: 'CUSTOMER_OWNER', companyId: company.id });
@@ -156,7 +175,7 @@ beforeAll(async () => {
     },
   });
   other.branch = await prisma.branch.create({
-    data: { companyId: other.company.id, name: 'Rv One', code: 'R1' },
+    data: { companyId: other.company.id, publicId: 'VC-GW-0002', name: 'Rv One', code: 'R1' },
   });
   await mk({ email: 'owner.r@test.local', fullName: 'Owner R', role: 'CUSTOMER_OWNER', companyId: other.company.id });
   await mk({
@@ -693,7 +712,10 @@ describe('the shipped, unconfigured state', () => {
     // The registry's gate is a whitelist, so an unfamiliar NODE_ENV such as
     // "staging" refuses rather than quietly allowing a settle-on-command
     // adapter. This is the second, independent gate behind the boot check.
-    await withEnv({ NODE_ENV: 'staging' }, async () => {
+    // SMTP_HOST is cleared only so config/env.js gets far enough to be read:
+    // the lane's mail settings are loopback-plaintext, which that file rightly
+    // refuses outside development and test, and this test is about the gateway.
+    await withEnv({ NODE_ENV: 'staging', SMTP_HOST: undefined }, async () => {
       const { getAdapter } = await import('../src/lib/gateway/index.js');
       expect(() => getAdapter()).toThrowError(/not enabled on this deployment/i);
     });
@@ -1713,5 +1735,101 @@ describe('recovery racing a delayed webhook', () => {
     expect(payments[0].id).toBe(paymentId);
     const finalOrder = await prisma.order.findUnique({ where: { id: order.id } });
     expect(finalOrder.status).toBe('PAID');
+  });
+});
+
+// --- rate limiting ------------------------------------------------------------
+//
+// The whole suite runs with the limiters skipped (NODE_ENV=test), which is
+// exactly why a control is needed: a skipped limiter would stay green even if
+// the 429 path were broken. setRateLimitEnforcementForTest switches genuine
+// enforcement on for these tests alone; the production configuration values
+// are the ones being exercised.
+//
+// Isolation: app.js trusts two proxy hops, so a request carrying
+// "client, proxy" in X-Forwarded-For is keyed on `client`. Each probe here
+// uses a dedicated address — every other request in this file keys on the
+// loopback socket address, so their counters never meet, and resetKey() on
+// the probe address is exact.
+describe('rate limiting (real 429 control)', () => {
+  const PROBE_IP = '10.99.0.7';
+  const NEIGHBOUR_IP = '10.99.0.8';
+  const asClient = (ip) => `${ip}, 172.18.0.1`;
+
+  const failedLogin = (ip = PROBE_IP) =>
+    request(app).post('/api/auth/login').set('X-Forwarded-For', asClient(ip))
+      .send({ email: 'nobody.rl@test.local', password: 'wrong-password-probe' });
+  const correctLogin = (ip = PROBE_IP) =>
+    request(app).post('/api/auth/login').set('X-Forwarded-For', asClient(ip))
+      .send({ email: 'cashier.g@test.local', password: PW });
+  const resetProbes = () => {
+    for (const ip of [PROBE_IP, NEIGHBOUR_IP]) {
+      loginLimiter.resetKey(ip);
+      globalLimiter.resetKey(ip);
+    }
+  };
+
+  afterAll(() => {
+    setRateLimitEnforcementForTest(false);
+    resetProbes();
+  });
+
+  it('negative control: in the suite default state repeated failures stay 401 and never 429', async () => {
+    resetProbes();
+    for (let i = 1; i <= 11; i += 1) {
+      const res = await failedLogin();
+      expect(res.status, `attempt ${i}: ${JSON.stringify(res.body)}`).toBe(401);
+      expect(res.body.error.code).toBe('POS_UNAUTHENTICATED');
+    }
+  });
+
+  it('the 11th failed sign-in from one address inside the window is refused 429 POS_RATE_LIMITED', async () => {
+    resetProbes();
+    setRateLimitEnforcementForTest(true);
+    try {
+      for (let i = 1; i <= 10; i += 1) {
+        const res = await failedLogin();
+        expect(res.status, `attempt ${i}: ${JSON.stringify(res.body)}`).toBe(401);
+      }
+      const blocked = await failedLogin();
+      expect(blocked.status, JSON.stringify(blocked.body)).toBe(429);
+      expect(blocked.body.error.code).toBe('POS_RATE_LIMITED');
+      expect(blocked.body.error.message).toMatch(/sign-in attempts/i);
+      // Shipped header configuration: standard on, legacy off.
+      expect(blocked.headers['retry-after']).toBeDefined();
+      expect(
+        blocked.headers['ratelimit-limit'] ?? blocked.headers['ratelimit'],
+        'standard RateLimit headers missing',
+      ).toBeDefined();
+      expect(blocked.headers['x-ratelimit-limit']).toBeUndefined();
+
+      // It is the limiter refusing, not auth: the RIGHT password from the
+      // same address is refused identically while the window holds.
+      const evenCorrect = await correctLogin();
+      expect(evenCorrect.status, JSON.stringify(evenCorrect.body)).toBe(429);
+
+      // resetKey is what the isolation of this suite rests on — after it,
+      // the same address signs in normally.
+      resetProbes();
+      const after = await correctLogin();
+      expect(after.status, JSON.stringify(after.body)).toBe(200);
+    } finally {
+      setRateLimitEnforcementForTest(false);
+      resetProbes();
+    }
+  });
+
+  it('a blocked address draws nobody else down: the counter is per client IP', async () => {
+    resetProbes();
+    setRateLimitEnforcementForTest(true);
+    try {
+      for (let i = 1; i <= 11; i += 1) await failedLogin();
+      expect((await failedLogin()).status).toBe(429);
+      const neighbour = await correctLogin(NEIGHBOUR_IP);
+      expect(neighbour.status, JSON.stringify(neighbour.body)).toBe(200);
+    } finally {
+      setRateLimitEnforcementForTest(false);
+      resetProbes();
+    }
   });
 });

@@ -1,4 +1,12 @@
+# Both forms on purpose. The trailing slash matches a DIRECTORY only, and in a
+# repo with ~18 worktrees it is normal to symlink one lane's node_modules into
+# another rather than re-install 500 MB. A symlink is not a directory, so
+# `node_modules/` alone does NOT ignore it: 2026-09-24 the consolidation
+# worktree showed `?? frontend/node_modules` for a symlink into the foundation
+# lane, one `git add -A` away from committing an absolute path that exists on
+# no other machine. The bare line below catches the symlink too.
 node_modules/
+node_modules
 dist/
 .env
 .env.local
@@ -11,3 +19,20 @@ dist/
 # backend/ can pick one up. The setup script does not trust this line: it runs
 # `git check-ignore` on the exact path and refuses to write if the answer is no.
 .secrets/
+
+# Per-worktree dev-stack scratch: backend/vite logs, PID files and snapshot
+# hashes written by a lane's own run scripts. Never committed on any branch
+# (`git log --all -- .devlogs` is empty), and `*.log` above caught only part of
+# it — the .pid files and the hashes were still committable, so `git add -A` in
+# a lane could land a stale PID in the release repo. Ignored by directory.
+# Evidence meant to outlive the lane belongs in docs/, not here.
+.devlogs/
+
+# Captured mail. backend/scripts/mail-sink.mjs writes every message it accepts
+# as .eml, and those bodies hold live 8-digit sign-in codes until redeemed.
+# deploy/e2e-isolated.sh points it under .devlogs/ (ignored above), but the
+# script's own default is ./.maildrop, so running the sink by hand from a lane
+# root would otherwise leave working credentials one `git add -A` away from a
+# PUBLIC repo. Ignored by directory and by extension, at every depth.
+.maildrop/
+*.eml

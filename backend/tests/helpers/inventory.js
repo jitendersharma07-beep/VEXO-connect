@@ -7,93 +7,64 @@
 
 import { prisma } from '../../src/lib/prisma.js';
 import { hashPassword } from '../../src/lib/crypto.js';
+// The product's own minter, not a literal. Branch.publicId is globally unique
+// with a CHECK pinning ^VC-[A-Z]{2}-[0-9]{4,}$, and this fixture is built once
+// per suite — five hardcoded ids would collide on the second suite, and a
+// hand-written format would be free to drift away from the constraint the
+// moment the constraint changed. Minting draws from PlatformCounter, so it is
+// collision-free by construction and correct by the same code the route uses.
+import { mintStorePublicId } from '../../src/lib/identity.js';
 
-export const wipeInventory = async () => {
-  // Keyed by job NAME, not by company, so it survives every other delete here
-  // and would carry one suite's lease and run counts into the next one.
-  await prisma.inventorySchedulerState.deleteMany();
-  await prisma.inventoryNotification.deleteMany();
-  await prisma.inventoryReminder.deleteMany();
-  await prisma.storeRequestEvent.deleteMany();
-  await prisma.storeRequestAttachment.deleteMany();
-  await prisma.storeRequestIssue.deleteMany();
-  await prisma.stockTransferLineBatch.deleteMany();
-  await prisma.stockTransferLine.deleteMany();
-  await prisma.stockTransfer.deleteMany();
-  await prisma.storeRequestLine.deleteMany();
-  await prisma.storeRequest.deleteMany();
-  await prisma.replenishmentRun.deleteMany();
-  await prisma.replenishmentPlanLine.deleteMany();
-  await prisma.replenishmentPlan.deleteMany();
-  await prisma.stockReservationLine.deleteMany();
-  await prisma.stockReservation.deleteMany();
-  await prisma.stockValuationSnapshotLine.deleteMany();
-  await prisma.stockValuationSnapshot.deleteMany();
-  await prisma.productionBatch.deleteMany();
-  await prisma.stockWastageLine.deleteMany();
-  await prisma.stockWastage.deleteMany();
-  await prisma.stockCountLine.deleteMany();
-  await prisma.stockCount.deleteMany();
-  await prisma.saleStockReturn.deleteMany();
-  await prisma.saleConsumption.deleteMany();
-  await prisma.recipeModifierAdjustment.deleteMany();
-  await prisma.recipeProductLink.deleteMany();
-  await prisma.recipeLine.deleteMany();
-  await prisma.recipeVersion.deleteMany();
-  await prisma.recipe.deleteMany();
-  await prisma.purchaseReturnLine.deleteMany();
-  await prisma.purchaseReturn.deleteMany();
-  await prisma.goodsReceiptLandedCost.deleteMany();
-  await prisma.goodsReceiptLine.deleteMany();
-  await prisma.goodsReceipt.deleteMany();
-  await prisma.purchaseOrderLine.deleteMany();
-  await prisma.purchaseOrder.deleteMany();
-  await prisma.supplierItemPrice.deleteMany();
-  await prisma.stockBatchOpening.deleteMany();
-  await prisma.stockBatchBalance.deleteMany();
-  await prisma.stockMovement.deleteMany();
-  await prisma.stockBalance.deleteMany();
-  // After the batches: a received batch records the supplier it came from, so
-  // the supplier outlives the stock it delivered.
-  await prisma.stockBatch.deleteMany();
-  await prisma.supplier.deleteMany();
-  await prisma.stockReorderRule.deleteMany();
-  await prisma.inventoryDocCounter.deleteMany();
-  await prisma.inventorySettings.deleteMany();
-  await prisma.inventoryLocationAccess.deleteMany();
-  await prisma.inventoryItemUnit.deleteMany();
-  await prisma.inventoryItem.deleteMany();
-  await prisma.inventoryLocation.deleteMany();
-};
 
-export const wipeCore = async () => {
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
+// Clears every table in the test database.
+//
+// This used to be three hand-ordered lists of deleteMany() calls, one table per
+// line, sequenced by foreign key. That is the wrong shape for a file that lives
+// on a lane: every lane that merges brings tables this file has never heard of,
+// and the list does not merely go out of date — it FAILS, deep inside an
+// unrelated suite. Merging main added KitchenItem, OrderItemModifier and
+// PromotionRedemption, all of which hold an OrderItem; the delete of OrderItem
+// then aborted inside the inventory suites, which had never created a KOT or a
+// promotion in their lives. The error named an inventory test, and the cause
+// was three lanes away.
+//
+// So the order is asked of the database instead. TRUNCATE ... CASCADE is
+// order-independent by definition, and the table list comes from the catalog,
+// so a table added by the next merge is cleared by this code the day it
+// appears, without anyone remembering to add a line.
+//
+// _prisma_migrations is excluded: it is the record of what has been applied,
+// not test data, and truncating it would make the next run believe the schema
+// was never migrated.
+let cachedTruncate = null;
+
+const truncateStatement = async () => {
+  if (cachedTruncate) return cachedTruncate;
+
+  // The guard is not decoration. This helper truncates EVERY table it is
+  // pointed at, so it refuses to run anywhere but a database whose name ends
+  // in _test — the same rule the lane's test runner enforces on the URL. A
+  // misread .env that pointed this at the dev database would otherwise empty
+  // it silently and the only symptom would be a passing test suite.
+  const [{ current_database: db }] = await prisma.$queryRawUnsafe('select current_database()');
+  if (!/_test$/.test(db)) {
+    throw new Error(`refusing to wipe "${db}": this helper only runs against a *_test database`);
+  }
+
+  const rows = await prisma.$queryRawUnsafe(
+    `select tablename from pg_tables
+      where schemaname = 'public' and tablename <> '_prisma_migrations'`,
+  );
+  if (!rows.length) throw new Error('no tables found to wipe — is this database migrated?');
+  // Quoted: these identifiers are mixed case, and an unquoted Company is folded
+  // to lowercase by Postgres and matches nothing.
+  const list = rows.map((r) => `"public"."${r.tablename}"`).join(', ');
+  cachedTruncate = `truncate table ${list} restart identity cascade`;
+  return cachedTruncate;
 };
 
 export const wipeAll = async () => {
-  await wipeInventory();
-  await wipeCore();
+  await prisma.$executeRawUnsafe(await truncateStatement());
 };
 
 export const TEST_PASSWORD = 'test-password-1';
@@ -116,10 +87,10 @@ export const buildBaseFixture = async ({ slug = 'inv-co' } = {}) => {
   });
 
   const storeA = await prisma.branch.create({
-    data: { companyId: company.id, name: '店 A', code: 'SA' },
+    data: { companyId: company.id, publicId: await mintStorePublicId(prisma), name: '店 A', code: 'SA' },
   });
   const storeB = await prisma.branch.create({
-    data: { companyId: company.id, name: 'Store B', code: 'SB' },
+    data: { companyId: company.id, publicId: await mintStorePublicId(prisma), name: 'Store B', code: 'SB' },
   });
 
   const passwordHash = await hashPassword(TEST_PASSWORD);

@@ -7,10 +7,25 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import { startSmtpSink } from '../scripts/lib/smtpSink.js';
 
 if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
   throw new Error('foundation.test.js requires a DATABASE_URL ending in _test');
 }
+
+// Onboarding a customer owner is an INVITATION now, so this file needs a
+// place for the message to land. Set before app.js is imported, because
+// config/env.js reads the environment once at load and decides there whether
+// mail is configured at all.
+const sink = startSmtpSink({ port: 0 });
+await sink.started;
+
+process.env.SMTP_HOST = '127.0.0.1';
+process.env.SMTP_PORT = String(sink.port);
+process.env.SMTP_SECURITY = 'none';
+process.env.MAIL_FROM = 'VEXO Connect <no-reply@vexoconnect.test>';
+process.env.MAIL_ALLOWED_RECIPIENTS = '*@test.local';
+process.env.APP_URL = 'https://portal.vexoconnect.test/pos';
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
@@ -19,7 +34,29 @@ const { env } = await import('../src/config/env.js');
 
 const app = createApp();
 
+// The accept token out of the message the sink actually received. The body is
+// a base64 text/plain MIME part, so reading msg.raw directly finds nothing;
+// the link carries the token in the URL fragment.
+const inviteTokenFor = (to) => {
+  const msg = [...sink.messages].reverse().find((m) => m.envelope.to.join(',').includes(to));
+  if (!msg) throw new Error(`no message delivered to ${to}`);
+  const part = msg.raw.split(/--=_vexo_[0-9a-f]+/).find((p) => p.includes('text/plain'));
+  const body = Buffer.from(part.slice(part.indexOf('\r\n\r\n') + 4).replace(/\r\n/g, ''), 'base64').toString('utf8');
+  const token = body.match(/https:\/\/\S+#([A-Za-z0-9_-]{20,})/)?.[1];
+  if (!token) throw new Error(`no accept link in the message to ${to}`);
+  return token;
+};
+
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   // Before PosUser and Branch, which it references. This file never creates a
   // DayClose, but it shares one test database with the files that do, and a
   // wipe that only clears its own tables leaves the other file's rows holding
@@ -32,10 +69,19 @@ const wipe = async () => {
   // order delete fails outright once any intent exists.
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  // Promotion tables before Order/Product/Category/Branch/Company — all four
+  // point at them with RESTRICT foreign keys.
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -49,6 +95,7 @@ const wipe = async () => {
   // RESTRICT on purpose — a policy must not survive, or silently widen,
   // because its branch or user went away — so it has to go first here.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -82,10 +129,10 @@ beforeAll(async () => {
     data: { name: 'Charlie Expired', slug: 'charlie-expired', licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() - 86400e3) } } },
   });
 
-  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha One', code: 'A1' } });
-  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha Two', code: 'A2' } });
-  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, name: 'Bravo One', code: 'B1' } });
-  await prisma.branch.create({ data: { companyId: companyC.id, name: 'Charlie One', code: 'C1' } });
+  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-FA-0001', name: 'Alpha One', code: 'A1' } });
+  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-FA-0002', name: 'Alpha Two', code: 'A2' } });
+  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, publicId: 'VC-FA-0003', name: 'Bravo One', code: 'B1' } });
+  await prisma.branch.create({ data: { companyId: companyC.id, publicId: 'VC-FA-0004', name: 'Charlie One', code: 'C1' } });
 
   atcAdmin = await mkUser({ email: 'atc@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN', passwordHash });
   await mkUser({ email: 'owner.a@test.local', fullName: 'Owner A', role: 'CUSTOMER_OWNER', companyId: companyA.id, passwordHash });
@@ -103,6 +150,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await sink.close();
   await prisma.$disconnect();
 });
 
@@ -233,14 +281,16 @@ describe('branch scoping', () => {
   it('branch-pinned roles list only their own branch', async () => {
     const mgr = await request(app).get('/api/branches').set(auth(tokens.managerA1));
     expect(mgr.body.branches.map((b) => b.code)).toEqual(['A1']);
+    // The Phase 1 catalog keeps org.store.read from CASHIER: a till login
+    // sells; it does not browse the organisation's stores.
     const cash = await request(app).get('/api/branches').set(auth(tokens.cashierA1));
-    expect(cash.body.branches.map((b) => b.code)).toEqual(['A1']);
+    expect(cash.status).toBe(403);
   });
 
-  it('a cashier reading a sibling branch is refused as forbidden, not hidden', async () => {
-    const own = await request(app).get(`/api/branches/${branchA1.id}`).set(auth(tokens.cashierA1));
+  it('a branch-pinned manager reading a sibling branch is refused as forbidden, not hidden', async () => {
+    const own = await request(app).get(`/api/branches/${branchA1.id}`).set(auth(tokens.managerA1));
     expect(own.status).toBe(200);
-    const sibling = await request(app).get(`/api/branches/${branchA2.id}`).set(auth(tokens.cashierA1));
+    const sibling = await request(app).get(`/api/branches/${branchA2.id}`).set(auth(tokens.managerA1));
     expect(sibling.status).toBe(403);
     expect(sibling.body.error.code).toBe('POS_FORBIDDEN');
   });
@@ -319,18 +369,37 @@ describe('ATC console lifecycle', () => {
     expect(lic.status).toBe(201);
     expect(lic.body.license.branchLimit).toBe(1);
 
+    // The owner arrives by INVITATION. This endpoint used to mint a temporary
+    // password and return it here, which made the owner's first credential
+    // something VEXO chose, saw, and then had to transmit to an address nobody
+    // had proved the customer controlled.
     const owner = await request(app)
       .post(`/api/atc/companies/${companyId}/owner`)
       .set(auth(tokens.atc))
       .send({ email: 'owner.d@test.local', fullName: 'Owner D' });
     expect(owner.status).toBe(201);
-    expect(owner.body.tempPassword).toBeTruthy();
+    expect(owner.body.invitation.email).toBe('owner.d@test.local');
+    // No credential in the response, and no account yet either: the company has
+    // an owner only once the person on the other end proves the mailbox.
+    expect(owner.body.tempPassword).toBeUndefined();
+    expect(JSON.stringify(owner.body)).not.toMatch(/https?:\/\//);
+    expect(await prisma.posUser.count({ where: { email: 'owner.d@test.local' } })).toBe(0);
+
+    // The token is read out of the message that was actually delivered — never
+    // fabricated — so this proves the link in the mailbox is the one honoured.
+    const token = inviteTokenFor('owner.d@test.local');
+    const accepted = await request(app)
+      .post('/api/invite/accept')
+      .send({ token, password: 'owner-d-chose-this-1' });
+    expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
 
     const loginRes = await request(app)
       .post('/api/auth/login')
-      .send({ email: 'owner.d@test.local', password: owner.body.tempPassword });
+      .send({ email: 'owner.d@test.local', password: 'owner-d-chose-this-1' });
     expect(loginRes.status).toBe(200);
-    expect(loginRes.body.user.mustChangePassword).toBe(true);
+    // Nothing to force a change of: they chose it themselves, and nobody else
+    // has ever seen it.
+    expect(loginRes.body.user.mustChangePassword).toBe(false);
 
     const branches = await request(app).get('/api/branches').set(auth(loginRes.body.token));
     expect(branches.status).toBe(200);

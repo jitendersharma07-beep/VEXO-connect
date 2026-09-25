@@ -25,15 +25,31 @@ const { mergeDiscountPolicyRows } = await import('../src/lib/discountPolicy.js')
 const app = createApp();
 
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   await prisma.dayClose.deleteMany();
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -46,6 +62,7 @@ const wipe = async () => {
   // DiscountPolicy's foreign keys are RESTRICT, so it goes before the branch,
   // user and company rows it points at.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -122,10 +139,10 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  d1 = await prisma.branch.create({ data: { companyId: delta.id, name: 'Delta One', code: 'D1' } });
-  d2 = await prisma.branch.create({ data: { companyId: delta.id, name: 'Delta Two', code: 'D2' } });
-  e1 = await prisma.branch.create({ data: { companyId: echo.id, name: 'Echo One', code: 'E1' } });
-  f1 = await prisma.branch.create({ data: { companyId: foxtrot.id, name: 'Foxtrot One', code: 'F1' } });
+  d1 = await prisma.branch.create({ data: { companyId: delta.id, publicId: 'VC-DI-0001', name: 'Delta One', code: 'D1' } });
+  d2 = await prisma.branch.create({ data: { companyId: delta.id, publicId: 'VC-DI-0002', name: 'Delta Two', code: 'D2' } });
+  e1 = await prisma.branch.create({ data: { companyId: echo.id, publicId: 'VC-DI-0003', name: 'Echo One', code: 'E1' } });
+  f1 = await prisma.branch.create({ data: { companyId: foxtrot.id, publicId: 'VC-DI-0004', name: 'Foxtrot One', code: 'F1' } });
 
   const mk = async (key, data) => {
     users[key] = await prisma.posUser.create({ data: { passwordHash, ...data } });

@@ -20,6 +20,15 @@ const { istDateOf, MANUAL_PAYMENT_LABEL } = await import('../src/lib/orders.js')
 const app = createApp();
 
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   // Before PosUser and Branch, which it references. The self-relation is
   // ON DELETE SET NULL so a bulk delete needs no ordering of its own.
   await prisma.dayClose.deleteMany();
@@ -29,10 +38,17 @@ const wipe = async () => {
   // order delete fails outright once any intent exists.
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -45,6 +61,7 @@ const wipe = async () => {
   // DiscountPolicy's foreign keys are RESTRICT, so it goes before the branch,
   // user and company rows it points at.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -84,9 +101,9 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: new Date(Date.now() - 86400e3) } },
     },
   });
-  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha One', code: 'A1' } });
-  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, name: 'Alpha Two', code: 'A2' } });
-  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, name: 'Bravo One', code: 'B1' } });
+  branchA1 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-PH-0001', name: 'Alpha One', code: 'A1' } });
+  branchA2 = await prisma.branch.create({ data: { companyId: companyA.id, publicId: 'VC-PH-0002', name: 'Alpha Two', code: 'A2' } });
+  branchB1 = await prisma.branch.create({ data: { companyId: companyB.id, publicId: 'VC-PH-0003', name: 'Bravo One', code: 'B1' } });
 
   const mk = (data) => prisma.posUser.create({ data: { passwordHash, ...data } });
   await mk({ email: 'atc@test.local', fullName: 'ATC Admin', role: 'POS_SUPER_ADMIN' });
@@ -441,6 +458,39 @@ describe('transitions, refunds and voids', () => {
       .send({ productId: cat.cappuccino });
     expect(add.body.order.items).toHaveLength(1);
     expect(add.body.order.items[0].qty).toBe(3);
+  });
+
+  // The merge above is product+variant only, which was the whole of the rule
+  // until VC-102 added modifiers. The till's key was updated for them and the
+  // phone centre's copy was not — that is D-3. The key is one shared function
+  // now, but a shared function is only as good as both call sites still using
+  // it, so this pins the till's end of it; phoneOrders.test.js pins the other.
+  it('a different modifier keeps the lines apart, the same one merges them', async () => {
+    const p = await request(app).post('/api/catalog/products').set(auth(tokens.ownerA))
+      .send({ categoryId: cat.food, name: 'Toastie', basePrice: 100, taxRateId: cat.gst5 });
+    expect(p.status, JSON.stringify(p.body)).toBe(201);
+    const g = await request(app).post(`/api/catalog/products/${p.body.product.id}/modifier-groups`)
+      .set(auth(tokens.ownerA)).send({ name: 'Bread', maxSelect: 1 });
+    expect(g.status, JSON.stringify(g.body)).toBe(201);
+    const groupId = g.body.product.modifierGroups.find((x) => x.name === 'Bread').id;
+    const optionId = async (name, price) => {
+      const res = await request(app)
+        .post(`/api/catalog/products/${p.body.product.id}/modifier-groups/${groupId}/options`)
+        .set(auth(tokens.ownerA)).send({ name, price });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return res.body.product.modifierGroups.find((x) => x.id === groupId).options.find((o) => o.name === name).id;
+    };
+    const rye = await optionId('Rye', 20);
+    const sourdough = await optionId('Sourdough', 30);
+
+    const o = await takeaway([
+      { productId: p.body.product.id, qty: 1, modifierOptionIds: [rye] },
+      { productId: p.body.product.id, qty: 1, modifierOptionIds: [sourdough] },
+      { productId: p.body.product.id, qty: 1, modifierOptionIds: [rye] },
+    ]);
+    expect(o.items).toHaveLength(2);
+    expect(o.items.map((i) => [Number(i.unitPrice), i.qty]).sort((a, b) => a[0] - b[0]))
+      .toEqual([[120, 2], [130, 1]]);
   });
 
   it('payments only on BILLED; overpay by amount is refused', async () => {
@@ -864,6 +914,7 @@ describe('transitions, refunds and voids', () => {
         prisma.payment.create({
           data: {
             orderId: o.id,
+            branchId: branchA1.id,
             method: 'CARD',
             amount: '1.00',
             idempotencyKey: 'db-backstop-0001',
@@ -874,10 +925,10 @@ describe('transitions, refunds and voids', () => {
       // …while NULL keys stay exempt, which is what lets every pre-existing
       // row and every gateway payment go on coexisting.
       const a = await prisma.payment.create({
-        data: { orderId: o.id, method: 'CASH', amount: '1.00' },
+        data: { orderId: o.id, branchId: branchA1.id, method: 'CASH', amount: '1.00' },
       });
       const b = await prisma.payment.create({
-        data: { orderId: o.id, method: 'CASH', amount: '1.00' },
+        data: { orderId: o.id, branchId: branchA1.id, method: 'CASH', amount: '1.00' },
       });
       expect(a.idempotencyKey).toBeNull();
       expect(b.idempotencyKey).toBeNull();
@@ -1017,7 +1068,7 @@ describe('daily closing', () => {
     const orderId = o.body.order.id;
     await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
     await prisma.payment.create({
-      data: { orderId, method: 'CARD', channel: 'GATEWAY', amount: '500.00', providerRef: `pay_probe_${Date.now()}` },
+      data: { orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY', amount: '500.00', providerRef: `pay_probe_${Date.now()}` },
     });
     const mgr = await prisma.posUser.findFirst({ where: { branchId: branchA1.id, role: 'BRANCH_MANAGER' } });
     await prisma.refund.create({
@@ -1270,7 +1321,7 @@ describe('daily closing', () => {
     const orderId = o.body.order.id;
     await request(app).post(`/api/orders/${orderId}/bill`).set(auth(tokens.cashierA1)).send({}).expect(200);
     await prisma.payment.create({
-      data: { orderId, method: 'CARD', channel: 'GATEWAY', amount: '250.00', providerRef: `pay_post_${Date.now()}` },
+      data: { orderId, branchId: branchA1.id, method: 'CARD', channel: 'GATEWAY', amount: '250.00', providerRef: `pay_post_${Date.now()}` },
     });
 
     const p = (await preview(tokens.managerA1)).body.existingClose.postClose;

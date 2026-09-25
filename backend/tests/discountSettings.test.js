@@ -22,15 +22,31 @@ const { hashPassword } = await import('../src/lib/crypto.js');
 const app = createApp();
 
 const wipe = async () => {
+  // Shared test database: another suite's kitchen/print rows RESTRICT the
+  // station delete inside this wipe's Branch cascade.
+  await prisma.printJob.deleteMany();
+  await prisma.printTarget.deleteMany();
+  await prisma.printAgent.deleteMany();
+  await prisma.kitchenItem.deleteMany();
+  await prisma.kitchenRoute.deleteMany();
+  await prisma.kitchenStation.deleteMany();
+  await prisma.kitchenCursor.deleteMany();
   await prisma.dayClose.deleteMany();
   await prisma.refund.deleteMany();
   await prisma.payment.deleteMany();
   await prisma.gatewayWebhookEvent.deleteMany();
   await prisma.paymentIntent.deleteMany();
+  await prisma.promotionRedemption.deleteMany();
+  await prisma.promotionStore.deleteMany();
+  await prisma.promotionItemRule.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.invoiceCounter.deleteMany();
+  await prisma.modifierOption.deleteMany();
+  await prisma.modifierGroup.deleteMany();
   await prisma.productVariant.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
@@ -42,6 +58,7 @@ const wipe = async () => {
   await prisma.license.deleteMany();
   // RESTRICT foreign keys: policies go before the rows they point at.
   await prisma.discountPolicy.deleteMany();
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();
@@ -102,9 +119,9 @@ beforeAll(async () => {
       licenses: { create: { plan: 'SINGLE_STORE', baseBranchLimit: 1, expiresAt: inADay } },
     },
   });
-  f1 = await prisma.branch.create({ data: { companyId: fox.id, name: 'Foxtrot One', code: 'F1' } });
-  f2 = await prisma.branch.create({ data: { companyId: fox.id, name: 'Foxtrot Two', code: 'F2' } });
-  g1 = await prisma.branch.create({ data: { companyId: golf.id, name: 'Golf One', code: 'G1' } });
+  f1 = await prisma.branch.create({ data: { companyId: fox.id, publicId: 'VC-DT-0001', name: 'Foxtrot One', code: 'F1' } });
+  f2 = await prisma.branch.create({ data: { companyId: fox.id, publicId: 'VC-DT-0002', name: 'Foxtrot Two', code: 'F2' } });
+  g1 = await prisma.branch.create({ data: { companyId: golf.id, publicId: 'VC-DT-0003', name: 'Golf One', code: 'G1' } });
 
   const mk = async (key, data) => {
     users[key] = await prisma.posUser.create({ data: { passwordHash, ...data } });

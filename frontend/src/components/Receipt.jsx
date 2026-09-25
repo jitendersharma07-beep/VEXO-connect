@@ -143,7 +143,26 @@ export function ReceiptView({ receipt }) {
 // names below (`print-shell`, `print-frame`) are the hooks it uses to strip the
 // on-screen chrome — rounded corners, shadow, the 24rem modal width — off the
 // printed copy. Do not rename them without changing that block.
-function PrintDialog({ title, onClose, children }) {
+// Explicit Print click only — merely opening the modal is viewing, not a
+// print request, and stays unaudited. Fire-and-forget: an audit hiccup must
+// never block the dialog. The row records a REQUEST; the browser gives no
+// delivery status, so nothing here may be read as "printed on paper".
+// The server now answers { printEvent: { copyNumber, reprint } } (reprint
+// marker contract, Phase 2). This caller deliberately ignores it: stamping
+// DUPLICATE on the rendered copy is Window 2/3's print-UI work, and doing it
+// here would mean awaiting the network before window.print(), which must
+// stay inside the user gesture. Do not wire that in without W1 sign-off.
+const recordPrintRequest = (printEvent) => {
+  if (!printEvent?.orderId) return;
+  api
+    .post(`/orders/${printEvent.orderId}/print-events`, {
+      document: printEvent.document,
+      ...(printEvent.kotSeq ? { kotSeq: printEvent.kotSeq } : {}),
+    })
+    .catch(() => {});
+};
+
+function PrintDialog({ title, onClose, printEvent, children }) {
   return createPortal(
     <div
       data-print-root
@@ -157,7 +176,14 @@ function PrintDialog({ title, onClose, children }) {
         <div className="no-print mb-3 flex items-center justify-between">
           <h2 className="text-lg font-bold text-pos-ink">{title}</h2>
           <div className="flex items-center gap-2">
-            <button type="button" className="btn-primary" onClick={() => window.print()}>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => {
+                recordPrintRequest(printEvent);
+                window.print();
+              }}
+            >
               <Printer className="h-4 w-4" /> Print
             </button>
             <button
@@ -180,7 +206,11 @@ function PrintDialog({ title, onClose, children }) {
 export function ReceiptModal({ receipt, onClose }) {
   if (!receipt) return null;
   return (
-    <PrintDialog title="Receipt" onClose={onClose}>
+    <PrintDialog
+      title="Receipt"
+      onClose={onClose}
+      printEvent={{ orderId: receipt.order?.id, document: 'RECEIPT' }}
+    >
       <ReceiptView receipt={receipt} />
     </PrintDialog>
   );
@@ -213,7 +243,11 @@ export function KotView({ kot }) {
 export function KotModal({ kot, onClose }) {
   if (!kot) return null;
   return (
-    <PrintDialog title="Kitchen order ticket" onClose={onClose}>
+    <PrintDialog
+      title="Kitchen order ticket"
+      onClose={onClose}
+      printEvent={{ orderId: kot.orderId, document: 'KOT', kotSeq: kot.seq }}
+    >
       <KotView kot={kot} />
     </PrintDialog>
   );

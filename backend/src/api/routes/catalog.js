@@ -253,11 +253,28 @@ const publicProduct = (p) => ({
     : null,
   status: p.status,
   variants: (p.variants ?? []).map(publicVariant),
+  modifierGroups: (p.modifierGroups ?? []).map((g) => ({
+    id: g.id,
+    name: g.name,
+    minSelect: g.minSelect,
+    maxSelect: g.maxSelect,
+    status: g.status,
+    options: (g.options ?? []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      price: num(m.price),
+      status: m.status,
+    })),
+  })),
 });
 
 const PRODUCT_INCLUDE = {
   taxRate: { select: { id: true, name: true, ratePercent: true } },
   variants: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] },
+  modifierGroups: {
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    include: { options: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+  },
 };
 
 const productCreate = z.object({
@@ -496,6 +513,232 @@ router.delete(
       entityId: product.id,
       companyId: req.companyScope.id,
       meta: { variantId: variant.id, name: variant.name },
+    });
+    res.json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+// --- modifier groups + options -----------------------------------------------
+
+const groupCreate = z
+  .object({
+    name: z.string().trim().min(1).max(60),
+    minSelect: z.number().int().min(0).default(0),
+    maxSelect: z.number().int().min(1).nullish(),
+  })
+  .refine((g) => g.maxSelect == null || g.maxSelect >= g.minSelect, {
+    message: 'maxSelect must be at least minSelect',
+    path: ['maxSelect'],
+  });
+const groupUpdate = z
+  .object({
+    name: z.string().trim().min(1).max(60).optional(),
+    minSelect: z.number().int().min(0).optional(),
+    maxSelect: z.number().int().min(1).nullish(),
+    status: z.enum(['ACTIVE', 'ARCHIVED']).optional(),
+  });
+
+// D-5 (docs/VC104-BACKEND-DEFECTS.md). The till path enforces minSelect over
+// ACTIVE groups while counting only ACTIVE options
+// (orders.js `resolveCatalogLine`), so an ACTIVE group that requires more
+// choices than it has available cannot be satisfied by any caller and the
+// product stops selling EVERYWHERE — till, phone, all of it. Nothing here used
+// to check that, and four ordinary edits reached the state with a 200.
+//
+// The invariant is one sentence: **an ACTIVE group must have at least
+// `minSelect` ACTIVE options.** It is checked against the RESULT of the write,
+// not against the payload, because three of the four paths send a body that is
+// perfectly valid on its own and only goes wrong in combination with what is
+// already stored — which is exactly why a zod `.refine` cannot express it.
+//
+// 409 and not 400 on purpose: nothing about the input is malformed. The request
+// conflicts with the state of the group, which is what 409 is for. Every
+// message names the way out, because the remedy is not guessable — archiving
+// the GROUP is fine and archiving its last OPTION is not, and nothing in the
+// API said so.
+//
+// Deliberately NOT lenient about pre-existing breakage: a group that is already
+// unsatisfiable refuses unrelated edits too (a rename, say). That is the point.
+// All three repairs stay open — archive the group, lower minSelect, or restore
+// an option — because each of them ends in a state that satisfies the rule.
+const assertSatisfiable = ({ name, minSelect, status, activeOptions }, remedy) => {
+  if (status !== 'ACTIVE' || minSelect <= activeOptions) return;
+  const need = `${minSelect} choice${minSelect === 1 ? '' : 's'}`;
+  const have = activeOptions === 1 ? '1 is' : `${activeOptions} are`;
+  throw conflict(
+    `"${name}" would require ${need} but only ${have} available, so the product could not be sold. ${remedy}`,
+  );
+};
+
+const countActive = (group) => group.options.filter((m) => m.status === 'ACTIVE').length;
+
+router.post(
+  '/products/:id/modifier-groups',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const product = await loadProduct(req);
+    const data = groupCreate.parse(req.body);
+    // A group is born with no options, so any minimum above zero is instantly
+    // unsatisfiable. Checked before the clash query because it needs no
+    // database read at all. This does make a required group a three-step job —
+    // create it open, add the options, then set the minimum — and the message
+    // says so, because otherwise this reads as "required groups are banned".
+    assertSatisfiable(
+      { ...data, status: 'ACTIVE', activeOptions: 0 },
+      'Create the group with no minimum, add its options, then raise the minimum.',
+    );
+    const clash = await prisma.modifierGroup.findFirst({
+      where: { productId: product.id, name: data.name },
+    });
+    if (clash) throw conflict(`Modifier group "${data.name}" already exists on this product`);
+    const group = await prisma.modifierGroup.create({
+      data: {
+        productId: product.id,
+        name: data.name,
+        minSelect: data.minSelect,
+        maxSelect: data.maxSelect ?? null,
+      },
+    });
+    await audit(req, {
+      action: 'MODIFIER_GROUP_CREATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, name: group.name },
+    });
+    res.status(201).json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+const loadGroup = async (req) => {
+  const product = await loadProduct(req);
+  const group = product.modifierGroups.find((g) => g.id === req.params.groupId);
+  if (!group) throw notFound('Modifier group not found');
+  return { product, group };
+};
+
+router.patch(
+  '/products/:id/modifier-groups/:groupId',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const { product, group } = await loadGroup(req);
+    const data = groupUpdate.parse(req.body);
+    const min = data.minSelect ?? group.minSelect;
+    const max = data.maxSelect !== undefined ? data.maxSelect : group.maxSelect;
+    if (max != null && max < min) throw badRequest('maxSelect must be at least minSelect', 'maxSelect');
+    // D-5, two ways in through this one route: raising minSelect past the
+    // options that exist, and re-activating a group whose options were all
+    // archived while it was away. `max < min` above was the only cross-field
+    // check here, and it is skipped whenever maxSelect is null — the default.
+    assertSatisfiable(
+      {
+        name: data.name ?? group.name,
+        minSelect: min,
+        status: data.status ?? group.status,
+        activeOptions: countActive(group),
+      },
+      'Add or restore options first, or lower the minimum, or archive the whole group.',
+    );
+    if (data.name && data.name !== group.name) {
+      const clash = await prisma.modifierGroup.findFirst({
+        where: { productId: product.id, name: data.name },
+      });
+      if (clash) throw conflict(`Modifier group "${data.name}" already exists on this product`);
+    }
+    await prisma.modifierGroup.update({
+      where: { id: group.id },
+      data: {
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.minSelect !== undefined ? { minSelect: data.minSelect } : {}),
+        ...(data.maxSelect !== undefined ? { maxSelect: data.maxSelect } : {}),
+        ...(data.status !== undefined ? { status: data.status } : {}),
+      },
+    });
+    await audit(req, {
+      action: 'MODIFIER_GROUP_UPDATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, ...data },
+    });
+    res.json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+const optionCreate = z.object({
+  name: z.string().trim().min(1).max(60),
+  price: money2,
+});
+const optionUpdate = optionCreate.partial().extend({
+  status: z.enum(['ACTIVE', 'ARCHIVED']).optional(),
+});
+
+router.post(
+  '/products/:id/modifier-groups/:groupId/options',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const { product, group } = await loadGroup(req);
+    const data = optionCreate.parse(req.body);
+    const clash = await prisma.modifierOption.findFirst({
+      where: { groupId: group.id, name: data.name },
+    });
+    if (clash) throw conflict(`Option "${data.name}" already exists in this group`);
+    await prisma.modifierOption.create({
+      data: { groupId: group.id, name: data.name, price: data.price.toFixed(2) },
+    });
+    await audit(req, {
+      action: 'MODIFIER_OPTION_CREATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, option: data.name, price: data.price },
+    });
+    res.status(201).json({ product: publicProduct(await loadProduct(req)) });
+  }),
+);
+
+router.patch(
+  '/products/:id/modifier-groups/:groupId/options/:optionId',
+  ...canWrite,
+  asyncHandler(async (req, res) => {
+    const { product, group } = await loadGroup(req);
+    const option = group.options.find((m) => m.id === req.params.optionId);
+    if (!option) throw notFound('Modifier option not found');
+    const data = optionUpdate.parse(req.body);
+    // D-5's commonest way in: retiring the last choice a required group has.
+    // Counted both directions, because restoring an archived option is the
+    // repair and must never be refused by the rule it repairs.
+    const wasActive = option.status === 'ACTIVE';
+    const willBeActive = data.status !== undefined ? data.status === 'ACTIVE' : wasActive;
+    assertSatisfiable(
+      {
+        name: group.name,
+        minSelect: group.minSelect,
+        status: group.status,
+        activeOptions: countActive(group) - (wasActive ? 1 : 0) + (willBeActive ? 1 : 0),
+      },
+      'Archive the whole group instead, or lower its minimum first.',
+    );
+    if (data.name && data.name !== option.name) {
+      const clash = await prisma.modifierOption.findFirst({
+        where: { groupId: group.id, name: data.name },
+      });
+      if (clash) throw conflict(`Option "${data.name}" already exists in this group`);
+    }
+    await prisma.modifierOption.update({
+      where: { id: option.id },
+      data: {
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.price !== undefined ? { price: data.price.toFixed(2) } : {}),
+        ...(data.status !== undefined ? { status: data.status } : {}),
+      },
+    });
+    await audit(req, {
+      action: 'MODIFIER_OPTION_UPDATE',
+      entity: 'Product',
+      entityId: product.id,
+      companyId: req.companyScope.id,
+      meta: { groupId: group.id, optionId: option.id, ...data },
     });
     res.json({ product: publicProduct(await loadProduct(req)) });
   }),

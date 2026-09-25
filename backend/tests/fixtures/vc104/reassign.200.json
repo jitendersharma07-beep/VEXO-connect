@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": "POS_BRANCH_UNAVAILABLE",
+    "message": "That store cannot take this order",
+    "details": {
+      "unavailableReasons": [
+        {
+          "code": "BELOW_MIN_ORDER",
+          "message": "Minimum order for delivery here is ₹1000.00"
+        }
+      ]
+    }
+  }
+}

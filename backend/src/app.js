@@ -21,11 +21,32 @@ import tableRoutes from './api/routes/tables.js';
 import orderRoutes from './api/routes/orders.js';
 import discountPolicyRoutes from './api/routes/discountPolicies.js';
 import reportRoutes from './api/routes/reports.js';
+import menuProfitabilityRoutes from './api/routes/menuProfitability.js';
 import displayRoutes from './api/routes/display.js';
+import kitchenRoutes from './api/routes/kitchen.js';
+import { printAgentsRouter, printJobsRouter } from './api/routes/printing.js';
 import gatewayRoutes from './api/routes/gateway.js';
 // ==== LANE inventory ====
 import inventoryRoutes from './api/routes/inventory/index.js';
 // ==== END LANE inventory ====
+
+// LANE foundation — the organisation, device and permission surface.
+import legalEntityRoutes from './api/routes/legalEntities.js';
+import gstRegistrationRoutes from './api/routes/gstRegistrations.js';
+import brandRoutes from './api/routes/brands.js';
+import regionRoutes from './api/routes/regions.js';
+import terminalRoutes from './api/routes/terminals.js';
+import deviceRoutes from './api/routes/devices.js';
+import permissionRoutes from './api/routes/permissions.js';
+// LANE vc104-api
+import phoneOrderRoutes from './api/routes/phoneOrders.js';
+
+// LANE foundation, Phase 2 — VC-102.
+import promotionRoutes from './api/routes/promotions.js';
+
+// LANE accounts — onboarding, invitations and account recovery.
+import accountRecoveryRoutes from './api/routes/accountRecovery.js';
+import invitationRoutes, { publicRouter as inviteAcceptRoutes } from './api/routes/invitations.js';
 
 export const createApp = () => {
   const app = express();
@@ -109,6 +130,17 @@ export const createApp = () => {
   });
   api.use('/health', healthRoutes);
   api.use('/auth', authRoutes);
+  // Second router on /auth: recovery is public and unauthenticated, and
+  // keeping it in its own file stops the signed-in surface and the
+  // not-signed-in-and-cannot-prove-anything surface sharing middleware by
+  // accident. Express falls through, so no path here collides with the above.
+  api.use('/auth', accountRecoveryRoutes);
+  // Accepting an invitation is unauthenticated by definition — the account
+  // does not exist yet — so it lives on its own path rather than under the
+  // managed surface, and no signed-in middleware can leak onto it by being
+  // added to the wrong router.
+  api.use('/invite', inviteAcceptRoutes);
+  api.use('/invitations', invitationRoutes);
   api.use('/dashboard', dashboardRoutes);
   api.use('/branches', branchRoutes);
   api.use('/users', userRoutes);
@@ -118,11 +150,31 @@ export const createApp = () => {
   api.use('/tables', tableRoutes);
   api.use('/orders', orderRoutes);
   api.use('/discount-policies', discountPolicyRoutes);
+  // VC-105. Mounted before /reports so the more specific path wins.
+  api.use('/reports/menu-profitability', menuProfitabilityRoutes);
   api.use('/reports', reportRoutes);
   api.use('/display', displayRoutes);
   // ==== LANE inventory ====
   api.use('/inventory', inventoryRoutes);
   // ==== END LANE inventory ====
+  api.use('/kitchen', kitchenRoutes);
+  api.use('/print-agents', printAgentsRouter);
+  api.use('/print-jobs', printJobsRouter);
+
+  // LANE foundation — mounted after /branches so the store routes keep their
+  // place in the table; order is irrelevant to Express here, none of these
+  // paths is a prefix of another.
+  api.use('/legal-entities', legalEntityRoutes);
+  api.use('/gst-registrations', gstRegistrationRoutes);
+  api.use('/brands', brandRoutes);
+  api.use('/regions', regionRoutes);
+  api.use('/terminals', terminalRoutes);
+  api.use('/devices', deviceRoutes);
+  api.use('/permissions', permissionRoutes);
+  api.use('/promotions', promotionRoutes);
+
+  // LANE vc104-api
+  api.use('/phone-orders', phoneOrderRoutes);
 
   app.use('/api', api);
   app.use('/health', healthRoutes);

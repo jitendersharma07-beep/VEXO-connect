@@ -13,19 +13,25 @@ import {
   ClipboardCheck,
   CookingPot,
   KeyRound,
+  Landmark,
   Layers,
   LayoutDashboard,
   ListChecks,
   LogOut,
+  Map,
   Menu,
+  MonitorSmartphone,
   Package,
   PackagePlus,
+  PhoneCall,
   ReceiptText,
   ScrollText,
   Settings2,
   ShieldCheck,
   ShoppingCart,
   Store,
+  Tags,
+  TrendingUp,
   Truck,
   Users,
   Warehouse,
@@ -33,7 +39,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
-import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope } from '../lib/pos.js';
+import { usePermissions } from '../lib/permissions.jsx';
+import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope, isManagerUp } from '../lib/pos.js';
 import { canUseInventory } from '../lib/inventory.js';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
@@ -68,6 +75,30 @@ function NavItem({ to, icon: Icon, label, end = false }) {
 // is that the drawer shows a cashier the owner's links. Render this; never
 // retype it.
 function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
+  const { can, canAny } = usePermissions();
+  // LANE foundation — the organisation group, shown by held ACTION so the
+  // list matches what the server will actually answer: Finance reaches Legal
+  // & GST, a store manager reaches Brands, and a scoped VEXO operator sees
+  // the group inside the company they are looking at. Computed once, rendered
+  // in whichever branch below applies; no action held — no heading either.
+  const orgLinks = [
+    canAny('org.legalEntity.read', 'org.gst.read') ? (
+      <NavItem key="organisation" to="/organisation" icon={Landmark} label="Legal & GST" />
+    ) : null,
+    can('org.brand.read') ? <NavItem key="brands" to="/brands" icon={Tags} label="Brands" /> : null,
+    can('org.region.read') ? <NavItem key="regions" to="/regions" icon={Map} label="Regions" /> : null,
+    canAny('terminal.read', 'device.read') ? (
+      <NavItem key="devices" to="/devices" icon={MonitorSmartphone} label="Tills & devices" />
+    ) : null,
+  ].filter(Boolean);
+  const orgGroup = orgLinks.length ? (
+    <>
+      <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+        Organisation
+      </div>
+      {orgLinks}
+    </>
+  ) : null;
   return (
     <nav className="mt-8 flex-1 space-y-1 overflow-y-auto">
       {isAtc ? (
@@ -76,6 +107,9 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
             VEXO Console
           </div>
           <NavItem to="/atc/companies" icon={Building2} label="Companies" />
+          {/* LANE accounts — the accounts that own this console. Sits beside
+              Companies rather than under one, because it belongs to no tenant. */}
+          <NavItem to="/atc/platform-admins" icon={ShieldCheck} label="Administrators" />
           {atcScope ? (
             <>
               <div className="mt-4 flex items-center justify-between gap-1 px-3 pb-1">
@@ -96,9 +130,17 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               <NavItem to="/catalog" icon={Package} label="Catalog" />
               <NavItem to="/tables" icon={Armchair} label="Tables" />
               <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+              <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
               <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
               <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
               <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
+              {orgGroup}
+              {/* A scoped VEXO operator holds user.read inside the tenant;
+                  the grant-gated links appear only while a grant is live. */}
+              {can('user.read') ? <NavItem to="/team" icon={Users} label="Team" /> : null}
+              {canAny('permission.read', 'support.grant.read') ? (
+                <NavItem to="/permissions" icon={ShieldCheck} label="Permissions" />
+              ) : null}
             </>
           ) : null}
         </>
@@ -111,11 +153,18 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               </div>
               <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
               <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+              {/* VC-104: managers and owners only — the same role set the
+                  server's rolesFor('phone.*') admits. Cashiers get no link;
+                  the route guard and the API refuse them anyway. */}
+              {isManagerUp(user) ? (
+                <NavItem to="/phone-orders" icon={PhoneCall} label="Phone orders" />
+              ) : null}
               {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
               {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
               {canSeeReports(user) ? (
                 <>
                   <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                  <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
                   <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
                   <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
                   <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
@@ -127,8 +176,16 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
             </>
           ) : null}
           <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" end />
-          <NavItem to="/branches" icon={Store} label="Branches" />
-          {isOwner ? <NavItem to="/team" icon={Users} label="Team" /> : null}
+          {/* The server refuses GET /branches to till-only roles; a link that
+              opens onto a refusal is worse than no link. */}
+          {can('org.store.read') ? <NavItem to="/branches" icon={Store} label="Branches" /> : null}
+          {/* LANE foundation — by held action, not owner: the server admits
+              any user.read holder to GET /users, and the permission screen
+              admits readers of either of its halves. */}
+          {can('user.read') ? <NavItem to="/team" icon={Users} label="Team" /> : null}
+          {canAny('permission.read', 'support.grant.read') ? (
+            <NavItem to="/permissions" icon={ShieldCheck} label="Permissions" />
+          ) : null}
           {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
           {/* ==== LANE inventory ==== (spec Part B §8)
@@ -160,6 +217,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
             </>
           ) : null}
           {/* ==== /LANE inventory ==== */}
+          {orgGroup}
         </>
       )}
     </nav>
