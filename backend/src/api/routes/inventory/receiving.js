@@ -16,7 +16,7 @@ import { postMovementsOnce, LedgerError } from '../../../lib/inventory/ledger.js
 import { milliToQty, qtyToMilli } from '../../../lib/inventory/units.js';
 import { distributeProportional } from '../../../lib/money.js';
 import { nextDocNumber } from '../../../lib/inventory/docnum.js';
-import { idemKey, loadItem, qtyString, reasonString, toBase } from './shared.js';
+import { actorOut, idemKey, loadItem, qtyString, reasonString, resolveActors, toBase } from './shared.js';
 
 const router = Router();
 
@@ -577,9 +577,109 @@ router.get(
         direct: g.poId === null,
         supplierInvoiceNo: g.supplierInvoiceNo,
         lineCount: g._count.lines,
+        goodsPaise: String(g.goodsPaise),
+        taxPaise: String(g.taxPaise),
+        // On the list so a delivery that carried freight can be picked out
+        // without opening each one in turn.
+        landedCostPaise: String(g.landedCostPaise),
         stockValuePaise: String(g.stockValuePaise),
+        taxIsCost: g.taxIsCost,
         receivedAt: g.receivedAt,
       })),
+    });
+  }),
+);
+
+// One receipt in full, which is the only place the landed cost is legible.
+//
+// The list deliberately carries totals and not lines, so a buyer checking what
+// a delivery really cost has nowhere to look: the freight is on the header,
+// the shares are on the lines, and until this route existed neither was
+// readable from outside the database. That matters more than a missing screen
+// usually does, because landed cost is the one number on a receipt that nobody
+// typed per line — it was apportioned — so it is the one a buyer most needs to
+// see worked out rather than asserted.
+//
+// Both the cost as entered (freight, duty, insurance as separate rows) and the
+// share each line was charged are returned, because a total that cannot be
+// traced back to the charges behind it is not much better than no total.
+router.get(
+  '/goods-receipts/:grnId',
+  requireInventoryAction('inventory.view'),
+  asyncHandler(async (req, res) => {
+    const grn = await prisma.goodsReceipt.findUnique({
+      where: { id: req.params.grnId },
+      include: {
+        supplier: true,
+        location: true,
+        landedCosts: { orderBy: { id: 'asc' } },
+        lines: {
+          include: { item: { select: { id: true, name: true, baseUnit: true } } },
+          orderBy: { lineNo: 'asc' },
+        },
+      },
+    });
+    if (!grn || grn.companyId !== req.companyScope.id) throw notFound('Goods receipt not found');
+    await loadLocationInScope(prisma, req, grn.locationId);
+
+    const actors = await resolveActors(prisma, [grn.receivedById]);
+
+    // GoodsReceiptLine carries batchId but has no relation to StockBatch — a
+    // line records which batch it created, and a batch outlives the receipt
+    // that first brought it in. Fetched in one query rather than per line.
+    const batchIds = [...new Set(grn.lines.map((l) => l.batchId).filter(Boolean))];
+    const batches = batchIds.length
+      ? await prisma.stockBatch.findMany({
+          where: { id: { in: batchIds } },
+          select: { id: true, batchCode: true, expiryDate: true },
+        })
+      : [];
+    const batchById = new Map(batches.map((b) => [b.id, b]));
+
+    res.json({
+      goodsReceipt: {
+        id: grn.id,
+        number: grn.number,
+        poId: grn.poId,
+        direct: grn.poId === null,
+        supplier: { id: grn.supplier.id, name: grn.supplier.name },
+        location: { id: grn.location.id, name: grn.location.name, code: grn.location.code },
+        supplierInvoiceNo: grn.supplierInvoiceNo,
+        supplierInvoiceDate: grn.supplierInvoiceDate,
+        note: grn.note,
+        receivedAt: grn.receivedAt,
+        receivedBy: actorOut(grn.receivedById, actors),
+        // taxIsCost decides whether the tax below is part of what the stock is
+        // carried at or merely reclaimable, so the screen must show it rather
+        // than leave the reader to infer it from whether the numbers add up.
+        taxIsCost: grn.taxIsCost,
+        goodsPaise: String(grn.goodsPaise),
+        taxPaise: String(grn.taxPaise),
+        landedCostPaise: String(grn.landedCostPaise),
+        stockValuePaise: String(grn.stockValuePaise),
+        landedCosts: grn.landedCosts.map((c) => ({
+          id: c.id,
+          kind: c.kind,
+          description: c.description,
+          amountPaise: String(c.amountPaise),
+        })),
+        lines: grn.lines.map((l) => ({
+          id: l.id,
+          lineNo: l.lineNo,
+          item: l.item,
+          batch: l.batchId ? (batchById.get(l.batchId) ?? { id: l.batchId, batchCode: null, expiryDate: null }) : null,
+          unit: l.unit,
+          qty: String(l.qty),
+          qtyBase: String(l.qtyBase),
+          unitPricePaise: l.unitPricePaise,
+          taxPctMilli: l.taxPctMilli,
+          goodsPaise: String(l.goodsPaise),
+          taxPaise: String(l.taxPaise),
+          landedCostPaise: String(l.landedCostPaise),
+          valuePaise: String(l.valuePaise),
+          returnedQtyBase: String(l.returnedQtyBase),
+        })),
+      },
     });
   }),
 );

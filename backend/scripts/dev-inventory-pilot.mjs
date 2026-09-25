@@ -515,6 +515,54 @@ const main = async () => {
   ).goodsReceipt;
   step(`variable-weight receipt ${grn3.number}: 6 birds counted, 9,420 g weighed, booked into the freezer`);
 
+  // A delivery that cost money to get here. The charges are deliberately an odd
+  // total over two unequal lines, so the division does not come out whole and
+  // the receipt is a real test of the apportionment rather than a decorative
+  // one: 10001 paise over goods of 114000 and 52000 truncates to 6868 + 3132,
+  // which is 10000, and the paise that truncation drops has to be handed back.
+  const grn4 = (
+    await post(`${API}/goods-receipts`, {
+      ...asOwner,
+      body: {
+        supplierId: supplier.id,
+        locationId: warehouse.id,
+        supplierInvoiceNo: 'SUN/2026/0058',
+        supplierInvoiceDate: days(0),
+        directReason: 'Chilled top-up brought in by road freight, billed separately by the transporter',
+        idempotencyKey: key('grn-landed'),
+        lines: [
+          { itemId: paneer.id, unit: 'kg', qty: '3', unitPricePaise: 38000, batchCode: 'PAN-2', expiryDate: days(14) },
+          { itemId: premix.id, unit: 'kg', qty: '1', unitPricePaise: 52000, batchCode: 'MIX-2', expiryDate: days(150) },
+        ],
+        landedCosts: [
+          { kind: 'FREIGHT', description: 'Refrigerated road freight, Sunrise depot to warehouse', amountPaise: 7500 },
+          { kind: 'UNLOADING', description: 'Dock labour, two hands for forty minutes', amountPaise: 2501 },
+        ],
+      },
+      expect: 201,
+    })
+  ).goodsReceipt;
+
+  // The pilot checks the arithmetic rather than reporting that a document was
+  // created. A receipt whose header says one thing and whose lines say another
+  // is the exact defect this receipt exists to catch, so the walk fails here
+  // rather than printing a number nobody adds up.
+  const grn4Full = (await get(`${API}/goods-receipts/${grn4.id}`, asOwner)).goodsReceipt;
+  const shareTotal = grn4Full.lines.reduce((a, l) => a + BigInt(l.landedCostPaise), 0n);
+  if (shareTotal !== BigInt(grn4Full.landedCostPaise)) {
+    fail(
+      `landed cost was lost in apportionment: lines carry ${shareTotal} paise but the receipt charges ${grn4Full.landedCostPaise}`,
+    );
+  }
+  const valueTotal = grn4Full.lines.reduce((a, l) => a + BigInt(l.valuePaise), 0n);
+  if (valueTotal !== BigInt(grn4Full.stockValuePaise)) {
+    fail(`stock value disagrees with its own lines: ${valueTotal} against ${grn4Full.stockValuePaise}`);
+  }
+  step(
+    `landed-cost receipt ${grn4.number}: ${rupees(grn4Full.landedCostPaise)} of freight and unloading spread over 2 lines as ` +
+      `${grn4Full.lines.map((l) => l.landedCostPaise).join(' + ')} = ${shareTotal} paise, losing nothing`,
+  );
+
   // A second order, approved and left open, so the receiving screen has work
   // on it — and so the refusal below is genuinely about the missing receive
   // right rather than about the direct-receipt rule.

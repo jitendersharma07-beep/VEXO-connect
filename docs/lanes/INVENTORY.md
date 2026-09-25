@@ -104,19 +104,27 @@ the evidence that matters.
 Requirement numbers are from the task brief. **ACCEPTED** means executed evidence exists
 and is named. Nothing below is marked ACCEPTED on the strength of a file existing.
 
+Pilot step numbers below were **re-derived from a captured run**, not carried forward.
+Adding the landed-cost receipt at step 14 renumbered everything after it, and on checking
+the shift it turned out several citations had already drifted out of step with the script
+— requirement 4 pointed at the request lifecycle rather than at receiving. Shifting stale
+numbers by one would have preserved the error in a tidier form, so each range below was
+read back off the run instead. A citation that no longer resolves is worse than none,
+because it reads as checked.
+
 | # | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | One ledger, canonical implementation reused, isolated branch | ACCEPTED | `StockMovement` is the only stock table written; `/inventory/ledger/verify` compares caches to it — pilot step 43, 11 positions, 0 mismatches |
-| 2 | Locations, sublocations, item kinds incl. packaging, unit conversions | ACCEPTED | pilot steps 1–12; screens 02, 11; `Takeaway Box` is a `PACKAGING` item carried through to a plan line |
-| 3 | Batches, FEFO, expiry blocking, shelf life, opened-container clock | ACCEPTED | pilot steps 13–22, 47, 48; screen 03; min-shelf-life refusal returns 409 |
-| 4 | Receiving, ledger attribution, reversals not edits | ACCEPTED | pilot steps 23–31; screens 07, 09; every one of 29 movements resolves to a named person |
-| 5 | Five-stage requests, damage/shortage, idempotency | ACCEPTED | pilot steps 32–36; screens 04, 05; reconciliation table shows dispatched ≠ accepted with the difference itemised; who raised and who decided is named on the request, its issues and every lifecycle event — `inventoryApi.test.js`, four tests incl. the deleted-account control |
-| 6 | Plans, suggestions, reminders, scheduler persistence | ACCEPTED | pilot steps 37, 44–46; screens 06, 24; the suggestion panel shows an unapproved request excluded from projected stock; the scheduler has since run unattended as a daemon and redelivered a seeded-undelivered notification on its first tick — §11; delivery goes through one transport seam with a negative control — §12 |
-| 7 | Single deduction per sale, uncosted visible, no restock on refund | ACCEPTED | pilot steps 38–42; screen 10; `tests/inventorySales.test.js` |
-| 8 | Nine screens, scoped by role, server-enforced | ACCEPTED | 11 screens shipped, covering the nine the brief names; 24 screenshots, 15 walks, direct-API probes in §6 |
-| 9 | Repeatable synthetic pilot | ACCEPTED | `scripts/dev-inventory-pilot.mjs`, 48 steps, exit 0, run twice on two different database builds |
+| 1 | One ledger, canonical implementation reused, isolated branch | ACCEPTED | `StockMovement` is the only stock table written; `/inventory/ledger/verify` compares caches to it — pilot step 44, 11 positions, 0 mismatches; step 47, 31 movements of 7 kinds |
+| 2 | Locations, sublocations, item kinds incl. packaging, unit conversions | ACCEPTED | pilot steps 1–8; screens 02, 11; `Takeaway Box` is a `PACKAGING` item carried through to a plan line |
+| 3 | Batches, FEFO, expiry blocking, shelf life, opened-container clock | ACCEPTED | pilot steps 10, 11, 13, 17, 18, 48, 49; screen 03; min-shelf-life refusal returns 409 |
+| 4 | Receiving, ledger attribution, reversals not edits | ACCEPTED | pilot steps 9–16 and 25; screens 07, 09, 25, 26; every movement resolves to a named person; landed cost is apportioned, readable and conserves to the paise — §13 |
+| 5 | Five-stage requests, damage/shortage, idempotency | ACCEPTED | pilot steps 19–29; screens 04, 05; reconciliation table shows dispatched ≠ accepted with the difference itemised; who raised and who decided is named on the request, its issues and every lifecycle event — `inventoryApi.test.js`, four tests incl. the deleted-account control |
+| 6 | Plans, suggestions, reminders, scheduler persistence | ACCEPTED | pilot steps 30–34; screens 06, 24; the suggestion panel shows an unapproved request excluded from projected stock; the scheduler has since run unattended as a daemon and redelivered a seeded-undelivered notification on its first tick — §11; delivery goes through one transport seam with a negative control — §12 |
+| 7 | Single deduction per sale, uncosted visible, no restock on refund | ACCEPTED | pilot steps 39–43; screen 10; `tests/inventorySales.test.js` |
+| 8 | Nine screens, scoped by role, server-enforced | ACCEPTED | 11 screens shipped, covering the nine the brief names; 26 screenshots, 16 walks, direct-API probes in §6 |
+| 9 | Repeatable synthetic pilot | ACCEPTED | `scripts/dev-inventory-pilot.mjs`, 49 steps, exit 0, run repeatedly on rebuilt databases |
 | 10 | Portal connected and walked | ACCEPTED | §7 |
-| 11 | Commits and push | see §9 | Eight commits listed in §9. This document is inside the last of them, so it cannot verify its own push — §9 gives the command that does. |
+| 11 | Commits and push | see §9 | Twelve commits listed in §9. This document is inside the last of them, so it cannot verify its own push — §9 gives the command that does. |
 | 12 | — | — | reporting requirement, not a build item |
 
 ## 6. Tests
@@ -128,19 +136,19 @@ DATABASE_URL=<…vcx_inventory_test> NODE_ENV=test npm test
 
 ```
 Test Files  16 passed (16)
-     Tests  499 passed (499)
-   Duration  159.83s
+     Tests  506 passed (506)
+   Duration  175.48s
 ```
 
 Zero failures, zero skipped. That is the same file count and the same test count as the
 pre-lane baseline plus this lane's four files — no test was removed, disabled or
-loosened to reach it. This lane contributes 115 of the 499:
+loosened to reach it. This lane contributes 122 of the 506:
 
 | File | Tests |
 | --- | --- |
 | `inventoryLedger.test.js` | 28 |
 | `inventoryScheduler.test.js` | 34 |
-| `inventoryApi.test.js` | 28 |
+| `inventoryApi.test.js` | 35 |
 | `inventorySales.test.js` | 25 |
 
 **`NODE_ENV=test` is required.** The login rate limiter is skipped only in that
@@ -188,10 +196,10 @@ small static server that proxies `/api` to the dev backend and falls back to the
 for client routes, which is what the production nginx does. A dev-server walk would prove
 the source compiles, not that the shipped asset works.
 
-- Bundle: `index-qeJUVyHI.js`, 602.52 kB (gzip 162.29 kB), `index-DnuK0kMj.css`, 38.40 kB
+- Bundle: `index-D9ANjftE.js`, 611.36 kB (gzip 164.07 kB), `index-BoZ_nfXy.css`, 38.44 kB
   — 1681 modules, `vite build` clean.
 - Backend `127.0.0.1:5524`, preview `127.0.0.1:5626`, database `vcx_inventory`.
-- 15 authenticated walks → 24 screenshots in `docs/lanes/evidence/`.
+- 16 authenticated walks → 26 screenshots in `docs/lanes/evidence/`.
 
 Every screen was checked by reading its rendered text, not by confirming a PNG exists.
 
@@ -199,6 +207,7 @@ Every screen was checked by reading its rendered text, not by confirming a PNG e
 | --- | --- | --- |
 | 01–11 | owner | 5 locations, 11 positions, ₹30,917.16; batches ordered by expiry with RICE-B split across two locations; transfer reconciliation showing 12,000 g dispatched against 11,000 g accepted and 1,000 g short; 29 ledger movements with the cache check reporting 11 positions compared and none differing |
 | 24 | owner | suggestion panel opened by a real click: paneer triggers 7,884.212, the packaging line reads "already asked for — not re-ordered", and rice's 1,000 unapproved shows in "Only requested" while being excluded from "At delivery" |
+| 25–26 | owner | the landed-cost receipt opened by a real click: ₹75.00 freight and ₹25.01 unloading listed as entered, and the two lines carrying ₹68.68 and ₹31.33 — which is ₹100.01, the figure on the header, read back out of the rendered DOM rather than off the API |
 | 12–15 | north manager | 2 locations, 10 positions, ₹29,297.16 — exactly the owner's total less the ₹1,620.00 of freezer stock they cannot see; setup renders read-only with the reason stated |
 | 16–19 | south manager | 1 location, 0 positions, ₹0.00, and only the one request routed to South |
 | 20–23 | cashier | every inventory route redirects to the dashboard and the sidebar contains no inventory section at all |
@@ -269,7 +278,7 @@ never enables the module bills exactly as it does today.
 
 ## 9. Delivery
 
-Branch `x/inventory`, ten commits on top of `ca5780d`, each one internally consistent
+Branch `x/inventory`, twelve commits on top of `ca5780d`, each one internally consistent
 rather than a slice of a single blob — the import graph was traced first so that no commit
 mounts a router or boots a job that does not yet exist at that point in history:
 
@@ -285,6 +294,8 @@ mounts a router or boots a job that does not yet exist at that point in history:
 | `INVENTORY docs: …` | this file and the 24 captures |
 | `INVENTORY requests: …` | actor attribution on requests, issues and events (INV-B8) |
 | `INVENTORY notifications: …` | the transport seam, `UNDELIVERABLE`, `providerRef`, third migration (INV-B4) and the daemon evidence (INV-B3) |
+| `INVENTORY costing: …` | both proportional money splits routed through `distributeProportional` — §13 |
+| `INVENTORY receiving: …` | the goods-receipt detail route, the landed-cost screen, the pilot's apportionment step and captures 25–26 (INV-B5) |
 
 Every commit was made with an explicit pathspec, never `git add -A`, so nothing belonging
 to another lane could be swept in. The six pre-existing files this lane touches total
@@ -317,7 +328,7 @@ only the resulting cookie, so the password never reaches the page.
 | INV-B2 | `terminalId` is never populated — `Order` carries no terminal yet | PRO | foundation + orders lanes | BLOCKED | column is nullable; drop it |
 | INV-B3 | Scheduler has now run unattended as a daemon and did real work while it ran — see §11 | PRO | — | ACCEPTED | `INVENTORY_SCHEDULER` unset |
 | INV-B4 | **No email or WhatsApp adapter exists.** What now exists is the seam one plugs into, a complete in-app transport, and a test transport — so the missing piece is a provider, not wiring. Naming an absent transport writes a FAILED row reading "No adapter configured for transport …" rather than reporting a delivery that did not happen | PRO | owner approval of a provider | BLOCKED | `INVENTORY_NOTIFY_TRANSPORT=inapp` |
-| INV-B5 | Landed-cost apportionment (`GoodsReceiptLandedCost`) is modelled and stored but has no UI, and **no test exercises it** | PRO | — | IMPLEMENTED-UNVERIFIED | unused table |
+| INV-B5 | Landed-cost apportionment is now readable and tested: a detail route, a screen that shows the charges and the share each line was given, six tests, and a pilot step that checks the sum. The apportionment itself was **wrong** until this row was closed — see §13 | PRO | — | ACCEPTED | drop `GET /goods-receipts/:grnId` and the modal; the stored columns predate them |
 | INV-B6 | `ProductionBatch` / central-kitchen production is **schema-only** — zero references in `src/`. See the correction below | ENTERPRISE | — | NOT STARTED | unused table |
 | INV-B7 | A rejected CORS origin surfaces as 500 `POS_INTERNAL_ERROR` rather than a 403. Pre-existing in `app.js`, not this lane's, not changed | CORE | — | NOT STARTED | n/a |
 | INV-B8 | Store requests now name who raised, approved, closed and cancelled them, on the request, on every issue and on every lifecycle event | PRO | — | ACCEPTED | serializer-only change |
@@ -340,9 +351,12 @@ read as a working feature.
   nothing else: no route, no service, no ledger call, no reference of any kind under
   `src/`. It needs an API, ledger integration and a screen, from scratch.
 
-INV-B5's row is accurate as it stood, with one addition: no test covers landed-cost
-apportionment, so "stored" is a statement about the schema and the write path, not about
-verified arithmetic.
+- **INV-B5's row said the apportionment was "modelled and stored", with no test.** That
+  was accurate about the schema and wrong about the arithmetic, and the second half is
+  what mattered: writing the test the row admitted was missing found the write path
+  losing paise on every uneven split. "Stored but unverified" turned out to mean "stored
+  incorrectly". This is the clearest case in this lane of an untested path being assumed
+  correct because it was assumed simple — §13.
 
 ### Assumptions to confirm
 
@@ -457,3 +471,107 @@ that did nothing at all would still pass every notification test written before 
 Schema additions: `InventoryNotification.providerRef`, and `UNDELIVERABLE` on
 `InventoryNotificationState` — migration
 `20260925020000_inventory_notification_transport`.
+
+## 13. What a delivery cost, and the paise that used to go missing (INV-B5)
+
+INV-B5 was written down as a missing screen. It was also a wrong number, and the screen is
+how that was found: building a view whose entire job is to show a total broken into parts
+meant the parts had to be added up, and they did not come to the total.
+
+### The defect
+
+Landed cost — freight, duty, unloading — is charged once on a goods receipt and then has
+to be carried by the lines, because stock is valued per line and the ledger is written per
+line. The receipt apportioned it by value, truncating each share independently:
+
+```
+share = (landed * lineGoods) / goodsTotal      // integer division, per line
+```
+
+Truncation only ever rounds down, so the shares summed to **less** than the charge. A
+₹1.00 freight over three equal lines was stored as 33 + 33 + 33, and the hundredth paise
+existed on the header and on no line. Nothing reported the difference.
+
+The ledger is where that mattered. The same share is folded into each line's value and
+then into its `StockMovement`, and `StockMovement` is the only truth about stock value in
+this product — so the money did not merely fail to display, it failed to exist. A receipt
+whose header read `30000100` wrote `30000099` into the ledger.
+
+Transfer acceptance had the same defect three times over. A dispatched line's value is
+split into accepted, damaged and shortage; each part was divided separately, so the three
+did not add back to what was dispatched. The same truncation then applied again to the
+batch-by-batch arrival, and a third time to the stranded write-off. One value could be
+divided in three places and disagree with itself in all three.
+
+The telling detail is ten lines away in that same function. The **quantity** side of the
+identical split already conserved exactly — the last batch takes whatever is left rather
+than being rounded on its own. The problem had been understood for grams and not carried
+across to money.
+
+### The fix
+
+Both sites now call `distributeProportional` from `src/lib/money.js` — the
+largest-remainder split the order engine already uses to apportion a discount across order
+lines. It conserves by construction: whatever truncation drops is handed back to the lines
+with the largest remainders, ties to the lowest index, so the result is exact and
+deterministic rather than exact on average.
+
+Reusing it rather than writing a second technique is the point. A second one has to be
+kept in step with the first, and the quantity/value drift above is exactly what that
+costs.
+
+Transfer acceptance now splits each line's value **once**, before the transaction, and
+every later consumer reads that one split — the line columns, the per-batch `TRANSFER_IN`
+movements, the damage and shortage issues, and the stranded write-off. Four independent
+re-derivations became one.
+
+The helper takes safe integers rather than `BigInt`. Every amount reaching these paths is
+bounded by the request schema, and a document whose total exceeded 2^53 paise — ninety
+trillion rupees on one receipt — throws inside the transaction and refuses the document
+rather than writing a wrong one.
+
+### The evidence
+
+Five tests were written **before** the fix and each was observed failing on the exact
+arithmetic above: 99 against 100 on the receipt lines, 30000099 against 30000100 in the
+ledger, 998 against 999 on an uneven split, and 3000 against 3001 on the three-way
+transfer split.
+
+Two of them are built so they cannot pass vacuously. The uneven case asserts the exact
+pair `[749, 250]` rather than only the sum, so handing the whole charge to one line would
+not satisfy it. The transfer case asserts its own precondition — that the dispatched value
+does not divide evenly into thirds — so it fails loudly rather than passing quietly if the
+fixture ever changes. A receipt with **no** landed cost is the negative control: without
+it, the other tests would still pass if apportionment were deleted and every share
+hard-coded to the total.
+
+### The screen
+
+`GET /inventory/goods-receipts/:grnId` returns the charges as entered and the share each
+line was given; the list gained `landedCostPaise` so a delivery that carried freight can
+be picked out without opening every receipt in turn. The Receiving screen shows the
+charges, a per-line share column that appears only when there is something to show, and
+the totals written as the sum they are, so a reader can check the apportionment instead of
+trusting it.
+
+Six tests cover the route, including the 403 for a caller who cannot see the location — a
+detail route is a new way to read a document and inherits nothing from the list.
+
+The pilot now receives a delivery with freight on it, and **checks its own arithmetic**
+rather than reporting that a document was created: it fails the run if the lines do not sum
+to the header. The charges are deliberately an odd total over two unequal lines, so the
+division does not come out whole:
+
+```
+14. landed-cost receipt GRN/26-27/00004: ₹100.01 of freight and unloading
+    spread over 2 lines as 6868 + 3133 = 10001 paise, losing nothing
+```
+
+Truncation would have written 6868 + 3132 = 10000.
+
+Captures 25 and 26 are that receipt rendered by the shipped bundle, opened by a real click
+rather than a direct URL. The harness reads the share column back out of the DOM —
+`₹68.68` and `₹31.33`, which is the `₹100.01` on the header — so the evidence is what a
+person sees rather than what the API returned a moment earlier. The walk also reports
+console errors and any element overflowing its box; both came back clean.
+

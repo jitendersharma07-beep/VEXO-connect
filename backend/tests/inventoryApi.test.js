@@ -971,6 +971,72 @@ describe('landed cost is apportioned without losing paise', () => {
     expect(shares).toEqual([749n, 250n]);
   });
 
+  it('shows the charges and the per-line shares on the receipt itself', async () => {
+    // The screen's whole job is to let a buyer see the apportionment worked
+    // out rather than asserted, so the route has to return both the charges as
+    // entered and the share each line was given.
+    const item = await makeItem({ name: 'Maida', trackBatches: false, trackExpiry: false });
+    const posted = ok(
+      await receive({
+        lines: [
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 30000 },
+          { itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 10000 },
+        ],
+        landedCosts: [
+          { kind: 'FREIGHT', description: 'Lorry from the mill', amountPaise: 700 },
+          { kind: 'DUTY', amountPaise: 299 },
+        ],
+      }),
+      201,
+    );
+
+    const { goodsReceipt: g } = ok(
+      await request(app).get(`${API}/goods-receipts/${posted.goodsReceipt.id}`).set(auth(tok.owner)),
+    );
+
+    expect(g.landedCosts.map((c) => c.kind).sort()).toEqual(['DUTY', 'FREIGHT']);
+    expect(g.landedCosts.find((c) => c.kind === 'FREIGHT').description).toBe('Lorry from the mill');
+    expect(
+      sumBig(g.landedCosts.map((c) => c.amountPaise)),
+      'the charges entered add up to the header total',
+    ).toBe(BigInt(g.landedCostPaise));
+    expect(
+      sumBig(g.lines.map((l) => l.landedCostPaise)),
+      'and the shares handed to the lines add up to the same number',
+    ).toBe(BigInt(g.landedCostPaise));
+    expect(sumBig(g.lines.map((l) => l.valuePaise))).toBe(BigInt(g.stockValuePaise));
+    expect(g.receivedBy.fullName, 'a receipt says who booked it in').toBeTruthy();
+    expect(g.lines[0].landedCostPaise).toBe('749');
+    expect(g.lines[1].landedCostPaise).toBe('250');
+  });
+
+  it('refuses the receipt to a cashier and hides it from an ungranted manager', async () => {
+    // Server-side, on direct API calls rather than through a screen. A detail
+    // route is a new way to read a document and inherits nothing from the list,
+    // so both refusals are asserted here — and they are different refusals.
+    const item = await makeItem({ name: 'Poha', trackBatches: false, trackExpiry: false });
+    const posted = ok(
+      await receive({ lines: [{ itemId: item.id, qty: '1000', unit: 'g', unitPricePaise: 100 }] }),
+      201,
+    );
+    const id = posted.goodsReceipt.id;
+
+    const cashier = await request(app).get(`${API}/goods-receipts/${id}`).set(auth(tok.cashierA));
+    expect(cashier.status, 'a cashier holds no inventory rights at all').toBe(403);
+
+    // Manager B is pinned to Store B and has no grant at the warehouse this
+    // receipt was booked into. 404, not 403: an unreachable location answers
+    // exactly like one that does not exist, so the refusal does not confirm
+    // that the document is there to be refused.
+    const ungranted = await request(app).get(`${API}/goods-receipts/${id}`).set(auth(tok.managerB));
+    expect(ungranted.status, 'existence is not leaked to a manager without the grant').toBe(404);
+
+    // The control. Without it both refusals above are equally consistent with
+    // "the route is broken", which is not the rule under test.
+    const granted = await request(app).get(`${API}/goods-receipts/${id}`).set(auth(tok.managerA));
+    expect(granted.status, 'the manager who can see the warehouse reads it fine').toBe(200);
+  });
+
   it('charges nothing to the lines when there is no landed cost', async () => {
     // The negative control. Without it the three tests above would still pass
     // if apportionment were removed and every share hard-coded to the total.
