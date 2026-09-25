@@ -19,33 +19,35 @@ Read §1 and §8 if you read nothing else. §1 is what shipped; §8 is what did 
 |---|---|
 | Branch | `x/w2-integration-close` |
 | Delivered content | `6eb31e9` (QA harness honesty + the artifacts it produced), `094607a` (task #11), `10c09b2` (this report). `10c09b2` is the last commit that changes any shipped code, test, artifact or finding |
-| Verified remote state | `git ls-remote github` → `refs/heads/x/w2-integration-close` contains all three, confirmed by re-reading the remote after each push rather than trusting the push's own output — the same reason D-4 exists. The tip may sit one or two commits ahead of `10c09b2`: a report cannot contain its own commit hash, so the §1 bookkeeping lands after the content it describes. Any such commit touches this file only, which `git show --stat` will confirm |
-| Base | remote `main` @ `584de37`, which **is** an ancestor of this branch (`git merge-base --is-ancestor` returns 0) |
-| Remote `main` | **still `584de37` — not advanced.** See the note below |
+| Verified remote state | `git ls-remote github` → both `refs/heads/main` and `refs/heads/x/w2-integration-close` contain all three, confirmed by re-reading the remote after each push rather than trusting the push's own output — the same reason D-4 exists. Either ref may sit a commit or two ahead of `10c09b2`, and they may differ from each other by that much: a report cannot contain its own commit hash, so this §1 bookkeeping necessarily lands after the content it describes. Every such commit touches **this file only** — `git show --stat 10c09b2..` is the check, and no code, test or artifact moves in them |
+| Base | remote `main` @ `584de37`, which **was** an ancestor of this branch (`git merge-base --is-ancestor` returned 0) |
+| Remote `main` | **`820a5a1` — advanced by the owner, `584de37..820a5a1`, a fast-forward.** `git ls-remote` shows `refs/heads/main` and `refs/heads/x/w2-integration-close` at the same commit, and `github/main^{tree}` is `bc49e09`, identical to the local tip's tree. So what is published on `main` is byte-for-byte the tree the §3 numbers describe — the numbers transfer without re-running anything |
 | Remote | `github` — the PUBLIC Expansion repo |
 | Working tree | `/home/atc-noc/vexo-connect-x-lanes/w2-close` |
 | Migrations on disk | **22**, agreed by both demo databases (`schemaDigest a4215343d532`) |
 
-**`main` was not advanced, and the reason is local tooling, not the remote.** The
-fast-forward is clean and was checked before attempting it: `584de37` is an ancestor of the
-tip, and the 12 commits `main` would gain are this lane's own plus merges of `main` itself
-— nothing unrelated, which is the §7 condition. Both idiomatic forms were refused by the
-local Claude Code auto-mode classifier with *"Auto mode could not evaluate this action and
-is blocking it for safety"* — the same unparseable-command block that has hit this repo's
-pushes before, and not a permission error from GitHub. Trying further spellings would be
-looping through forms to defeat a guard, so it stopped at two.
-
-So this is the one unblock action the owner needs, and it is a fast-forward — no merge, no
-re-verification, because the tree being published is byte-identical to the tree the §3
-numbers came from:
+**`main` was advanced by the owner, and the handover is worth recording because of what it
+proves.** The fast-forward was checked before it was attempted: `584de37` an ancestor of the
+tip, and the 12 commits `main` would gain all this lane's own or merges of `main` itself —
+nothing unrelated, which is the §7 condition. Both idiomatic push forms were then refused
+from this session by the local Claude Code auto-mode classifier — *"Auto mode could not
+evaluate this action and is blocking it for safety"* — so rather than hunt spellings (which
+is looping through forms to defeat a guard) the exact command was handed over:
 
 ```
 cd /home/atc-noc/vexo-connect-x-lanes/w2-close
 git push github x/w2-integration-close:main
 ```
 
-If the owner would rather review before it lands, the branch is already on the remote and a
-PR from `x/w2-integration-close` into `main` needs nothing further from here.
+The owner ran **that command, verbatim**, and it printed `584de37..820a5a1`. That settles
+what the refusal was: not GitHub, not credentials, not the refspec — the command was
+correct, and the block was this session's own tooling failing to parse it. The lesson for
+next time is the escape hatch, not a third spelling: verify the fast-forward, then hand over
+one line that really works.
+
+Verified afterwards from the remote rather than from that output, which is the same
+discipline D-4 is about: `refs/heads/main` and `refs/heads/x/w2-integration-close` both at
+`820a5a1`, and both trees `bc49e09`.
 
 The branch reached its base the hard way and it is worth one line, because it changes what
 the evidence means. Two minutes after `git ls-remote` showed `main` at `7ab9cee`, a push
