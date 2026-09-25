@@ -102,8 +102,50 @@ const MUTANTS = [
     what: 'a scheduled transfer is judged against the moment it moves, not its due slot',
     expect: 'judges a scheduled transfer against its due slot, not the moment it moves',
     file: ROUTE,
-    from: `    const when = po.scheduledFor ?? movedAt;`,
+    from: `    const when = po.scheduledFor && po.scheduledFor > movedAt ? po.scheduledFor : movedAt;`,
     to: `    const when = movedAt;`,
+  },
+  {
+    // The other half of M4, and the one the overdue rule exists for. Reverting
+    // to the pre-fix `?? ` takes scheduledFor whether or not it has already
+    // passed, so an order due hours ago is judged against a slot that elapsed
+    // hours ago — empty, by definition, because the day has moved on.
+    id: 'M11',
+    what: 'an overdue scheduledFor is honoured, so a stale due time bypasses the current slot',
+    expect: 'refuses an overdue scheduled transfer against the destination CURRENT slot',
+    file: ROUTE,
+    from: `    const when = po.scheduledFor && po.scheduledFor > movedAt ? po.scheduledFor : movedAt;`,
+    to: `    const when = po.scheduledFor ?? movedAt;`,
+  },
+  {
+    // M11's mirror on the counting side. The route can pick the right slot and
+    // the order still land in the wrong one if the anchor disagrees, which is
+    // the whole failure mode this lane exists to close — so it gets its own
+    // mutant rather than being assumed to follow.
+    id: 'M12',
+    what: 'the anchor takes scheduledFor unconditionally again, so check and anchor disagree',
+    expect: 'anchors an overdue scheduled transfer to the move, not to its elapsed due time',
+    file: LIB,
+    from: `    GREATEST(
+      po."scheduledFor",`,
+    to: `    COALESCE(
+      po."scheduledFor",`,
+  },
+  {
+    id: 'M13',
+    what: 'arm A stops excluding orders moved after they were due: the order occupies TWO slots',
+    expect: 'anchors an overdue scheduled transfer to the move, not to its elapsed due time',
+    file: LIB,
+    from: "       AND NOT ${movedInAfterDue('ea')}\n",
+    to: '',
+  },
+  {
+    id: 'M14',
+    what: 'arm B reverts to scheduledFor IS NULL: an overdue transfer occupies NO slot',
+    expect: 'anchors an overdue scheduled transfer to the move, not to its elapsed due time',
+    file: LIB,
+    from: `       AND (po."scheduledFor" IS NULL OR e."at" > po."scheduledFor")`,
+    to: `       AND po."scheduledFor" IS NULL`,
   },
   {
     id: 'M5',
@@ -183,12 +225,16 @@ const MUTANTS = [
     ],
   },
   {
+    // Was declared undetectable for two runs, on the argument that the window is
+    // milliseconds wide and only opens on a slot boundary. That was the wrong
+    // reason: the obstacle was never the width of the window, it was not knowing
+    // which clock fills the default. vc104-default-clock-probe.mjs settles it —
+    // the Rust query engine does, independently of JS — so freezing the JS clock
+    // on a slot boundary separates the pinned instant from the defaulted one on
+    // demand, and the window's real-world width stops mattering.
     id: 'M8',
-    escapes: true,
-    why: 'the window is milliseconds wide and only opens on a slot boundary, so no\n'
-      + '      deterministic test can see it. Argued in code, not asserted.',
     what: 'reassign lets the event timestamp default instead of pinning movedAt',
-    expect: '(none expected)',
+    expect: 'pins a transfer to the instant it was checked against, even while it waits for the slot lock',
     file: ROUTE,
     from: `          at: movedAt,
           action: 'REASSIGNED',`,
@@ -196,11 +242,8 @@ const MUTANTS = [
   },
   {
     id: 'M9',
-    escapes: true,
-    why: 'same millisecond window on the submit side: createdAt would default to\n'
-      + '      now() a few ms after the instant reserveSlot checked.',
     what: 'submit lets createdAt default instead of pinning takenAt',
-    expect: '(none expected)',
+    expect: 'pins a submitted order to the instant it was checked against, across a slot boundary',
     file: ROUTE,
     from: `            createdAt: takenAt,`,
     to: '',

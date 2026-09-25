@@ -4,22 +4,62 @@
 -- Why: countBookedInSlot counts one 15-minute window of a store's orders. The
 -- existing (companyId, routedBranchId, status) index stops before any time
 -- column, so the window had to be found by fetching every order the store has
--- ever accepted — and that set only grows, because PhoneOrderStatus has no
--- terminal state. Measured at 120k orders, counting one slot:
+-- ever accepted — and that set only grows: REJECT drops an order out of the
+-- live set, but nothing marks an ACCEPTED one cooked, collected or closed, so
+-- it stays ACCEPTED forever. Measured at 120k orders, counting one slot:
 --
 --     none                                        17.0 ms
 --     + the PhoneOrder index below                 6.4 ms
 --     + the PhoneOrderEvent index below            4.0 ms
 --     (the event index ALONE is worth little:     14.6 ms)
 --
--- DEPLOYMENT NOTE, for whoever runs this against a live database:
--- plain CREATE INDEX takes a SHARE lock, which blocks INSERT/UPDATE/DELETE on
--- the table until it completes. Reads are unaffected. On a small PhoneOrder
--- table that is milliseconds; on a large one it is a write pause on the phone
--- ordering path. CREATE INDEX CONCURRENTLY avoids the pause but cannot run
--- inside a transaction, and Prisma wraps each migration in one — so if the
--- table is large, run the two statements by hand with CONCURRENTLY and mark
--- this migration applied, rather than letting it block the tills.
+-- DEPLOYMENT NOTE, for whoever runs this against a live database.
+-- REHEARSED 2026-09-25 on an isolated copy: 120k PhoneOrder (41 MB) + 15k
+-- PhoneOrderEvent, Prisma 5.22.0, PostgreSQL, a separate session inserting into
+-- PhoneOrder throughout. Numbers below are from that run, not from reasoning.
+--
+-- Plain CREATE INDEX takes a SHARE lock, which blocks INSERT/UPDATE/DELETE on
+-- the table until it completes; reads are unaffected. Observed: ShareLock held
+-- on PhoneOrder, 29 samples of a writer's RowExclusiveLock sitting in WAITING,
+-- slowest single INSERT 758 ms against a 298 ms no-migration control, and the
+-- ledger's own start/finish for this migration 766 ms. So the worst case is
+-- simply "a writer that arrives as the build starts waits for the whole build".
+-- No write FAILED — they queued. At 120k that is sub-second; it scales with the
+-- table, and it lands on the phone-ordering path.
+--
+-- AN EARLIER VERSION OF THIS NOTE SAID "Prisma wraps each migration in a
+-- transaction, so run the statements by hand with CONCURRENTLY and mark this
+-- migration applied". THAT WAS WRONG, and it pointed at the one procedure that
+-- should never be used. What Prisma 5.22.0 actually does is send the file as a
+-- single simple-query message with no BEGIN of its own. Postgres then wraps a
+-- MULTI-statement simple query in an implicit transaction block, but not a
+-- single-statement one. Three probes, each with its result:
+--
+--   one CREATE INDEX CONCURRENTLY alone in a migration   -> APPLIES, index valid
+--   two statements, the second invalid                   -> the first IS rolled
+--                                                           back; migrations are
+--                                                           atomic
+--   CREATE INDEX CONCURRENTLY beside another statement   -> SQLSTATE 25001
+--
+-- So if this table is ever big enough for the pause to matter, the fix is NOT
+-- to hand-run SQL and forge the ledger. SPLIT THIS INTO TWO MIGRATIONS, each
+-- holding exactly one CREATE INDEX CONCURRENTLY statement. That is proven to
+-- work through `migrate deploy` and needs no manual ledger entry. The cost is
+-- that the two are no longer atomic with each other, which for two independent
+-- additive indexes is nothing.
+--
+-- If a CONCURRENTLY build is interrupted it leaves an INVALID index behind that
+-- is maintained on writes but never used for reads, so verify after deploying:
+--
+--     SELECT c.relname, i.indisvalid, i.indisready
+--       FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+--      WHERE NOT i.indisvalid OR NOT i.indisready;
+--
+-- Expect zero rows. A row there is repaired with DROP INDEX + re-create.
+--
+-- If the migration itself fails, recover with
+--     prisma migrate resolve --rolled-back 20260924800001_vc104_slot_count_indexes
+-- (rehearsed, exit 0) and never by editing _prisma_migrations directly.
 
 -- CreateIndex
 CREATE INDEX "PhoneOrder_companyId_routedBranchId_status_createdAt_idx" ON "PhoneOrder"("companyId", "routedBranchId", "status", "createdAt");

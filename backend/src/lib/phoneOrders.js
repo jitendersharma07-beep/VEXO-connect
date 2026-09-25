@@ -108,14 +108,27 @@ export const slotBoundsFor = (when, slotMinutes) => {
 // throughput, so the question is always "when did work arrive at THIS store",
 // never "when did the customer telephone".
 //
-//   SCHEDULED (scheduledFor set) -> the slot containing scheduledFor. A move
-//     does not change it: the food is still due at the same time.
+//   SCHEDULED, still ahead of its due time -> the slot containing scheduledFor.
+//     A move does not change it: the food is still due at the same time.
+//   SCHEDULED, but moved in AFTER it was already due -> the slot containing THE
+//     MOVE. Its due time has stopped describing when it loads a kitchen. An
+//     order due at 18:00 and still unmade at 19:30 is not going to be cooked at
+//     18:00; it goes on the pass now. Judging it against 18:00 would check a
+//     window that has already elapsed and is therefore almost always empty, so
+//     a stale scheduledFor would walk straight past a destination that is full
+//     RIGHT NOW.
 //   ASAP submitted here          -> the slot containing createdAt.
 //   ASAP moved in                -> the slot containing THE MOVE, because that
 //     is the moment this kitchen was asked. Its createdAt belongs to the call,
 //     which may be hours old and was answered at another store.
 //
-// The third arm is the one that was missing, and it is what let a back-dated
+// The first two arms are one rule rather than two: the anchor is the LATER of
+// the due time and the latest move into the current store. GREATEST(...) says
+// that in the SQL below, and the reassign route computes the same later-of when
+// it decides which slot to admit against — so the slot that is CHECKED and the
+// slot the order lands IN cannot drift apart.
+//
+// The move arms are the ones that were missing, and it is what let a back-dated
 // transfer land in a store while occupying a slot in the past (D-2's late
 // transfer hole: measured at cap 2, three late transfers left four live orders
 // reporting booked = 1, available = true).
@@ -146,15 +159,38 @@ const LIVE_AT_BRANCH = `po."companyId" = $1
        AND po."routedBranchId" = $2
        AND po.status IN ('SUBMITTED','ACCEPTED')`;
 
+// "Did a move into the current branch happen AFTER the order was due?" An
+// order scheduled for 18:00 that is still sitting unmade at 19:30 and is then
+// transferred is NOT going to be cooked at 18:00 — it goes on the pass now. Its
+// due time has stopped describing when it loads a kitchen, so the move time
+// takes over. Written once because the anchor below and arm A both need it and
+// must agree; phrased as NOT EXISTS rather than max(...) <= scheduledFor because
+// it is an anti-join on (phoneOrderId, at) either way and this form says what it
+// means. Equivalent because the latest move is the largest: if no move is later
+// than scheduledFor then the latest one is not either.
+const movedInAfterDue = (e) => `EXISTS (SELECT 1
+                         FROM "PhoneOrderEvent" ${e}
+                        WHERE ${reassignedIntoCurrentBranch(e)}
+                          AND ${e}."at" > po."scheduledFor")`;
+
 // The rule as one expression. This is the readable statement of the invariant,
 // and it is what `anchorOf` below returns — but it is NOT what counts a slot.
 // Why not is the next comment.
+//
+// GREATEST, not COALESCE, across the first two: a scheduled order keeps its due
+// time while that time is still ahead of the last move, and switches to the move
+// once the move is later. Postgres GREATEST ignores NULLs and is NULL only when
+// every argument is, so the ASAP cases fall through to createdAt untouched —
+// GREATEST(NULL, moveAt) is moveAt, GREATEST(NULL, NULL) is NULL. A plain
+// COALESCE here is mutant M11: it takes scheduledFor unconditionally and lets a
+// stale due time walk past a destination that is full right now.
 const SLOT_ANCHOR = `
   COALESCE(
-    po."scheduledFor",
-    (SELECT max(e."at")
-       FROM "PhoneOrderEvent" e
-      WHERE ${reassignedIntoCurrentBranch('e')}),
+    GREATEST(
+      po."scheduledFor",
+      (SELECT max(e."at")
+         FROM "PhoneOrderEvent" e
+        WHERE ${reassignedIntoCurrentBranch('e')})),
     po."createdAt")`;
 
 // Counting by filtering on SLOT_ANCHOR directly is correct and far too slow.
@@ -174,23 +210,32 @@ const SLOT_ANCHOR = `
 //
 // The expression form cannot be indexed: the anchor is a correlated subquery,
 // so Postgres evaluates it once per row of branch history, and adding an index
-// changes nothing. Worse, that history NEVER SHRINKS, because
-// PhoneOrderStatus has no terminal state — an ACCEPTED order stays ACCEPTED
-// forever, so the scanned set is every order the store has ever accepted, not
-// its live backlog. loadBranchDecision runs this once per candidate branch on a
-// hot path, so a five-store company pays it five times over.
+// changes nothing. Worse, that history NEVER SHRINKS. REJECT does drop an order
+// out of the live set, but there is no status BEYOND accepted: nothing marks an
+// accepted order cooked, collected or closed, so an ACCEPTED order stays
+// ACCEPTED forever and the scanned set is every order the store has ever
+// accepted rather than its live backlog. loadBranchDecision runs this once per
+// candidate branch on a hot path, so a five-store company pays it five times
+// over.
 //
 // The same rule is therefore evaluated as three DISJOINT arms, each able to use
 // an index. They partition exactly the way COALESCE does:
 //
-//   A  scheduledFor set                  -> scheduledFor range   (COALESCE arm 1)
-//   B  no scheduledFor, moved here       -> latest REASSIGNED at (COALESCE arm 2)
-//   C  no scheduledFor, never moved here -> createdAt range      (COALESCE arm 3)
+//   A  due, and not moved since it was due -> scheduledFor range
+//   B  moved here, and that move is later than any due time -> REASSIGNED at
+//   C  no scheduledFor, never moved here    -> createdAt range
 //
 // A excludes a NULL scheduledFor implicitly, since a NULL comparison is not
-// true; B and C both require it NULL and are split by EXISTS / NOT EXISTS. That
-// makes the arms provably disjoint, and UNION rather than UNION ALL means the
-// count still cannot double if that reasoning is ever broken.
+// true. A and B are split by movedInAfterDue, which is the same test GREATEST
+// makes: exactly one side of it is true for any order that has both a due time
+// and a move, so they cannot both claim it and cannot both drop it. B and C are
+// split by EXISTS / NOT EXISTS on the move. That makes the arms provably
+// disjoint, and UNION rather than UNION ALL means the count still cannot double
+// if that reasoning is ever broken.
+//
+// Ties go to A, deliberately: at a move landing exactly on the due instant both
+// rules name the same instant, so the slot is the same either way, and `>`
+// rather than `>=` keeps one arm owning it.
 //
 // Arm B is driven FROM the event side, so the scan is a 15-minute window of
 // events rather than the whole history. Constraining e."companyId" is what
@@ -206,6 +251,7 @@ const SLOT_ARMS = `
      WHERE ${LIVE_AT_BRANCH}
        AND po."scheduledFor" >= $3
        AND po."scheduledFor" < $4
+       AND NOT ${movedInAfterDue('ea')}
   UNION
     SELECT po.id
       FROM "PhoneOrderEvent" e
@@ -216,7 +262,7 @@ const SLOT_ARMS = `
        AND e.action = 'REASSIGNED'
        AND e."toBranchId" = $2
        AND ${LIVE_AT_BRANCH}
-       AND po."scheduledFor" IS NULL
+       AND (po."scheduledFor" IS NULL OR e."at" > po."scheduledFor")
        AND e."at" = (SELECT max(e2."at")
                        FROM "PhoneOrderEvent" e2
                       WHERE ${reassignedIntoCurrentBranch('e2')})

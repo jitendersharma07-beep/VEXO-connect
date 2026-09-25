@@ -529,12 +529,25 @@ slot count — no column, no backfill; read its header before deploying, plain
 
 `IMPLEMENTED-UNVERIFIED` is per `LANE-BRIEF §5`: every row above has passing
 backend tests. Counts as observed on 09-25, not as planned:
-**71 in `tests/phoneOrders.test.js`, full suite 675** across 22 files.
+**76 in `tests/phoneOrders.test.js`, full suite 680** across 22 files.
 (The earlier "39 … 453/453" in this section was stale by two lanes' worth of
-tests and is replaced rather than corrected upward on faith.)
+tests and is replaced rather than corrected upward on faith. The later
+"71 … 675" is superseded by the five overdue-transfer and clock-pinning tests
+added on 09-25.)
 
-ACCEPTED additionally requires browser evidence, which is W2's half and has not
-been run. **No row here may be reported as ACCEPTED yet.**
+ACCEPTED additionally requires browser evidence. **That evidence now exists for
+the phone-order surfaces**: `frontend/qa/run-all.sh` against this candidate
+returned **75/75 with 0 skipped**, the artifact stamping
+`branch: x/vc104-slot-anchor`, `baseSha: 82c355b`, `dirty: true`. It covers
+availability and booked count, full-slot refusal, transfer between stores, and
+the re-price banner.
+
+**Promoting these rows to ACCEPTED is still not this document's call to make.**
+Two reasons, both worth stating rather than leaving as an omission. The run was
+taken against a *dirty* tree, so it is evidence about bytes that are not yet a
+commit. And the browser pass covers the four surfaces above, not every row in
+the table — 5.7–5.11 include paths the harness does not drive. The status column
+is therefore left as-is pending W1's read.
 
 ---
 

@@ -9,7 +9,7 @@
 // Runs ONLY against a database whose name ends in _test — the guard below
 // refuses anything else, because the suite truncates every table.
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 
 if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
@@ -27,7 +27,7 @@ const { reserveSlot } = await import('../src/api/routes/phoneOrders.js');
 // lock the route takes, and the same grid it takes it on. Imported rather than
 // re-derived, so a change to either makes that test fail instead of quietly
 // locking a slot the route is not using.
-const { lockSlot, slotBoundsFor } = await import('../src/lib/phoneOrders.js');
+const { lockSlot, slotBoundsFor, anchorOf } = await import('../src/lib/phoneOrders.js');
 
 const app = createApp();
 
@@ -1218,6 +1218,122 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
     });
   });
 
+  // --- the check/write clock gap (M8, M9) -----------------------------------
+  //
+  // Both routes capture the instant ONCE and then both check against it and
+  // store it, so an order cannot be judged against one slot and land in the
+  // next. Removing either pin is a one-line change (mutants M8 and M9) and was
+  // for two runs argued in code rather than asserted, on the grounds that the
+  // window is milliseconds wide and only opens on a slot boundary.
+  //
+  // That argument was wrong about WHY it was hard, and the reason matters.
+  // scripts/vc104-default-clock-probe.mjs settles it: `@default(now())` is not
+  // filled by Postgres — Prisma binds it as a parameter — and it is not filled
+  // by JS either. The Rust query engine reads the system clock itself. So the
+  // pinned value and the defaulted value come from two clocks that a test can
+  // separate: freeze the JS one and the engine's keeps running.
+  //
+  // Freezing it on the FIRST INSTANT OF THE NEXT SLOT puts the pinned instant
+  // one slot ahead of the engine's. The skew therefore points the opposite way
+  // from production, where the write lands a few ms after the check — and that
+  // is deliberate, because it is the only direction a test can create on
+  // demand. The proposition is identical either way and is the one that
+  // matters: the slot that was CHECKED and the slot the order is ANCHORED in
+  // are the same slot. A boundary between them breaks that equally in both
+  // directions.
+  //
+  // Only Date is faked. Timers stay real, because the lock rendezvous below
+  // polls pg_locks on a real setTimeout.
+  const atNextSlotStart = async (fn) => {
+    const boundary = slotBoundsFor(new Date(), 15).end;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(boundary);
+    try {
+      return await fn(boundary);
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it('pins a submitted order to the instant it was checked against, across a slot boundary', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const engineSlot = new Date();
+      await atNextSlotStart(async (boundary) => {
+        const res = await submit(baseSubmission({ branchId: a2.id }));
+        expect(res.status, JSON.stringify(res.body)).toBe(201);
+
+        const po = await prisma.phoneOrder.findUnique({
+          where: { id: res.body.phoneOrder.id },
+        });
+        // takenAt is frozen at the boundary, so an exact match is available and
+        // worth taking: "in the right slot" would still pass if the pin drifted
+        // within the slot.
+        expect(po.createdAt.getTime()).toBe(boundary.getTime());
+        expect((await anchorOf(prisma, { phoneOrderId: po.id })).getTime()).toBe(
+          boundary.getTime(),
+        );
+        // And the accounting agrees, which is the part a customer would feel:
+        // the order is in the slot that was checked and not in the engine's.
+        expect(await bookedAtA2()).toBe(1);
+        expect(await bookedAtA2(engineSlot)).toBe(0);
+      });
+    });
+  });
+
+  it('pins a transfer to the instant it was checked against, even while it waits for the slot lock', async () => {
+    await withCapacity(a2.id, 5, async () => {
+      const po = (await submit(baseSubmission())).body.phoneOrder;
+      const engineSlot = new Date();
+
+      await atNextSlotStart(async (boundary) => {
+        // Hold the destination slot's lock so the transfer has to queue for it.
+        // Without this the write follows the pin by a millisecond and the test
+        // would pass on a pin that only works when nothing is contended — which
+        // is precisely the case that never fails in production either.
+        let release;
+        const held = new Promise((r) => {
+          release = r;
+        });
+        const blocker = prisma.$transaction(
+          async (tx) => {
+            await lockSlot(tx, { companyId: companyA.id, branchId: a2.id, start: boundary });
+            await held;
+          },
+          { timeout: 20000, maxWait: 20000 },
+        );
+
+        let moving;
+        try {
+          await waitFor('the blocker to hold the slot lock', async () => (await slotLocks(true)) >= 1);
+          moving = request(app)
+            .post(`/api/phone-orders/${po.id}/reassign`)
+            .set(auth(tokens.ownerA))
+            .send({ branchId: a2.id, reason: 'moved as the slot rolls over' });
+          moving.catch(() => {});
+          await waitFor('the transfer to queue on the slot lock', async () => (await slotLocks(false)) >= 1);
+        } finally {
+          release();
+          await blocker.catch(() => {});
+        }
+
+        const res = await moving;
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+        const ev = await prisma.phoneOrderEvent.findFirst({
+          where: { phoneOrderId: po.id, action: 'REASSIGNED', toBranchId: a2.id },
+        });
+        expect(ev.at.getTime()).toBe(boundary.getTime());
+        expect((await anchorOf(prisma, { phoneOrderId: po.id })).getTime()).toBe(
+          boundary.getTime(),
+        );
+        expect(await bookedAtA2()).toBe(1);
+        expect(await bookedAtA2(engineSlot)).toBe(0);
+      });
+
+      await prisma.phoneOrder.deleteMany({ where: { id: po.id } });
+    });
+  });
+
   // A refused transfer must leave the SOURCE untouched. Every other test here
   // watches the destination — that the order did not arrive, that the count did
   // not move — and none of them would notice a refusal that had already written
@@ -1585,6 +1701,105 @@ describe('reassignment recalculates, and never moves an issued invoice', () => {
         .set(auth(tokens.ownerA))
         .send({ branchId: a2.id, reason: 'due much later' });
       expect(res.status, JSON.stringify(res.body)).toBe(200);
+    });
+  });
+
+  // An order that is scheduled and OVERDUE. Submit refuses a scheduledFor in the
+  // past, so the only way to reach this state is to live through it: the order
+  // was booked for a real future time, nobody made it, and PhoneOrderStatus has
+  // no terminal state so it is still SUBMITTED hours later. Back-dating the
+  // column is how that is reached without a fake clock or a sleep.
+  //
+  // The pair below splits the claim in two, because refusing and re-anchoring
+  // are different things and a fix could do one without the other.
+  const overdueAtA1 = async (dueMsAgo = 3 * 3600_000) => {
+    const at = new Date(Date.now() + 3 * 3600_000);
+    const created = await submit(baseSubmission({ scheduledFor: at.toISOString() }));
+    const po = created.body.phoneOrder;
+    await prisma.phoneOrder.update({
+      where: { id: po.id },
+      data: { scheduledFor: new Date(Date.now() - dueMsAgo) },
+    });
+    return po;
+  };
+
+  it('refuses an overdue scheduled transfer against the destination CURRENT slot', async () => {
+    await withCapacity(a2.id, 1, async () => {
+      // a2 is full NOW and empty three hours ago.
+      expect((await submit(baseSubmission({ branchId: a2.id }))).status).toBe(201);
+      const po = await overdueAtA1();
+      const elapsed = new Date(Date.now() - 3 * 3600_000);
+      expect(await bookedAtA2(elapsed)).toBe(0);
+
+      const res = await request(app)
+        .post(`/api/phone-orders/${po.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'overdue, still unmade' });
+
+      // Under the old `scheduledFor ?? movedAt` this was a 200: the check looked
+      // at a slot that elapsed hours ago, found it empty, and admitted food into
+      // a kitchen with no room for it.
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error.details.unavailableReasons[0]).toEqual({
+        code: 'AT_CAPACITY',
+        message: 'Kitchen is full for that time (1/1)',
+      });
+
+      // Refused means refused: the order is still a1's, and the elapsed slot was
+      // not quietly charged for it either.
+      const after = await prisma.phoneOrder.findUnique({ where: { id: po.id } });
+      expect(after.routedBranchId).toBe(a1.id);
+      expect(await liveAtA2()).toBe(1);
+      expect(await bookedAtA2(elapsed)).toBe(0);
+      await prisma.phoneOrder.deleteMany({ where: { id: po.id } });
+    });
+  });
+
+  it('anchors an overdue scheduled transfer to the move, not to its elapsed due time', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      const po = await overdueAtA1();
+      const elapsed = new Date(Date.now() - 3 * 3600_000);
+
+      const res = await request(app)
+        .post(`/api/phone-orders/${po.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'overdue, moved to a store with room' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+      // Where it landed, by the readable rule and by the counting rule, which
+      // must agree. The move event is the anchor; the stale due time is not.
+      const moved = await prisma.phoneOrderEvent.findFirst({
+        where: { phoneOrderId: po.id, action: 'REASSIGNED', toBranchId: a2.id },
+      });
+      expect(await anchorOf(prisma, { phoneOrderId: po.id })).toEqual(moved.at);
+      expect(await bookedAtA2()).toBe(1);
+      expect(await bookedAtA2(elapsed)).toBe(0);
+      await prisma.phoneOrder.deleteMany({ where: { id: po.id } });
+    });
+  });
+
+  // The other side of the rule, and the reason it is GREATEST and not "always
+  // the move": a scheduled order whose due time is still AHEAD of the move keeps
+  // that due time. Without this the fix above would just have moved the bug —
+  // every scheduled transfer would book the slot it was moved in, which is the
+  // behaviour the test two above forbids.
+  it('leaves a still-future scheduled transfer anchored on its due time', async () => {
+    await withCapacity(a2.id, 2, async () => {
+      const at = new Date(Date.now() + 3 * 3600_000);
+      const created = await submit(baseSubmission({ scheduledFor: at.toISOString() }));
+      const po = created.body.phoneOrder;
+
+      const res = await request(app)
+        .post(`/api/phone-orders/${po.id}/reassign`)
+        .set(auth(tokens.ownerA))
+        .send({ branchId: a2.id, reason: 'due later, moved now' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+      const anchor = await anchorOf(prisma, { phoneOrderId: po.id });
+      expect(anchor.toISOString()).toBe(at.toISOString());
+      expect(await bookedAtA2(at)).toBe(1);
+      expect(await bookedAtA2()).toBe(0);
+      await prisma.phoneOrder.deleteMany({ where: { id: po.id } });
     });
   });
 
