@@ -15,9 +15,9 @@ end to end against the real server. The independent audit of the combined
 candidate is NOT complete. This is not an approval of the release, and this
 document does not give one.** Two release blockers are open (§6), one of which is
 not in this lane's code; parts of the audit remit are unmeasured, one of them because
-the feature is not in the candidate at all (§7g, §7h).
+the feature is not in the candidate at all (§7h, §7i).
 
-Four separate figures. The first two are this lane's own work; the last two are the
+Five separate figures. The first two are this lane's own work; the last three are the
 candidate's code, measured by this lane's audit:
 
 | | Result | What it covers |
@@ -26,11 +26,13 @@ candidate's code, measured by this lane's audit:
 | `7/7`, exit 0 (§2b) | the end-to-end seam | the shipped client and runner over real HTTP against `createApp()`, with a real TCP printer, asserting database rows and socket bytes together |
 | `153/153`, exit 0 (§7a) | **not this lane's code** | the candidate's own gateway and phone-orders suites, run because nobody had a result for them — the first measurement the money path has ever produced |
 | `281/281`, exit 0 (§7b) | **not this lane's code** | eleven candidate suites chosen to answer named areas of the Part 4 remit — tenant isolation, recovery, Table/QR, customer display, admin and licence workflows |
+| `629/631`, **exit 1** (§7c) | **not this lane's code** | stock effects, reporting reconciliation and billing beyond the gateway. The two failures are `beforeEach` timeouts rather than assertions, which is a finding of its own (**A9**) and not a stock defect |
 
-None of the four is a project figure, and none may be combined with other lanes'
+None of the five is a project figure, and none may be combined with other lanes'
 totals or turned into a percentage of the whole. The agent is one component, and
-the last two rows are somebody else's code that this lane merely measured — a green
-result there says those suites pass, not that the release is ready. The 434 in §7h
+the last three rows are somebody else's code that this lane merely measured — a green
+result there says those suites pass, not that the release is ready. The fifth is not
+even green, and it is printed at its true exit status on purpose. The 1,065 in §7i
 is the count of candidate tests this audit executed, which is a statement about
 audit coverage and nothing else.
 
@@ -245,14 +247,14 @@ and the rows below say which parts are which rather than averaging them.
 | Table/QR | PASS | `tableQr` 74/74. §7b |
 | Customer display | PASS | `customerDisplay` 13/13. §7b |
 | Recovery behaviour | PASS | `accountRecovery` 33/33 and `accountRecoveryOutage` 5/5. §7b |
-| **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7e |
-| Fresh-migration evidence | PARTIAL | 41 migrations applied to an **empty** database, twice over (§2b at 40, §7a at 41), both logged. Never applied to a populated one — §7h |
-| Release images and build context | PARTIAL | the backend image **built (53.7 s), booted, and answered `GET /health` with `200`** — the first such evidence in this program. Four findings (A4, A5, A7, A8) and three things done right. No frontend image was built, and one health probe is not a release. §7f |
-| **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7g, A6 |
-| Defects returned to the responsible window | PASS | A1–A8 in §7c–§7g, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
-| **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7g, A6 |
-| Stock-effect / billing reconciliation beyond the gateway | **NOT VERIFIED** | §7h |
-| Restore-from-backup evidence | **NOT VERIFIED** | nothing at all was produced here. §7h |
+| **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7f |
+| Fresh-migration evidence | PARTIAL | 41 migrations applied to an **empty** database, twice over (§2b at 40, §7a at 41), both logged. Never applied to a populated one — §7i |
+| Release images and build context | PARTIAL | the backend image **built (53.7 s), booted, and answered `GET /health` with `200`** — the first such evidence in this program. Four findings (A4, A5, A7, A8) and three things done right. No frontend image was built, and one health probe is not a release. §7g |
+| **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7h, A6 |
+| Defects returned to the responsible window | PASS | A1–A9 in §7c–§7h, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
+| **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7h, A6 |
+| Stock-effect / billing reconciliation beyond the gateway | **PARTIAL** | 17 files run, **629/631, exit 1**. Every valuation and reconciliation assertion that executed, passed; the two failures are `beforeEach` timeouts, and a re-run failed on a *different* test with the same message. The stock code is not implicated — the harness is, and that is **A9**. A suite that cannot finish deterministically cannot certify anything, so this is not a pass. §7c |
+| Restore-from-backup evidence | **NOT VERIFIED** | no restore was performed by this lane, and none is claimed by any peer document either — Window 3’s handoff says so in those words. What *is* evidenced is that an encrypted archive ships. The step that would settle it needs the owner’s own machine and private key, and its destination is a host this lane is instructed not to access. §7i |
 
 ## 4. Not executed, and exactly why
 
@@ -455,16 +457,26 @@ Not blockers of this lane's making, but open and unresolved:
 - **The candidate is still uncertified**, by its own record (§1) and now by
   measurement: the certification run in flight at the time of writing does not
   contain the index it exists to certify, and its tree changed 36 seconds after it
-  started (§7c, A1).
-- **Part 4 is not finished** (§7h). Restore-from-backup has produced nothing at all.
-  **Kiosk cannot be verified because it is not in the candidate** (§7g, A6) — a scope
-  answer Window 1 owes, not a test this lane can write. Licence enforcement, Captain,
-  the release images and the fresh-migration evidence are PARTIAL and say why. They
-  are recorded as gaps, not as passes, and this lane's independent acceptance is
-  therefore **incomplete**.
+  started (§7d, A1).
+- **The candidate's own test harness cannot finish deterministically** (§7c, A9). The
+  inventory family truncates all 139 tables **before every test** — 150 times per full
+  run, ~2.1 s each, against a 30 s `hookTimeout`. Three runs failed on four different
+  tests with one identical message and never an assertion, on a database no other lane
+  could touch. This is not a product defect and it is not in this lane's code, but it
+  is a certification blocker: you cannot certify a candidate whose suites report a
+  different failure each time they run. It is also the cheapest of the open items to
+  fix, and the helper already mints a unique tenant per fixture.
+- **Part 4 is not finished** (§7i). Restore-from-backup is owner-gated and this lane
+  cannot close it; the precise dependency is recorded rather than the gap being left
+  blank. **Kiosk cannot be verified because it is not in the candidate** (§7h, A6) — a
+  scope answer Window 1 owes, not a test this lane can write. Licence enforcement,
+  Captain, stock/billing reconciliation, the release images and the fresh-migration
+  evidence are PARTIAL and say why. They are recorded as gaps, not as passes, and this
+  lane's independent acceptance is therefore **incomplete**.
 
 **This lane does not approve production.** Two blockers are open, the candidate is
-uncertified, and a third of the audit remit is unmeasured.
+uncertified, its suites do not finish deterministically, and parts of the audit remit
+remain unmeasured.
 
 ## 7. Independent audit of the integration candidate
 
@@ -479,7 +491,7 @@ Findings are numbered **A1–A5** and each is sent to the window that owns the c
 One label collision, flagged so nobody chases the wrong artefact: the photographs in
 §4a are also lettered `A1`, `B1`, `B2`, `C1`, because that is how they are indexed in
 the hardware manifest and renaming them there would break a sha256-keyed record.
-`A1` in §7c is an audit finding; `A1` in §4a is the printer's rating plate.
+`A1` in §7d is an audit finding; `A1` in §4a is the printer's rating plate.
 
 ### 7a. The 153 money-path tests, executed for the first time
 
@@ -534,7 +546,7 @@ candidate's own suites, plus the one failure Window 5 attributed to code.
 | Area of the remit | Suite | Tests |
 |---|---|---|
 | Tenant isolation | `authTenantIsolation` | 11 |
-| Licence enforcement | `licenseModuleGate` | 14 — **but see §7e** |
+| Licence enforcement | `licenseModuleGate` | 14 — **but see §7f** |
 | Recovery behaviour | `accountRecovery`, `accountRecoveryOutage` | 33 + 5 |
 | Table/QR | `tableQr` | 74 |
 | Customer display | `customerDisplay` | 13 |
@@ -546,7 +558,92 @@ analysis was the single failure attributable to code on that evidence, and
 `02ee253` was written to fix it. It passes here, on the candidate that contains
 the fix, from a tree nothing was writing to.
 
-### 7c. A1 — the in-flight certification run does not contain the fix it is meant to certify
+### 7c. Stock effects, reporting reconciliation and billing — 631 tests, exit 1, and A9
+
+The last unmeasured area of the Part 4 remit. Seventeen files, same extracted tree,
+same private database. The exit status was **`1`**, and that is reported first
+because it is the true one:
+
+| | |
+|---|---|
+| Result | `Test Files 2 failed \| 15 passed (17)` · `Tests 2 failed \| 629 passed (631)` |
+| Exit code | **`1`** |
+| Duration | 794.79 s |
+| Start | 04:49:18, 2026-09-26 |
+| Log | `~/vexo-connect-x-evidence/printagent/w6-audit-stock-20260926.log` |
+
+| Area of the remit | Suites |
+|---|---|
+| Stock effects | `inventoryApi`, `inventoryLedger`, `inventoryProduction`, `inventorySales`, `inventoryScheduler` |
+| Reporting reconciliation and export | `reportingApi`, `reportingConsumption`, `reportingExport`, `reportingPeriod`, `reportingSchedule` |
+| Billing beyond the gateway | `money`, `paymentAccounts`, `discounts`, `promotions`, `vc105Profitability`, `razorpay`, `razorpayFlow` |
+
+Two files were deliberately left out, and the script's header says so rather than
+leaving it to be noticed: `reportingExceptions` already has a result in §7b and
+re-running it would double-count a figure, and `integrations.test.js` — the
+100,000-customer suite whose cascade delete is the subject of the certification in
+flight — would have measured this audit's own contention rather than the candidate.
+
+**What the two failures are, and are not.** Neither is an assertion. Both are:
+
+```
+Error: Hook timed out in 30000ms.
+```
+
+in a `beforeEach`. Every stock-valuation expectation that actually executed, passed —
+weighted average, FIFO across batches, the yield divisor, MISSING for unpriced
+output, and the refusal cases. So this is not a stock defect, and it must not be
+filed as one. It is also not a flake to be re-run away, which is what looking at it
+properly turned into a finding.
+
+**A9 — the inventory suites take a whole-database exclusive lock before every single
+test. Owner: Window 1. Measured on this box.**
+
+| Fact | How it was established |
+|---|---|
+| `wipeAll()` is `TRUNCATE TABLE <139 tables> RESTART IDENTITY CASCADE`, one statement | `tests/helpers/inventory.js:66`, and the table list it builds at `:55` |
+| Five suites call it, and all five call it from **`beforeEach`**, not `beforeAll` | `inventoryApi`, `inventoryLedger`, `inventoryProduction`, `inventorySales`, `inventoryScheduler` |
+| Those five hold **150 tests**, so a full run performs **150 whole-database truncates** | `it(`/`test(` counts: 40 + 28 + 16 + 32 + 34 |
+| One truncate costs **1.93 / 2.09 / 2.29 / 2.56 s** here, at load ~12 with 7 foreign `vitest` processes | the helper's own generated statement, timed by Postgres with `\timing` |
+| So ≈ **5.2 minutes** of any full run is `TRUNCATE`, before a single test body executes | 150 × 2.1 s |
+| The password work is **not** the cost — 40 ms hash + 4 × ~26 ms verify = **143 ms** per test | `w6-audit-hook-cost.mjs`, the candidate's own `src/lib/crypto.js`, argon2id `m=19456,t=2,p=1` |
+| The budget it has to fit in is **30 s** | `vitest.config.js`, `hookTimeout: 30000` |
+
+Three runs now, and the failure never lands on the same test twice:
+
+| Run | Files | Result | Failing test |
+|---|---|---|---|
+| 04:49:18 | 17 | 629/631, **exit 1** | `inventoryLedger` *"rejects a zero-quantity movement"* and `inventoryProduction` *"…to the paise"* |
+| re-run, 7 foreign `vitest` | 2 | 44/44, exit 0 | — |
+| 05:13:06, load 14.07 | 2 | 43/44, **exit 1** | `inventoryProduction` *"posts once when the same run is submitted twice"* |
+
+Four distinct tests, one error, never an assertion. A failure that moves between
+tests while the message stays identical is not located in any of them: it is the hook,
+and the hook is the same in all five files.
+
+Two consequences worth separating, because they have different fixes:
+
+1. **On a private database this is already marginal.** Nothing else was writing to
+   `vcx_w6_audit_test`. 2.1 s of truncate plus fixture construction plus four HTTP
+   logins, on a box carrying other lanes, is close enough to 30 s that a third of the
+   attempts cross it. Raising `hookTimeout` would hide it; the wipe is what is
+   expensive.
+2. **On a shared database it is worse in kind, not in degree.** `TRUNCATE` takes
+   `ACCESS EXCLUSIVE` on all 139 tables at once, so while one inventory test is
+   setting up, *every* query of *every* other suite on *any* table waits behind it.
+   That is a stronger statement than A2 (§7e), which describes rows inherited between
+   suites. This is a lock held over the whole schema, 150 times, whether or not any
+   rows exist to delete.
+
+And the cheap fix is visible in the helper itself: `buildBaseFixture` already mints a
+unique tenant per call — `slug: \`${slug}-${Date.now()}\`` at `tests/helpers/inventory.js:77`.
+The suites are therefore already almost isolated by company, which is what makes a
+global per-test truncate look like belt-and-braces over an isolation that exists.
+Moving the wipe to `beforeAll`, or narrowing it to the tables these suites write,
+would remove roughly five minutes and the whole failure mode. This lane does not
+implement it: `tests/helpers/inventory.js` is not this lane's file.
+
+### 7d. A1 — the in-flight certification run does not contain the fix it is meant to certify
 
 **Owner: Window 1 and Window 5. Verified, not inferred, and time-sensitive.**
 
@@ -571,7 +668,7 @@ Two consequences, and neither is a criticism of the analysis in that document:
 The cheapest correct next attempt: `migrate deploy` first so the 41st migration
 lands, assert the index exists, and run from an extracted tree.
 
-### 7d. A2 — every suite's `beforeAll` deletes every other suite's rows
+### 7e. A2 — every suite's `beforeAll` deletes every other suite's rows
 
 **Owner: Window 1. A design observation with a measured consequence, not a bug report.**
 
@@ -594,7 +691,15 @@ per lane are already in use on this box — `vcx_cert625_test`, `vcx_idxrun_test
 `vcx_tables_test` and others — so this is a convention that has begun spreading on
 its own, and is worth making the rule.
 
-### 7e. A3 — licence enforcement is a mechanism with nothing behind it
+**A private database is necessary and not sufficient, and §7c is the evidence.** The
+17-file stock run had `vcx_w6_audit_test` entirely to itself and still finished
+`exit 1` on two `beforeEach` timeouts; a two-file re-run finished `exit 1` on a third,
+different test. So the wipes are not only inheriting other suites' rows — in the
+inventory family the wipe is a 139-table `TRUNCATE` taken **before every test**,
+150 times per full run, ~2.1 s each, against a 30 s budget (A9, §7c). Removing
+cross-lane pollution removes one of the two causes. The other one is in the helper.
+
+### 7f. A3 — licence enforcement is a mechanism with nothing behind it
 
 **Owner: Window 1. Not a defect; a status that must not be reported as a pass.**
 
@@ -622,7 +727,7 @@ hold if something were wired to it. Nothing is. Anyone reading `14 passed` as
 "module licensing is enforced" would be wrong, and the test's own author has
 already left the note saying to delete that block the day it stops being true.
 
-### 7f. A4, A5, A7, A8 — the release image, built and booted
+### 7g. A4, A5, A7, A8 — the release image, built and booted
 
 The recipes were the part of a release nobody had inspected, so they were read
 first. Then the backend image was **actually built and actually started**, because a
@@ -644,7 +749,7 @@ cd /home/atc-noc/w6-audit/cand-d625370/backend && docker build -t w6-audit-cand-
 
 That is the first end-to-end evidence in this program that the API image builds,
 starts, and serves. It is **not** a release certification: one container, one health
-probe, an empty database, and no frontend image was built (§7h).
+probe, an empty database, and no frontend image was built (§7i).
 
 **Good, and worth recording because both are easy to get wrong:**
 
@@ -668,7 +773,7 @@ probe, an empty database, and no frontend image was built (§7h).
 | A7 | **The API container runs as `root`.** There is no `USER` directive in `backend/Dockerfile`, so the process that serves every authenticated route, holds the database connection and decrypts gateway credentials runs as `uid=0`, and `/app` is `root:root`. Confirmed at runtime inside the running container, not inferred from the recipe. The base image already ships an unused `node` user at `uid=1000` for exactly this. Two lines — `chown` the app directory and `USER node` — close it. | **Medium-high.** It does not by itself let anyone in, but it removes the last containment step from every other defect: any RCE or path-traversal in a dependency becomes root in the container |
 | A8 | **`EXPOSE 5000`, but the app listens on `5010`.** `env.js` is `Number(process.env.PORT \|\| 5010)` and nothing under `backend/` sets `PORT=5000` anywhere. `EXPOSE` is documentation rather than enforcement, so nothing breaks today — but it is the number a reader, an orchestrator's default port mapping, or a health-check template will take, and it is wrong by ten. | Low — but it is a one-character class of bug that costs an hour at the wrong moment |
 
-### 7g. A6 — Captain and Kiosk, and what "no suite carries that name" actually meant
+### 7h. A6 — Captain and Kiosk, and what "no suite carries that name" actually meant
 
 An earlier revision of this document recorded Captain/Kiosk as NOT VERIFIED because
 no test file carries either name. That was true and useless: it described this
@@ -701,20 +806,33 @@ route, no role, no enum value, no screen.
 |---|---|---|
 | A6 | **`CAPTAIN` appears in `0` of the candidate's 52 test files.** The role is assignable, store-pinned, labelled in the UI and carries a six-permission bundle including `order.item.void` — the right to void a line on someone else's order — and no test ever logs in as one. The bundle is also the only role that grants `order.*` without any payment permission, so *"takes orders, cannot bill"* is asserted nowhere. **Separately: the remit asks for Captain/Kiosk verification and Kiosk is not in the candidate.** That is a scope question for Window 1, not a defect — but it cannot be verified, and it must not be recorded as a pass. | Medium for the untested void permission; the Kiosk gap is a scope answer owed |
 
-### 7h. What this audit does not cover
+### 7i. What this audit does not cover
 
 Recorded so the gaps are not read as passes. None of the following was verified by
 this lane, and this section will not claim it:
 
-- **Kiosk, because there is nothing in the candidate to verify** (§7g, A6), and
+- **Kiosk, because there is nothing in the candidate to verify** (§7h, A6), and
   **Captain beyond its permission bundle**, which no test exercises.
-- **Stock-effect and billing reconciliation outside the gateway suite.** The
-  `inventory*` and `reporting*` families were not run. `reportingExceptions` was,
-  and only because a fix was owed there.
-- **Restore-from-backup.** No backup was taken and none restored. This is the one
-  remit item on which this lane has produced nothing at all.
+- **Stock effects and billing reconciliation, beyond a harness that finishes.** The
+  `inventory*` and `reporting*` families have now been run — 17 files, 629 of 631,
+  `exit 1` (§7c). Every assertion that executed, passed, and no failure was an
+  assertion. But a suite that fails on a different test each time it runs has not
+  certified the code it covers, and this section will not pretend otherwise: the
+  stock figures below are a measurement of the candidate, not a clearance of it.
+- **Restore-from-backup.** This lane took no backup and restored none. An earlier
+  revision of this section called it "the one remit item on which this lane has
+  produced nothing at all", which mistook this lane’s view for the programme’s:
+  `docs/BACKUP-EVIDENCE-RECONCILIATION.md` records a shipped, encrypted archive
+  (`pos-prod-20260923T162012Z.tar.gpg`, `status=ok`) and an armed nightly send. What
+  no document claims — and Window 3’s handoff says exactly this, *"no document
+  claims a successful restore"* — is that a shipped `.tar.gpg` has ever been
+  decrypted and restored. That gap is **owner-gated, not a coverage gap this lane
+  can close**: the gpg private key is passphrase-protected and the proof has to
+  happen on the owner’s own machine, and the current destination is `20.20.20.57`,
+  which this lane is instructed not to access. So *shipped* is evidenced and
+  *restorable* is not — which is a precise external dependency rather than a blank.
 - **The frontend image, and the backend image beyond one health probe.** The backend
-  image was built, started and answered `GET /health` (§7f) — but that is one
+  image was built, started and answered `GET /health` (§7g) — but that is one
   container against an empty database, not a release exercised through it. No
   frontend image was built, so nothing here speaks to the bundle as served.
 - **The 41 migrations against a populated database.** They were applied to an empty
@@ -728,9 +846,10 @@ Two peer certification runs were in flight throughout (Window 5 on
 `vcx_integration_test`, another on `vcx_cert625_test`) and this lane deliberately
 did not start a third full-suite run: 21 foreign `vitest` processes were live at
 04:22Z, and contention is the defect under investigation. Adding to it would have
-corrupted the measurement it was meant to check. The 434 tests in §7a and §7b were
-chosen to be the smallest set that answers the remit, not the largest set that
-would run.
+corrupted the measurement it was meant to check. The 1,065 tests in §7a, §7b and §7c
+were chosen to be the smallest set that answers the remit, not the largest set that
+would run — 153 + 281 + 631, counted once each, with the two-file re-runs of §7c
+excluded because they repeat tests already counted.
 
 ## 8. Evidence
 
@@ -760,10 +879,23 @@ true rather than asserting it, and both DSNs in it are safe to read.
                                and the pg_indexes line proving the schema
   w6-audit-part4-20260926.log  the §7b coverage batch — 11 files, 281/281, exit 0,
                                190.27s, same extracted tree and private database
-  w6-audit-stock.sh            the §7i run: stock effects, reporting reconciliation
+  w6-audit-stock.sh            the §7c run: stock effects, reporting reconciliation
                                and billing beyond the gateway. Its header records the
                                two files it deliberately omits, and why
-  w6-audit-stock-20260926.log  its output
+  w6-audit-stock-20260926.log  its output — 17 files, 629/631, exit 1, 794.79s. The
+                               two failures are `beforeEach` timeouts; the log holds
+                               both, and neither is an assertion
+  w6-audit-stock-rerun.sh      the same two files alone, to test whether the failures
+                               are the code or the harness. Records load and foreign
+                               `vitest` count first, because that is the independent
+                               variable
+  w6-audit-stock-rerun-20260926.log  43/44, exit 1 — and on a DIFFERENT test than
+                               either original failure. That is what makes A9 a
+                               harness finding rather than a stock defect
+  w6-audit-hook-cost.mjs       times the password half of the failing hook using the
+                               candidate's own `src/lib/crypto.js`. Asserts that the
+                               verify succeeded — the first version had the arguments
+                               reversed and timed argon2's error path at 1 ms
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
