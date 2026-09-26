@@ -435,8 +435,8 @@ Refs appear the instant a PR is created, drafts included. Three checks:
 
 1. `refs/pull/5/head` equals local `HEAD`.
 2. `refs/pull/5/merge` exists — the remote computes it only for a conflict-free
-   merge. Its parents must be `main` plus that head, which is what proves the PR
-   targets `main` rather than something else.
+   merge — **and its parents are `main` plus that head.** Read the parents. Do
+   not stop at the ref existing; see below.
 3. `git diff github/main refs/pull/5/merge` lists **only** the 9 owned files.
    This is the check that matters most: it is how you would catch a co-tenant's
    work having been swept in, which has happened in this organisation before.
@@ -444,6 +444,58 @@ Refs appear the instant a PR is created, drafts included. Three checks:
 Before trusting a *negative* result from step 1, confirm the method works by
 finding a sibling lane's existing PR in the same listing. An empty answer and a
 broken method look identical otherwise.
+
+#### The merge ref lags a push, and it lags silently
+
+**Measured 2026-09-26.** A push moved `head` from `0d7e997` to `55f1316`, and in
+the same `ls-remote` `refs/pull/5/merge` still advertised `7674688` — the value it
+had held before the push, whose second parent was `0d7e997`, i.e. `HEAD~2`. The
+remote recomputes mergeability as a background job, so for a window after every
+push the advertised merge preview describes the **previous** head.
+
+This fails in the quiet direction, which is what makes it worth writing down:
+
+- the ref is present, so an existence check passes;
+- its SHA is a real commit that really does merge cleanly;
+- nothing in the output says "stale";
+- so "is the merge clean?" gets a confident **yes about the wrong commit**.
+
+Anyone verifying in the seconds after a push gets that answer. Certifying it
+would mean certifying two commits that are no longer on the branch.
+
+**The check that catches it** — the second parent must be the head you just
+pushed, not merely *a* plausible commit:
+
+```
+git -C ~/vexo-connect-x-lanes/experience fetch --force github \
+  'refs/pull/5/merge:refs/pr/5/merge'
+git -C ~/vexo-connect-x-lanes/experience log -1 --format='%P' refs/pr/5/merge
+```
+
+Second parent `!=` local `HEAD` → stale, wait and re-read. It recomputed within
+seconds here, but the wait is not the point; noticing is.
+
+**`--force` is required, and here is why** — measured, not assumed. Each recompute
+replaces the merge commit with a *sibling*, not a descendant: `76ca747` is not
+reachable from `7674688`, because both are merges of the same `main` with
+different heads. So updating a local ref from one to the other is a
+non-fast-forward, and a plain fetch refuses it:
+
+```
+$ git fetch github 'refs/pull/5/merge:refs/pr/5/merge'
+ ! [rejected]        refs/pull/5/merge -> refs/pr/5/merge  (non-fast-forward)
+$ echo $?
+1
+```
+
+The refusal is visible and the exit status is 1 — this part is not silent. What
+*is* quiet is the consequence: the local ref still holds the old commit, so a
+pipeline that discards stderr or ignores the exit status goes on to read a
+perfectly valid stale merge and reports it as current. Use `--force`, or fetch
+into a fresh ref name, and check the parents either way.
+
+Same discipline as everything else in this delivery: a ref that exists is only a
+promise until you read what it points at.
 
 `main` is not a push target and was not advanced. Coordination with W1 on merge
 order is still open — §5. **Merge is gated on integration and Captain-workflow
