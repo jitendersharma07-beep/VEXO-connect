@@ -13,7 +13,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
-import { audit } from '../../lib/audit.js';
+import { audit, auditRequired } from '../../lib/audit.js';
 import {
   requirePosAuth,
   resolveCompanyScope,
@@ -31,6 +31,7 @@ import {
   resolveWaiter,
   serviceUpdateData,
 } from '../../lib/tables/service.js';
+import { isDestinationTaken, transferParty } from '../../lib/tables/transfer.js';
 
 const router = Router();
 router.use(requirePosAuth, resolveCompanyScope);
@@ -54,6 +55,24 @@ const canServe = [
   requireUsableLicense,
   loadPermissionContext,
   requireAction('table.service'),
+];
+
+// Same list, same reasoning, and separately switchable: a business may well let
+// a captain record covers but keep moving parties to a manager, because a
+// transfer decides which bill a subsequent round lands on. POS_SUPER_ADMIN is
+// absent here for the same reason it is absent everywhere else in this router.
+const canTransfer = [
+  requireRole(
+    'CUSTOMER_OWNER',
+    'COMPANY_ADMIN',
+    'REGIONAL_MANAGER',
+    'BRANCH_MANAGER',
+    'CASHIER',
+    'CAPTAIN',
+  ),
+  requireUsableLicense,
+  loadPermissionContext,
+  requireAction('table.transfer'),
 ];
 
 const OPEN_STATUSES = ['OPEN', 'BILLED'];
@@ -335,6 +354,62 @@ router.post(
     });
 
     res.json({ service: publicService(updated) });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// LANE tables — transfer
+// ---------------------------------------------------------------------------
+
+const transferSchema = z.object({ toTableId: z.string().min(1) });
+
+// Only the SOURCE table is resolved through the caller's scope. The destination
+// is then resolved against the source's own branch inside transferParty, which
+// is what makes "may this person touch this floor?" one question asked once
+// instead of two that can disagree. See lib/tables/transfer.js.
+router.post(
+  '/:id/transfer',
+  ...canTransfer,
+  asyncHandler(async (req, res) => {
+    const from = await loadTableInScope(req);
+    const { toTableId } = transferSchema.parse(req.body);
+
+    let moved;
+    try {
+      moved = await prisma.$transaction(async (tx) => {
+        const result = await transferParty(tx, { from, toTableId, actorId: req.user.id });
+        // auditRequired, not audit: a party that moved with no record of who
+        // moved it is the dispute this row exists to settle, so the row and the
+        // move commit together or neither does.
+        await auditRequired(tx, req, {
+          action: 'TABLE_TRANSFER',
+          entity: 'DiningTable',
+          entityId: from.id,
+          companyId: req.companyScope.id,
+          meta: {
+            fromTableId: result.from.id,
+            fromTableName: result.from.name,
+            toTableId: result.to.id,
+            toTableName: result.to.name,
+            branchId: from.branchId,
+            visitId: result.visitId,
+            orderIds: result.orderIds,
+            ordersMoved: result.ordersMoved,
+          },
+        });
+        return result;
+      });
+    } catch (err) {
+      // The destination was claimed between our check and our write. The unique
+      // constraint on DiningVisit.openTableId is what caught it; this turns it
+      // into an answer about the floor instead of a 500 about the database.
+      if (isDestinationTaken(err)) {
+        throw conflict('That table was taken while the party was being moved');
+      }
+      throw err;
+    }
+
+    res.json({ transfer: moved });
   }),
 );
 
