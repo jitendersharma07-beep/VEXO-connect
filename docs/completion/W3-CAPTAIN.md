@@ -388,6 +388,36 @@ Logs kept at `~/vcx-experience-local/evidence/w3-20260926/`
 (`captain-reach.log`, `staff-browser-postfix.log`, `staff-browser-sectionF.log`,
 `staff-browser-final.log`), screenshots at `~/vcx-experience-local/evidence/shots/`.
 
+### Housekeeping, 2026-09-26 08:50Z — logs retained, databases and exports removed
+
+Recorded here because the sentences above became untrue after the run, and an
+instruction that no longer works is worse than no instruction.
+
+**Retained, so every number in §7 and §8 stays checkable:** all six logs, with the
+md5s quoted in §8 unchanged —
+`w3gate-3754f64.log` `b316255d582bec5f15552a0ee90c58cb`,
+`w3gate-d7108cf.log` `fdf86b9d1fa38ff49db1f8fcdd7e91df`.
+
+**Removed, to give ~143 MB back to a box four other lanes share:** the databases
+`vcx_experience_w3_test` (the gate DB) and `vcx_w3order_test` (the scratch repro
+DB), plus the pinned candidate exports under `/tmp/w3-cand-*`. Verified idle
+(0 connections) before dropping; no database this lane did not create was touched.
+
+**Nothing is lost, but re-running needs one extra step.** The candidate tree is
+reproducible from its SHA at any time, and neither `w3test.sh` nor `w3gate.sh`
+contains a `createdb` — both go straight to `prisma migrate deploy` (line 65 and
+line 109 respectively), which applies migrations but does not create the database.
+So a bare re-run against a dropped DB fails on connect. Recreate it first:
+
+```
+docker exec -i vexo-connect-dev-db createdb -U vexo_dev vcx_experience_w3_test
+~/vcx-experience-local/w3test.sh tests/captainWorkflow.test.js
+```
+
+The `_test` suffix is not decoration: `tests/globalSetup.js` refuses any
+`DATABASE_URL` not matching `/_test(\?|$)/`, and an earlier attempt at
+`vcx_experience_w3test` tripped exactly that guard and collected zero files.
+
 The 15 console `401`s in the browser log are all `GET /api/auth/me` on page load
 before a token exists — role-independent and pre-existing. Not a finding.
 
