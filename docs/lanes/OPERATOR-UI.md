@@ -103,10 +103,36 @@ edited here; flagged for the owner.
 > | raw / gzip | 2,067.13 kB / 369.71 kB | **983.94 kB / 253.41 kB** |
 > | modules | 1717 | 1717 |
 > | sha256 | not recorded | `6c5b34feed6f528f013d17645c4e9b01cd21db4907af810f05facb0c792df497` |
-> | dev-React markers | not checked | **0** |
 >
 > A matching bundle filename or module count would *not* have caught this; the
 > filename is a content hash of a file nobody weighed.
+>
+> **Proven by a control build, not by inference.** Rebuilding this same tree with
+> `NODE_ENV=development` forced produces **2,067.50 kB / 369.81 kB gzip** — the
+> reported figure to within 0.4 kB, the difference being the `Modal` change this
+> lane made since. That is the diagnosis reproduced on demand rather than argued
+> from circumstance.
+>
+> **A first attempt to prove it by grepping for "dev-React markers" was itself
+> unsound, and the marker set is recorded because it is a trap.** Measured
+> against both artifacts:
+>
+> | grep | production | dev control | verdict |
+> |---|---|---|---|
+> | `react-refresh` | 0 | **0** | useless — 0 on a *dev* build |
+> | `__REACT_DEVTOOLS_GLOBAL_HOOK__` | **5** | 21 | useless — production React registers with DevTools too |
+> | `checkDCE` | **2** | 1 | useless — and *higher* in production |
+> | `Each child in a list should have a unique` | 0 | 3 | real |
+> | `Warning: ` | 0 | 4 | real |
+> | `validateDOMNesting` | 0 | 3 | real |
+> | `The above error occurred in` | 0 | 2 | real |
+>
+> Of the three greps originally used, one reads 0 on a development build and one
+> is non-zero on a production build; only the third discriminated, so "0 markers"
+> was a correct conclusion reached by an argument that does not hold. A grep that
+> finds nothing proves nothing until the same grep is shown finding something —
+> which is exactly what §4 says below about the DOM-string controls, applied here
+> one level up. The four "real" rows each have a non-zero control.
 >
 > **The lane is now journey-verified.** All three gaps §4 names are closed:
 >
