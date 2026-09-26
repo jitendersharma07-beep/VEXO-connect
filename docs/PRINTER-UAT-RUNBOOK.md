@@ -94,12 +94,15 @@ dialog and paper: driver, page size, margins, whether 80 mm thermal at
 
 | | Value | Notes |
 |---|---|---|
-| Printer make/model (from the unit's label) | **DCode DC RP30** | Owner-supplied photograph, 2026-09-25 |
-| Head (from self-test) | ____ dpi / ____ chars per line | **STILL BLANK — and it is the one gating value.** See the dpi table: 48 (203 dpi) and 42 (180 dpi) are BOTH passes; **~32 or fewer means a 58 mm printer: STOP** (58 mm is a code change, not a setting). The self-test photo already in hand should show this — see "the cheapest open question" below |
-| Connection | **USB** | Owner-supplied photograph: Windows port `USB001` |
+| Printer make/model (from the unit's label) | **DCode DC RP30** | **Rating plate read directly** by W6, 2026-09-25 — photo `A1`, see provenance below |
+| Serial | **DCRP30-2606F0313** | Barcode line of the same rating plate (`A1`) |
+| Interfaces on the unit | **USB + LAN** | Printed on the rating plate (`A1`): `Interface : USB+LAN`. The unit has Ethernet, so a `PrintTarget` with `transport: TCP` → `host:9100` is reachable on this hardware once it is given an address. Earlier notes calling this unit USB-only are wrong |
+| Power | 24 V ⎓ 2.5 A; BIS `R-93025780` | Rating plate (`A1`) |
+| Head (from self-test) | ____ dpi / ____ chars per line | **STILL BLANK — and it is the one gating value.** See the dpi table: 48 (203 dpi) and 42 (180 dpi) are BOTH passes; **~32 or fewer means a 58 mm printer: STOP** (58 mm is a code change, not a setting). **The photographs in hand cannot close this** — they are raster output from a browser print, not ESC/POS text; see "the cheapest open question" below, which has been rewritten now that the photographs have actually been looked at |
+| Connection in use | **USB** | Owner-supplied photograph: Windows port `USB001`. This is the port currently wired, not the unit's only interface — see the row above |
 | Attached computer + OS | **Windows**, driver `POS-80C` on port `USB001` | Owner-supplied photograph of a successful Windows print |
 | Browser | ________ (Chromium preferred; 100 % zoom) | Not yet recorded; the app-output rows below need it |
-| Paper | 80 mm roll (~72 mm printable) | Implied by the `POS-80C` driver, **not** independently confirmed |
+| Paper | 80 mm roll (~72 mm printable) | Implied by the `POS-80C` driver name and by the app's own `@page { size: 80mm auto }`, **not** independently confirmed. The rating plate does not state a media width |
 
 **Expected characters-per-line by head — both rows pass:**
 
@@ -181,39 +184,86 @@ refund labels are all still unobserved. **Record B stays PENDING in full.**
 
 ### Provenance — read before citing these two rows
 
-Neither photograph has been inspected by the session writing this record, and
-neither is filed in the evidence set. Both rows are **owner-attested**: the
-owner states the photographs exist and show the above. That is a legitimate
-basis for a hardware check — the owner is the person holding the printer — but
-it is a weaker artifact than the rest of this run-book, where every claim points
-at a file. **File the two images beside this document and replace this
-paragraph with their paths.** Until then, an auditor reading this has the
-owner's word and not the picture.
+Superseded 2026-09-25 by Window 6. The paragraph that stood here said no
+photograph had been inspected and asked for the images to be filed. They have
+now been recovered from the owner's chat attachments, opened and read.
 
-### The cheapest open question in this document
+Raw images are held privately and durably at
+`~/w6-print-agent/evidence/hardware/`, indexed with sha256, dimensions,
+source transcript line and a description of each in `MANIFEST.md` there. They
+are deliberately not committed: this run-book carries the sanitised summary and
+the hashes, so an auditor on this box can open the originals and check them
+against the claims, without owner hardware photographs entering Git.
 
-The Kit table's **chars-per-line is still blank, and the self-test photograph
-already in hand almost certainly shows it** — a self-test strip prints a
-character ruler. Reading it off costs seconds and closes a check the run-book
-treats as a **STOP**: at ~32 or fewer characters the unit is 58 mm, which is a
-code change rather than a setting, and every row of Record B would then be
-measuring the wrong target. 48 or 42 characters and it is 80 mm and fine. The
-`POS-80C` driver name implies 80 mm, but a driver name is a label somebody
-typed, not a measurement — do not close a STOP check on it.
+| Ref | File | sha256 (short) | Role |
+|---|---|---|---|
+| `A1` | `A1-rating-plate-dcode-rp30.webp` | `10c4f6f5b687…` | The unit's rating plate — the source of the model, serial and interface rows above |
+| `B1` | `B1-receipt-on-paper-20260925.png` | `e147b3e45cb8…` | A VEXO receipt on thermal paper, close up and fully legible |
+| `B2` | `B2-receipt-on-roll-in-situ.png` | `9f65df548a18…` | The same receipt on the roll, printer in frame |
+| `C1` | `C1-receipt-modal-print-dialog.png` | `a835270daa20…` | The in-app Receipt modal and its `Print` button — the path that produced `B1`/`B2` |
+
+One correction to row H-1 falls out of this. **No self-test strip exists in the
+evidence set.** What was described as one is `B1`/`B2`: a VEXO receipt. The
+hardware conclusion H-1 draws — head, feed and thermal line functional — still
+holds, and holds more strongly, because a VEXO receipt exercises the same
+mechanism and more of the stack. But it was reached from a different artefact
+than the row claims, and any reader expecting a character ruler in that
+photograph will not find one.
+
+### The cheapest open question in this document — rewritten 2026-09-25
+
+The earlier text here assumed the photograph in hand was a self-test strip
+showing a character ruler, and that reading chars-per-line off it would cost
+seconds. **Having looked at the photograph: it will not, and no arrangement of
+these photographs can.**
+
+`B1` and `B2` are raster output. The glyphs `₹` (U+20B9), `é`, `·`, `×` and `—`
+all render correctly, and the type size changes within the document — the
+`MANUAL PAYMENT RECORD — NOT GATEWAY-VERIFIED` line prints visibly smaller than
+the lines around it. No ESC/POS code page yields that combination; a Windows
+driver rasterising an HTML page does, which is exactly what `C1` shows happening.
+So the characters-per-line countable in these photographs is a property of the
+stylesheet's font size, not of the print head. Counting them and writing the
+answer in the Kit table would be the precise mistake this run-book already warns
+against one paragraph earlier, arrived at from a photograph instead of a driver
+name.
+
+What can be said from `B1` without over-reaching: a 41-character line
+(`Block A, Connaught Place (sample address)`) prints unwrapped and centred with
+white margin on both sides. Together with the `POS-80C` driver name and the
+app's own `@page { size: 80mm auto }`, that makes 58 mm **improbable**. It does
+not make it measured, and the STOP check stays open on purpose.
+
+**What closes it:** an ESC/POS character ruler emitted by the store print agent
+(`agent selftest`), printed on this unit and photographed. That strip is
+generated below the stylesheet, in the same text mode the agent uses for real
+KOTs and receipts, so the count it produces is the number that belongs in
+`PrintTarget.widthChars`. Until that strip exists, `widthChars` stays at the
+schema default of 48 **as a declared assumption, not a measurement**, and every
+Record B row that depends on width is measuring an assumed target.
 
 ## Record B — VEXO application output, fill only from observed paper
 
-**Still PENDING in full.** Record A above does not advance any row here. The
+**Almost entirely PENDING.** Record A above does not advance any row here. The
 automated evidence in "What is already proven" is a third, separate thing:
 it is Chromium pagination and CSS geometry, measured in pixels, and it never
 touched a printer.
+
+Two rows move on the strength of `B1`/`B2`, and they move only part of the way.
+Those photographs are a VEXO receipt on paper, so they are Record B evidence and
+not Record A — but they were printed from **an older build than the release
+candidate** (`B1` has no GSTIN line; `C1`, a later screenshot of the same modal,
+does) and through the **browser print dialog, not the print agent**. A row filled
+from them describes a build nobody is shipping and a path that is not the one
+under acceptance. They are recorded as `OBSERVED (old build, browser path)` —
+which is not PASS, and must not be totalled as one.
 
 | # | Check | Result |
 |---|-------|--------|
 | 1 | KOT prints on ONE continuous strip, no blank pages | PENDING |
 | 2 | KOT header and every line legible, no clipped right edge | PENDING |
-| 3 | Receipt prints on ONE strip, header to footer | PENDING |
-| 4 | Receipt DEMO banner, invoice number, totals, change due all legible | PENDING |
+| 3 | Receipt prints on ONE strip, header to footer | **OBSERVED (old build, browser path)** — `B2` shows one continuous strip, DEMO banner through `Thank you — VEXO Connect`, no page break. Re-observe on the candidate |
+| 4 | Receipt DEMO banner, invoice number, totals, change due all legible | **OBSERVED (old build, browser path), partial** — in `B1` the DEMO banner, `BSC-CP/26-27/00006`, the two per-rate GST lines, `TOTAL ₹632.10` and the 9 px `MANUAL PAYMENT RECORD — NOT GATEWAY-VERIFIED` are all legible, and subtotal + taxes add up by hand. **Change due was not on this receipt** (it settled to `OTHER` for the full amount), so that clause is untested |
 | 5 | ~72 mm printable width fits — no horizontal truncation; measured printed band ____ mm | PENDING |
 | 6 | Feed/cut proportionate: KOT and long receipt feed DIFFERENT lengths; blank after last line ____ mm; if the printer cuts, cut lands after the footer | PENDING |
 | 7 | Reprint (step 4) matches the first print and is identifiable (same invoice no./totals) | PENDING |
@@ -223,7 +273,7 @@ touched a printer.
 | 11 | After the partial refund: refund line prints with a minus sign, and `REFUND HANDED BACK — recorded by staff` + `MANUAL PAYMENT RECORD — not gateway-verified` print in full and legibly (9 px — smallest type on the receipt) | PENDING |
 | 12 | Disconnect/recovery (step 6): failure state recorded; recovered reprint matches | PENDING |
 | 13 | Driver-cut observed? yes / no (hardware behaviour, NOT an app feature) | PENDING |
-| 14 | Cash drawer | **N/A — not driveable by this build** (no ESC/POS path). Test only if the DRIVER offers a kick option and the drawer is connected; record as driver behaviour |
+| 14 | Cash drawer | **PENDING — was N/A, reopened 2026-09-25.** "Not driveable by this build (no ESC/POS path)" was true of the browser path and is no longer true of the product: the store print agent forms the `ESC p m t1 t2` pulse and drives the drawer over the same credential and lease as print jobs. The row now tests the agent, not the driver. Two outcomes to keep apart on the sheet: the agent **acknowledged** the pulse, and a human **observed the drawer open**. Only the second is `OPENED`, and only when the target declares a sensor |
 
 Mark each row **PASS**, **FAIL** or **NOT TESTED**. A row not reached is NOT
 TESTED; a blank or a guess is worse than an honest gap. The gateway labels
@@ -242,3 +292,12 @@ ticket" is actionable; "feeds too much" is not.
 Owner of this run-book: Window 3 (printing / peripherals / operational
 acceptance). Physical execution needs a human with the printer; results
 land here, in this table only.
+
+Window 6 (store print agent, peripheral software, physical acceptance
+preparation) amended the Kit table, the Record A provenance block, the
+"cheapest open question" section and Record B rows 3, 4 and 14 on 2026-09-25,
+from the owner photographs listed in the provenance block. The document's
+structure and W3's rows are otherwise untouched; every amendment is marked with
+its date and says what it supersedes. The agent-path acceptance steps live in
+`docs/completion/W6-ACCEPTANCE.md` rather than being interleaved here, so this
+run-book stays the browser-path sheet it was written as.
