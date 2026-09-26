@@ -18,6 +18,9 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import jwt from 'jsonwebtoken';
 
 if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
   throw new Error('firstLoginGate.test.js requires a DATABASE_URL ending in _test');
@@ -473,5 +476,138 @@ describe('the flag is read live, and displays are not staff sessions', () => {
     }
     // And a display token is still not a staff credential, gate or no gate.
     expect((await request(app).get('/api/orders').set(auth(displayToken))).status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Boot-time TTL validation.
+//
+// These cannot run in-process: src/config/env.js validates at IMPORT time and
+// this file has already imported it, so a second import is served from the
+// module cache and would assert nothing. Each case is therefore a real node
+// process with a real environment — the same thing the container does on start.
+//
+// No database is touched. env.js only reads DATABASE_URL as a string.
+// ---------------------------------------------------------------------------
+describe('boot refuses, or caps, an incoherent session TTL', () => {
+  const boot = (overrides) => {
+    const res = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        "import('./src/config/env.js')" +
+          ".then((m) => console.log('OK ' + m.env.POS_TEMP_SESSION_TTL_MINUTES))" +
+          ".catch((e) => { console.log('FAIL ' + e.message); });",
+      ],
+      {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          // A syntactically valid URL that is never connected to.
+          DATABASE_URL: 'postgresql://probe:probe@127.0.0.1:1/probe_test',
+          POS_JWT_SECRET: 'x'.repeat(48),
+          SESSION_TTL_HOURS: undefined,
+          POS_TEMP_SESSION_TTL_MINUTES: undefined,
+          ...overrides,
+        },
+      },
+    );
+    const line = (res.stdout || '').trim().split('\n').pop() || '';
+    return {
+      ok: line.startsWith('OK'),
+      // Minutes the process actually resolved, not what this test assumed.
+      minutes: line.startsWith('OK') ? Number(line.slice(3)) : null,
+      message: line.startsWith('FAIL') ? line.slice(5) : '',
+      stderr: res.stderr || '',
+    };
+  };
+
+  // The control. If this ever fails, the harness is broken and every
+  // expectation below is meaningless — so it is asserted, not assumed.
+  it('boots on the shipped defaults, and the probe reports a number', () => {
+    const r = boot({});
+    expect(r.ok, `${r.message}${r.stderr}`).toBe(true);
+    expect(r.minutes).toBe(30);
+  });
+
+  // The reported defect. SESSION_TTL_HOURS=0.25 is 15 minutes, the DEFAULT
+  // temporary TTL is 30, and the old code threw — naming a variable that is
+  // absent from the operator's config.
+  it('caps the DEFAULT temporary TTL to a shorter configured session, instead of refusing to boot', () => {
+    const r = boot({ SESSION_TTL_HOURS: '0.25' });
+    expect(r.ok, `${r.message}${r.stderr}`).toBe(true);
+    expect(r.minutes).toBe(15);
+  });
+
+  it('caps to the exact boundary and below it', () => {
+    expect(boot({ SESSION_TTL_HOURS: '0.5' }).minutes).toBe(30); // equal, uncapped
+    expect(boot({ SESSION_TTL_HOURS: '0.1' }).minutes).toBe(6); // well under
+  });
+
+  // The invariant the capping exists to preserve: whatever the configuration,
+  // a temporary session is never longer than a normal one.
+  it('never leaves the temporary session longer than the full session', () => {
+    for (const hours of ['0.05', '0.1', '0.25', '0.5', '1', '12', '72']) {
+      const r = boot({ SESSION_TTL_HOURS: hours });
+      expect(r.ok, `SESSION_TTL_HOURS=${hours}: ${r.message}`).toBe(true);
+      expect(r.minutes, `SESSION_TTL_HOURS=${hours}`).toBeLessThanOrEqual(Number(hours) * 60);
+      expect(r.minutes, `SESSION_TTL_HOURS=${hours}`).toBeGreaterThan(0);
+    }
+  });
+
+  // Capping applies to the default only. A number somebody wrote down is a
+  // statement of policy, and shrinking it silently would hide a disagreement.
+  it('still refuses an EXPLICIT temporary TTL longer than the session, and says both numbers', () => {
+    const r = boot({ SESSION_TTL_HOURS: '0.25', POS_TEMP_SESSION_TTL_MINUTES: '45' });
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('POS_TEMP_SESSION_TTL_MINUTES');
+    expect(r.message).toContain('15 minutes');
+    expect(r.message).toContain('45');
+  });
+
+  it('accepts an explicit temporary TTL that fits inside a short session', () => {
+    const r = boot({ SESSION_TTL_HOURS: '0.25', POS_TEMP_SESSION_TTL_MINUTES: '10' });
+    expect(r.ok, r.message).toBe(true);
+    expect(r.minutes).toBe(10);
+  });
+
+  it.each(['0', '-5', 'abc', ''])(
+    'refuses an explicit temporary TTL of %j',
+    (value) => {
+      // '' is the empty string: falsy, so it takes the DEFAULT path and boots.
+      // Asserted rather than skipped, because that is the one case where the
+      // capping branch and the refusal branch disagree about what "set" means.
+      const r = boot({ POS_TEMP_SESSION_TTL_MINUTES: value });
+      if (value === '') {
+        expect(r.ok, r.message).toBe(true);
+        expect(r.minutes).toBe(30);
+      } else {
+        expect(r.ok).toBe(false);
+        expect(r.message).toContain('POS_TEMP_SESSION_TTL_MINUTES');
+      }
+    },
+  );
+
+  // The quiet one. `Number('abc')` is NaN and every comparison against NaN is
+  // false, so this used to pass validation, boot cleanly, and then throw inside
+  // jwt.sign on the first login — a 500 for every user, with nothing in the
+  // boot log. The error must name SESSION_TTL_HOURS, not the temporary one.
+  it.each(['abc', '0', '-1', 'twelve', '1e-9999'])(
+    'refuses SESSION_TTL_HOURS=%j at boot rather than failing every login later',
+    (value) => {
+      const r = boot({ SESSION_TTL_HOURS: value });
+      expect(r.ok, `booted with SESSION_TTL_HOURS=${value}`).toBe(false);
+      expect(r.message).toContain('SESSION_TTL_HOURS');
+      expect(r.message).not.toContain('POS_TEMP_SESSION_TTL_MINUTES');
+    },
+  );
+
+  // Proof that the above is not theoretical: this is what the old NaN reached.
+  it('a NaN session TTL would have thrown inside jwt.sign, not at boot', () => {
+    expect(() => jwt.sign({ sub: 1 }, 'x'.repeat(48), { expiresIn: `${Number('abc')}h` })).toThrow(
+      /expiresIn/,
+    );
+    expect(String(new Date(Date.now() + Number('abc')))).toBe('Invalid Date');
   });
 });

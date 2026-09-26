@@ -24,7 +24,15 @@ export const env = {
   // which anyone else who saw it can get there first. Half an hour is ample to
   // type a new password, and expiring costs nothing — the temporary password
   // still works, so the user simply signs in again.
-  POS_TEMP_SESSION_TTL_MINUTES: Number(process.env.POS_TEMP_SESSION_TTL_MINUTES || 30),
+  //
+  // Left null when unset on purpose — null, not a number, so that "nobody
+  // configured this" stays distinguishable from "somebody configured 30". The
+  // default is derived below, because it has to be capped by SESSION_TTL_HOURS
+  // and that is not knowable here. An explicit value is kept exactly as
+  // written, so a wrong one is refused rather than quietly adjusted.
+  POS_TEMP_SESSION_TTL_MINUTES: process.env.POS_TEMP_SESSION_TTL_MINUTES
+    ? Number(process.env.POS_TEMP_SESSION_TTL_MINUTES)
+    : null,
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true',
   CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:5177',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
@@ -160,17 +168,48 @@ if (env.POS_JWT_SECRET.length < 32) {
   throw new Error('POS_JWT_SECRET must be at least 32 characters');
 }
 
+// SESSION_TTL_HOURS is checked FIRST and on its own, because every message
+// below divides by it. `Number('abc')` is NaN, and every comparison against NaN
+// is false — so a typo here used to pass the temporary-session check beneath it
+// and boot cleanly. What followed was not a config error but a 500 on every
+// login: `expiresIn: 'NaNh'` throws inside jwt.sign, and the session row's
+// expiresAt became `Invalid Date`. Boot is the only place that is cheap to fix.
+if (!Number.isFinite(env.SESSION_TTL_HOURS) || env.SESSION_TTL_HOURS <= 0) {
+  throw new Error(
+    `SESSION_TTL_HOURS must be a positive number of hours (got ${JSON.stringify(
+      process.env.SESSION_TTL_HOURS,
+    )}) — sessions are signed with it, so a bad value fails every login, not boot`,
+  );
+}
+
+const fullSessionMinutes = env.SESSION_TTL_HOURS * 60;
+
 // Zero or a non-number would mint temporary sessions that are already expired,
 // locking every new user out of the one screen they are allowed to reach;
 // longer than a normal session would make the restriction a promotion. Both are
 // silent in production until somebody's first login, so they fail at boot.
-if (
+//
+// The default is CAPPED rather than checked. A deployment that shortens
+// SESSION_TTL_HOURS to under half an hour has said nothing at all about
+// temporary sessions, and refusing to boot over a number nobody wrote — naming
+// a variable absent from their config — is a false alarm that reads like a bad
+// deploy. Capping keeps the invariant that matters (temporary is never longer
+// than normal) and honours the intent: shorter is always safe here, because an
+// expired temporary session costs a user one extra sign-in and nothing else.
+if (env.POS_TEMP_SESSION_TTL_MINUTES === null) {
+  env.POS_TEMP_SESSION_TTL_MINUTES = Math.min(30, fullSessionMinutes);
+} else if (
   !Number.isFinite(env.POS_TEMP_SESSION_TTL_MINUTES) ||
   env.POS_TEMP_SESSION_TTL_MINUTES <= 0 ||
-  env.POS_TEMP_SESSION_TTL_MINUTES > env.SESSION_TTL_HOURS * 60
+  env.POS_TEMP_SESSION_TTL_MINUTES > fullSessionMinutes
 ) {
+  // An EXPLICIT value still fails loudly. Someone wrote this number down, so
+  // silently shrinking it would hide a real disagreement about policy.
   throw new Error(
-    'POS_TEMP_SESSION_TTL_MINUTES must be positive and no longer than SESSION_TTL_HOURS',
+    `POS_TEMP_SESSION_TTL_MINUTES must be positive and no longer than SESSION_TTL_HOURS ` +
+      `(${fullSessionMinutes} minutes); got ${JSON.stringify(
+        process.env.POS_TEMP_SESSION_TTL_MINUTES,
+      )}`,
   );
 }
 
