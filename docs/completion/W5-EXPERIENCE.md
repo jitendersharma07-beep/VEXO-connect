@@ -437,9 +437,11 @@ Refs appear the instant a PR is created, drafts included. Three checks:
 2. `refs/pull/5/merge` exists — the remote computes it only for a conflict-free
    merge — **and its parents are `main` plus that head.** Read the parents. Do
    not stop at the ref existing; see below.
-3. `git diff github/main refs/pull/5/merge` lists **only** the 9 owned files.
-   This is the check that matters most: it is how you would catch a co-tenant's
-   work having been swept in, which has happened in this organisation before.
+3. The diff from the merge's **own first parent** to the merge lists **only** the
+   9 owned files. This is the check that matters most: it is how you would catch a
+   co-tenant's work having been swept in, which has happened in this organisation
+   before. Use `github/main` or the first parent — **not** the local `main` branch;
+   see below for what that mistake looks like.
 
 Before trusting a *negative* result from step 1, confirm the method works by
 finding a sibling lane's existing PR in the same listing. An empty answer and a
@@ -472,8 +474,18 @@ git -C ~/vexo-connect-x-lanes/experience fetch --force github \
 git -C ~/vexo-connect-x-lanes/experience log -1 --format='%P' refs/pr/5/merge
 ```
 
-Second parent `!=` local `HEAD` → stale, wait and re-read. It recomputed within
-seconds here, but the wait is not the point; noticing is.
+Second parent `!=` local `HEAD` → stale, wait and re-read.
+
+How long the lag lasts is not predictable, so do not build a timeout around it.
+After the push to `55f1316` it recomputed within seconds. After the push to
+`222dbc4` it was still advertising the previous merge fifteen re-reads and about
+ninety seconds later, and only caught up some minutes afterwards — the job appears
+to be demand-driven rather than scheduled. `ad80413`, parents
+`d625370 222dbc4`, is the first preview in this PR's history whose second parent
+matched the head on the first attempt. When the wait is unbounded and the question
+is only "does this merge cleanly", stop waiting on the remote and answer it
+locally — `git merge-tree --write-tree github/main HEAD` (git ≥ 2.38) performs a
+real trial merge, touching no ref and no working tree, exit 0 for conflict-free.
 
 **`--force` is required, and here is why** — measured, not assumed. Each recompute
 replaces the merge commit with a *sibling*, not a descendant: `76ca747` is not
@@ -493,6 +505,44 @@ The refusal is visible and the exit status is 1 — this part is not silent. Wha
 pipeline that discards stderr or ignores the exit status goes on to read a
 perfectly valid stale merge and reports it as current. Use `--force`, or fetch
 into a fresh ref name, and check the parents either way.
+
+#### The base must be `github/main`, not `main` — measured the same afternoon
+
+With the preview finally current, `git diff main refs/pr/5/merge` reported **10**
+files and **−29**, including `backend/tests/integrations.test.js` — a file this
+branch has never touched. Nothing was swept in. The clone under
+`~/vexo-connect-x/.git` is shared by every lane worktree, and its local `main` was
+sitting two commits **ahead** of the remote:
+
+```
+$ git rev-list --count github/main..main     # on local main only
+2
+$ git rev-list --count main..github/main     # on the remote only
+0
+$ git log --oneline github/main..main
+614c0dc Correct the load-insensitivity claim the 100k import just disproved
+ff0b43b Time the two cleanup deletes separately, so a returning quadratic names itself
+```
+
+Another window had committed to the shared clone's `main` and not pushed. Strictly
+ahead, not diverged — so the extra file and the extra deletions were *their* work,
+attributed to this PR purely by the choice of base ref.
+
+The remote states the base it used: the merge commit's **first** parent. Diff from
+that, and the local `main` cannot mislead you whatever it holds:
+
+```
+git diff --name-status \
+  $(git log -1 --format='%P' refs/pr/5/merge | awk '{print $1}') refs/pr/5/merge
+```
+
+Against `d625370` it is 9 files, exactly the owned set.
+
+This is the inverse of the lag above and just as quiet. There the preview
+described the wrong **head**; here the comparison described the wrong **base**.
+Both return a confident, well-formed, wrong answer to "which files does this PR
+carry" — and over-reporting is the direction that gets a clean branch accused of
+the thing this organisation has actually done before.
 
 Same discipline as everything else in this delivery: a ref that exists is only a
 promise until you read what it points at.
