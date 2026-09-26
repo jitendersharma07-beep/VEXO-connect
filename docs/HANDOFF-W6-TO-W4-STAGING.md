@@ -1,8 +1,8 @@
 # Window 6 → Window 4 — staging must carry the store-scope fix (2026-09-26)
 
 **Short version: the candidate must contain the `resolveStoreInScope` fix —
-which in practice means `ef6bc79` — and the gate you run against it is
-`3bc70ce` on `x/identity-tests`.**
+which in practice means `ef6bc79` — and the gate you run against it is the tip of
+`x/identity-tests`, now `f83f133`.**
 
 Without the fix, staging puts a build on a public-ish host in which a
 store-pinned operator can write to a store they do not hold. Full analysis and
@@ -12,13 +12,20 @@ evidence: `docs/HANDOFF-W6-TO-W1-STORESCOPE.md` and
 | You need | Take |
 |---|---|
 | The fix | **`ef6bc79`** (tables lane) — pushed, already inside candidates |
-| The gate that proves it | **`3bc70ce`** on **`x/identity-tests`** — test-only, based on `16a22b0` (= main `728a57c` + `x/tables` `12fa573`) |
+| The gate that proves it | **`f83f133`** = tip of **`x/identity-tests`** — test-only, two commits on `16a22b0` (= main `728a57c` + `x/tables` `12fa573`) |
 
 **Use `x/identity-tests`, not `x/identity-coverage`.** The older branch carries a
 middleware hunk of my own that duplicates `ef6bc79` and would conflict with it;
-`3bc70ce` is the same two test files with no source change, already verified on a
-tables-line base at **75/75, exit 0**
-(`~/vcx-w6-ident/.runlogs/rebased-final.log`).
+`x/identity-tests` is the same two test files with no source change, verified on a
+tables-line base at **75/75, exit 0** — `3bc70ce`
+(`~/vcx-w6-ident/.runlogs/rebased-final.log`) and again at the current tip
+`f83f133` (`~/vcx-w6-ident/.runlogs/count-fix-gate.log`).
+
+**The branch is two commits, not one**, if you saw an earlier copy of this note
+that named `3bc70ce`. The second, `f83f133`, corrects a comment in the test header
+that miscounted the call sites; it changes no test, fixture or assertion. Take the
+tip. `3bc70ce` alone still gives you a working gate with a wrong number in a
+comment.
 
 ## What the defect does, in one paragraph
 
@@ -26,7 +33,7 @@ tables-line base at **75/75, exit 0**
 request named. For a `LIST` scope — every store-pinned role, and **any**
 company-wide role narrowed by a `UserStoreAssignment` — the fragment is
 `{ id: { in: [...] } }`, so the requested id was discarded and the lookup became
-"any store of mine". It always matched. Ten call sites: some then wrote the
+"any store of mine". It always matched. Eleven call sites: six then wrote the
 caller's raw id to a store outside their scope (`brands`,
 `PUT /permissions/assignments` — a scope escalation, `invitations`, two paths in
 `orders`), the rest silently wrote to **the wrong in-scope store**
@@ -59,13 +66,20 @@ same `AND` form.
 
 ## Gate to run against the staged candidate
 
-The two test files come from **`3bc70ce`** (`x/identity-tests`). They add no
-source code, so they can be dropped onto any candidate that has the fix:
+The two test files come from **`x/identity-tests`** (tip `f83f133`). They add no
+source code, so they can be dropped onto any candidate that has the fix. Take them
+by path rather than by commit — that stays correct however many commits the branch
+ends up with:
 
 ```text
-git cherry-pick -n 3bc70ce     # or copy the two files across
-npx vitest run tests/storeScopeResolution.test.js tests/orgIdentity.test.js
+git checkout x/identity-tests -- backend/tests/storeScopeResolution.test.js \
+                                 backend/tests/orgIdentity.test.js
+cd backend && npx vitest run tests/storeScopeResolution.test.js tests/orgIdentity.test.js
 ```
+
+`git cherry-pick -n f83f133` also works, but only if you have `3bc70ce` already —
+that commit is where the files are added and `f83f133` is a comment-only follow-up.
+`git cherry-pick -n 3bc70ce f83f133` takes both.
 
 ~10 seconds, self-contained fixtures, no seed data needed. Expect **75 passed**.
 

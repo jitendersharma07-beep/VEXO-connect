@@ -2,8 +2,12 @@
 //
 // This file exists because of a defect found while writing the brand-store
 // tests in orgIdentity.test.js, and it is kept separate because the defect is
-// not in any one router — it is in the middleware that ten call sites across
-// nine routers depend on.
+// not in any one router — it is in the middleware that eleven call sites across
+// nine files depend on: eight routers plus lib/userAuthority.js, with a twelfth
+// call inside requireStoreParam in the middleware itself. Counted from
+// `git grep -n resolveStoreInScope -- 'backend/src/**'`; an earlier revision of
+// this header said "ten call sites across nine routers", which undercounted and
+// mislabelled the lib.
 //
 // THE DEFECT (middleware/permissions.js, resolveStoreInScope)
 //

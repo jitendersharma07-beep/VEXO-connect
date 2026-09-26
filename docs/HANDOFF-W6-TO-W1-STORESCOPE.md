@@ -77,7 +77,17 @@ narrowed by a `UserStoreAssignment` (per `storeScopeFor`, assignments *replace*
 a role's implied scope). So a `COMPANY_ADMIN` deliberately pinned to one store
 by the tenant was unconstrained by the very mechanism used to pin them.
 
-### Two harm modes across the ten call sites
+### Two harm modes across the eleven call sites
+
+Eleven invocations across nine files — eight routers plus `lib/userAuthority.js`
+— per `git grep -n resolveStoreInScope -- 'backend/src/**'`. **Corrected:** an
+earlier revision of this section was headed "the ten call sites", and the test
+header said "ten call sites across nine routers". The enumeration below was
+always complete — 6 in Mode A plus 5 in Mode B — so only the summary figure was
+wrong, written before the list and never recomputed from it. Nothing about the
+defect, the remedy or the tests changes; but a count that disagrees with its own
+evidence is the defect class the print-agent lane files as A16, so it is stated
+rather than quietly overwritten.
 
 **Mode A — bypass.** Caller discards the returned row and then writes the
 caller-supplied raw id. The write lands on a store the caller does not hold.
