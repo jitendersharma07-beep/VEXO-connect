@@ -1,7 +1,14 @@
 import jwt from 'jsonwebtoken';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../config/env.js';
-import { unauthorized, forbidden, badRequest, notFound, asyncHandler } from '../lib/errors.js';
+import {
+  unauthorized,
+  forbidden,
+  badRequest,
+  notFound,
+  asyncHandler,
+  passwordChangeRequired,
+} from '../lib/errors.js';
 import { hashSecret } from '../lib/crypto.js';
 import { currentLicense } from '../lib/license.js';
 
@@ -16,7 +23,14 @@ const readToken = (req) => {
 // Verifies the POS JWT *and* that its session row is still live, so revoking a
 // session or disabling a user takes effect immediately. Tokens minted by any
 // other ATC product fail signature verification here — POS has its own secret.
-export const requirePosAuth = asyncHandler(async (req, _res, next) => {
+//
+// setupOnly is what the two exported wrappers below differ by, and it exists
+// because mustChangePassword has to be enforced HERE rather than per route.
+// requirePosAuth is router.use'd at the head of every feature router, so this
+// is the one place that covers all of them; a per-route check would have to be
+// remembered on each new route and would be missing from the first one someone
+// forgets.
+const authenticate = async (req, { setupOnly }) => {
   const token = readToken(req);
   if (!token) throw unauthorized();
 
@@ -61,8 +75,27 @@ export const requirePosAuth = asyncHandler(async (req, _res, next) => {
     }
   }
 
+  // A session minted from a temporary password may do exactly one thing: replace
+  // that password. Everything else is refused with a code the client can act on,
+  // because the credential that opened this session travelled by WhatsApp, a
+  // sticky note or over somebody's shoulder, and until it is replaced any taker
+  // is indistinguishable from the owner.
+  if (user.mustChangePassword && !setupOnly) throw passwordChangeRequired();
+
   req.user = user;
   req.sessionId = session.id;
+};
+
+export const requirePosAuth = asyncHandler(async (req, _res, next) => {
+  await authenticate(req, { setupOnly: false });
+  next();
+});
+
+// For the three routes that a user still holding a temporary password must be
+// able to reach: reading their own identity, replacing the password, and
+// signing out. Anything else mounted on this would reopen the hole.
+export const requirePosAuthForSetup = asyncHandler(async (req, _res, next) => {
+  await authenticate(req, { setupOnly: true });
   next();
 });
 

@@ -1,14 +1,14 @@
 import { Router } from 'express';
-import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
 import { unauthorized, badRequest, asyncHandler } from '../../lib/errors.js';
-import { hashSecret, verifyPassword, hashPassword } from '../../lib/crypto.js';
-import { audit, clientIp } from '../../lib/audit.js';
+import { verifyPassword, hashPassword } from '../../lib/crypto.js';
+import { audit } from '../../lib/audit.js';
 import { currentLicense } from '../../lib/license.js';
 import { gatewayAvailable } from '../../lib/gateway/index.js';
-import { requirePosAuth } from '../../middleware/auth.js';
+import { requirePosAuthForSetup } from '../../middleware/auth.js';
+import { issueSession, restrictedSessionTtlMs, fullSessionTtlMs } from '../../lib/session.js';
 import { loginLimiter } from '../../middleware/rateLimit.js';
 import { describeCeiling, resolveDiscountPolicy } from '../../lib/discountPolicy.js';
 
@@ -28,14 +28,6 @@ const onlinePayment = () => ({
 const loginSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
-});
-
-const cookieOptions = () => ({
-  httpOnly: true,
-  sameSite: 'lax',
-  secure: env.COOKIE_SECURE,
-  maxAge: env.SESSION_TTL_HOURS * 60 * 60 * 1000,
-  path: '/',
 });
 
 const publicUser = (user) => ({
@@ -107,21 +99,13 @@ router.post(
       if (user.company.status !== 'ACTIVE') return refuse('company-' + user.company.status.toLowerCase());
     }
 
-    const expiresAt = new Date(Date.now() + env.SESSION_TTL_HOURS * 3600 * 1000);
-    const token = jwt.sign(
-      { sub: user.id, role: user.role, companyId: user.companyId, branchId: user.branchId },
-      env.POS_JWT_SECRET,
-      { issuer: 'atc-pos', expiresIn: `${env.SESSION_TTL_HOURS}h`, jwtid: `${user.id}.${Date.now()}` },
-    );
-
-    await prisma.posSession.create({
-      data: {
-        userId: user.id,
-        tokenHash: hashSecret(token),
-        expiresAt,
-        ip: clientIp(req),
-        userAgent: req.headers['user-agent'] ?? null,
-      },
+    // Signing in with a temporary password does not buy an ordinary session.
+    // The token still authenticates, so the user can reach /me and
+    // /change-password, but requirePosAuth refuses it everywhere else and it
+    // expires in minutes rather than hours.
+    const restricted = user.mustChangePassword;
+    const { token, expiresAt } = await issueSession(req, res, user, {
+      ttlMs: restricted ? restrictedSessionTtlMs() : fullSessionTtlMs(),
     });
     await prisma.posUser.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
@@ -129,9 +113,15 @@ router.post(
     req.user = user;
     await audit(req, { action: 'LOGIN_SUCCESS', entity: 'PosUser', entityId: user.id });
 
-    res.cookie(env.SESSION_COOKIE_NAME, token, cookieOptions());
     res.json({
       token,
+      // Published so the client knows the session it just got is the restricted
+      // one and can send the user straight to the password screen. It is not the
+      // control — the server refuses regardless of what the browser does with
+      // this — and `user.mustChangePassword` already says the same thing; this
+      // names the consequence rather than the cause.
+      passwordChangeRequired: restricted,
+      sessionExpiresAt: expiresAt,
       user: publicUser(user),
       company: publicCompany(user.company),
       branch: user.branch ? { id: user.branch.id, name: user.branch.name, code: user.branch.code } : null,
@@ -143,7 +133,7 @@ router.post(
 
 router.post(
   '/logout',
-  requirePosAuth,
+  requirePosAuthForSetup,
   asyncHandler(async (req, res) => {
     await prisma.posSession.update({
       where: { id: req.sessionId },
@@ -156,7 +146,7 @@ router.post(
 
 router.get(
   '/me',
-  requirePosAuth,
+  requirePosAuthForSetup,
   asyncHandler(async (req, res) => {
     const license = req.user.companyId ? await currentLicense(req.user.companyId) : null;
     const branch = req.user.branchId
@@ -204,24 +194,54 @@ const changePasswordSchema = z.object({
 
 router.post(
   '/change-password',
-  requirePosAuth,
+  requirePosAuthForSetup,
   asyncHandler(async (req, res) => {
     const { currentPassword, newPassword } = changePasswordSchema.parse(req.body);
     const user = await prisma.posUser.findUnique({ where: { id: req.user.id } });
     if (!(await verifyPassword(user.passwordHash, currentPassword))) {
       throw badRequest('Current password is incorrect', 'currentPassword');
     }
+    // Without this, re-submitting the temporary password as the new one clears
+    // mustChangePassword and promotes the session, leaving the account on the
+    // credential the whole gate exists to retire.
+    if (currentPassword === newPassword) {
+      throw badRequest('New password must be different from the current one', 'newPassword');
+    }
+    const leavingTemporary = user.mustChangePassword;
     await prisma.posUser.update({
       where: { id: user.id },
       data: { passwordHash: await hashPassword(newPassword), mustChangePassword: false },
     });
-    // Every other session for this user stops working immediately.
+    if (leavingTemporary) {
+      // Revoke EVERY session including this one, then mint a fresh full session.
+      // The restricted token was minted from a credential that passed through
+      // other hands, so if somebody else also used it their session dies here
+      // too — which is the point. Promoting the current session instead would
+      // keep whichever of the two happened to call this route.
+      await prisma.posSession.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      const { token, expiresAt } = await issueSession(req, res, user);
+      await audit(req, {
+        action: 'PASSWORD_CHANGED',
+        entity: 'PosUser',
+        entityId: user.id,
+        meta: { firstLogin: true, sessionRotated: true },
+      });
+      return res.json({ ok: true, sessionRotated: true, token, sessionExpiresAt: expiresAt });
+    }
+
+    // A voluntary change keeps its own session: a paired customer display hangs
+    // off it, and signing the cashier out mid-shift to no security end would
+    // just teach them not to change passwords. Every OTHER session for this
+    // user stops working immediately.
     await prisma.posSession.updateMany({
       where: { userId: user.id, revokedAt: null, id: { not: req.sessionId } },
       data: { revokedAt: new Date() },
     });
     await audit(req, { action: 'PASSWORD_CHANGED', entity: 'PosUser', entityId: user.id });
-    res.json({ ok: true });
+    res.json({ ok: true, sessionRotated: false });
   }),
 );
 

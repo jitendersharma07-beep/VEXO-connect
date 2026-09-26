@@ -18,6 +18,13 @@ export const env = {
   POS_JWT_SECRET: required('POS_JWT_SECRET'),
   SESSION_COOKIE_NAME: process.env.SESSION_COOKIE_NAME || 'pos_session',
   SESSION_TTL_HOURS: Number(process.env.SESSION_TTL_HOURS || 12),
+  // A session opened with a TEMPORARY password gets a much shorter life than a
+  // normal one, because it is not the user's own credential yet: it was handed
+  // over in person or over a chat app, and a full 12-hour window is 12 hours in
+  // which anyone else who saw it can get there first. Half an hour is ample to
+  // type a new password, and expiring costs nothing — the temporary password
+  // still works, so the user simply signs in again.
+  POS_TEMP_SESSION_TTL_MINUTES: Number(process.env.POS_TEMP_SESSION_TTL_MINUTES || 30),
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true',
   CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:5177',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
@@ -151,6 +158,20 @@ export const mailEnabled = Boolean(env.SMTP_HOST);
 
 if (env.POS_JWT_SECRET.length < 32) {
   throw new Error('POS_JWT_SECRET must be at least 32 characters');
+}
+
+// Zero or a non-number would mint temporary sessions that are already expired,
+// locking every new user out of the one screen they are allowed to reach;
+// longer than a normal session would make the restriction a promotion. Both are
+// silent in production until somebody's first login, so they fail at boot.
+if (
+  !Number.isFinite(env.POS_TEMP_SESSION_TTL_MINUTES) ||
+  env.POS_TEMP_SESSION_TTL_MINUTES <= 0 ||
+  env.POS_TEMP_SESSION_TTL_MINUTES > env.SESSION_TTL_HOURS * 60
+) {
+  throw new Error(
+    'POS_TEMP_SESSION_TTL_MINUTES must be positive and no longer than SESSION_TTL_HOURS',
+  );
 }
 
 // A half-configured gateway is worse than none: routes would exist and then

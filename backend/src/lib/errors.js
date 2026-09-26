@@ -19,6 +19,16 @@ export const forbidden = (message = 'You do not have permission to perform this 
   new AppError(403, 'POS_FORBIDDEN', message);
 export const notFound = (message = 'Not found') => new AppError(404, 'POS_NOT_FOUND', message);
 
+// Its own code rather than a plain 403, because the client must route this one
+// to the change-password screen instead of showing "no permission" — the user
+// has the permission, they just have not finished signing in yet.
+export const passwordChangeRequired = () =>
+  new AppError(
+    403,
+    'POS_PASSWORD_CHANGE_REQUIRED',
+    'You signed in with a temporary password. Set your own password before doing anything else.',
+  );
+
 // 403 with its own code, because the screen has to tell these two apart. The
 // first says "this discount is above your limit, here is whose signature
 // would clear it" and opens the approval prompt; the second says the approval
