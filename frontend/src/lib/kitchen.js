@@ -23,6 +23,7 @@
 // Every mutation carries the row's `version` (optimistic lock): a 409 means
 // someone else moved the ticket first — refetch, never overwrite.
 
+import { useCallback, useEffect, useState } from 'react';
 import api from './api.js';
 
 export const KITCHEN_STATES = ['QUEUED', 'IN_PREP', 'READY', 'SERVED', 'CANCELLED'];
@@ -40,9 +41,26 @@ export const STATE_STYLES = {
 };
 
 // The board serialises the order line's display name as `name`; the screens
-// render productName. variantName never arrives separately — the line name
-// already carries the variant where one exists.
+// render productName. variantName never arrives separately and must not be
+// rendered separately — orders.js:272 snapshots the line name as
+// `Product (Variant)`, so the variant is already inside it.
 const normalizeItem = (it) => ({ ...it, productName: it.name });
+
+// Does the board payload carry the line's kitchen instruction at all?
+//
+// OrderItem.note exists, and its own schema comment says it is "Printed on the
+// KOT and shown on the station" — but publicItem (kitchen.js:54) selects only
+// { name, qty } from orderItem, so "no peanuts" is stored on the line, printed
+// on the KOT, and never reaches this screen. Same for OrderItemModifier. The fix
+// is a one-line change to the select in W3's file and is not this window's to
+// make; until it lands, the screens say so out loud rather than showing a cook a
+// ticket that looks complete.
+//
+// The test is presence of the KEY, not a truthy value: today no row has it, and
+// the moment the select includes the column every row carries it (usually null)
+// and this notice goes quiet on its own with no page change.
+export const payloadOmitsNotes = (items) =>
+  items.length > 0 && !items.some((it) => 'note' in it || 'notes' in it || 'modifiers' in it);
 
 // One display label per ticket. orderType/tableCode are not in today's board
 // payload, so this usually shows the KOT number; if the backend later adds
@@ -59,6 +77,78 @@ export const orderLabel = (item) => {
 export const listStations = async (branchId) => {
   const { data } = await api.get('/kitchen/stations', branchId ? { params: { branchId } } : undefined);
   return data.stations || [];
+};
+
+// Supervisor figures the board cannot compute: per-station queue depth, the
+// oldest QUEUED age, and ordersKitchenReady — whole-order readiness, which is a
+// question about every line of an order and so cannot be derived from one
+// station's rows. managerUp only (kitchen.js:241).
+export const fetchOverview = async (branchId) => {
+  const { data } = await api.get('/kitchen/overview', branchId ? { params: { branchId } } : undefined);
+  return data;
+};
+
+// --- branch scoping ---------------------------------------------------------
+// Every kitchen route resolves its branch through callerBranchId
+// (kitchen.js:29): the SESSION's branchId if the role is pinned, otherwise the
+// explicit ?branchId=, and if neither exists it throws
+// badRequest('branchId is required'). BRANCH_PINNED_ROLES is
+// {BRANCH_MANAGER, CASHIER} (middleware/auth.js:86) — a CUSTOMER_OWNER's
+// PosUser.branchId is null, so an owner who sends no branchId gets a 400 on
+// EVERY call: not an empty board, not a 403, just a dead screen for the one
+// role that exists in every company.
+//
+// So an owner picks a store first, the same way DayClose.jsx:139-153 does for a
+// cash drawer. Two deliberate differences from that page: the kitchen's role
+// list excludes POS_SUPER_ADMIN (kitchen.js:26-27), so there is no ATC branch
+// case to handle here; and a failed /branches load is NOT swallowed the way
+// DayClose swallows it, because there the picker is a convenience and here it
+// is the only way to address the API at all.
+const BRANCH_PINNED_ROLES = ['BRANCH_MANAGER', 'CASHIER'];
+
+export const useKitchenBranch = (user) => {
+  const needsBranch = !!user?.role && !BRANCH_PINNED_ROLES.includes(user.role);
+  const [branches, setBranches] = useState([]);
+  const [branchId, setBranchId] = useState('');
+  const [loading, setLoading] = useState(needsBranch);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!needsBranch) {
+      setLoading(false);
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        const { data } = await api.get('/branches');
+        const active = (data.branches || []).filter((b) => b.status === 'ACTIVE');
+        if (!live) return;
+        setBranches(active);
+        // One store is the common case and picking from a list of one is
+        // friction, not a decision.
+        if (active.length === 1) setBranchId(active[0].id);
+      } catch (err) {
+        if (live) setError(err);
+      } finally {
+        if (live) setLoading(false);
+      }
+    })();
+    return () => { live = false; };
+  }, [needsBranch]);
+
+  // `ready` is the gate the screens poll behind: a pinned role is ready at
+  // once, an owner only once a store is chosen. Polling before that would fire
+  // a 400 every few seconds and paint an error over an empty board.
+  return {
+    needsBranch,
+    branches,
+    branchId: needsBranch ? branchId : undefined,
+    setBranchId,
+    loading,
+    error,
+    ready: needsBranch ? !!branchId : true,
+  };
 };
 
 // The cross-station feed re-lists stations at most once a minute; a station
@@ -120,6 +210,31 @@ export const mergeItems = (map, items) => {
     if (!prev || (it.changeSeq ?? 0) >= (prev.changeSeq ?? 0)) next.set(it.id, it);
   }
   return next;
+};
+
+// A delta carries terminal rows too (kitchen.js:138 — deliberately, so a
+// reconnect learns what finished while it was away), and a terminal row never
+// changes again. So a screen left open for a shift accumulates the whole day's
+// finished lines: the map grows without bound, and worse, the station board's
+// "Cancelled" column becomes a wall of tickets voided six hours ago. Keep a
+// terminal row only while it is still worth a cook's attention.
+export const TERMINAL_WINDOW_MS = 15 * 60_000;
+
+export const pruneTerminal = (map, now = Date.now()) => {
+  let next = null;
+  for (const [id, it] of map) {
+    if (it.state !== 'SERVED' && it.state !== 'CANCELLED') continue;
+    const at = it.servedAt ?? it.cancelledAt ?? null;
+    // A terminal row with no terminal timestamp is a server oddity, not a
+    // licence to drop it. Keep it; a reload clears it.
+    if (!at) continue;
+    if (now - new Date(at).getTime() <= TERMINAL_WINDOW_MS) continue;
+    if (!next) next = new Map(map);
+    next.delete(id);
+  }
+  // Same Map identity when nothing expired, so the once-a-second call this sits
+  // behind does not re-render the board 60 times a minute for nothing.
+  return next ?? map;
 };
 
 // Seconds this ticket has been in the kitchen's hands (queuedAt → readyAt or

@@ -6,9 +6,13 @@
 // server re-decides eligibility on every application.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Megaphone, PlusCircle, Pencil, Radio, Archive, Tag, PauseCircle } from 'lucide-react';
+import {
+  Archive, Megaphone, PauseCircle, Pencil, PlusCircle, Radio, Tag, Trash2, Utensils,
+} from 'lucide-react';
 import api, { apiError } from '../lib/api.js';
-import { fmtINR } from '../lib/pos.js';
+import { useAuth } from '../lib/auth.jsx';
+import { usePermissions } from '../lib/permissions.jsx';
+import { fmtINR, licenseUsable } from '../lib/pos.js';
 import { EmptyState, ErrorNote, Modal, PageHeader, StatCard } from '../components/ui.jsx';
 import { useToast } from '../components/toast.jsx';
 
@@ -24,6 +28,18 @@ const hhmmToMin = (s) => {
 const paiseToRupeeStr = (p) => (p === null || p === undefined ? '' : String(p / 100));
 const rupeesToPaise = (v) => (v === '' ? null : Math.round(Number(v) * 100));
 
+// The four rule kinds the server accepts, in the order the form offers them,
+// with the wording the server's own logic justifies (lib/promotions.js:52-71):
+// ANY include rule narrows the promotion to matching lines; EXCLUDE_PRODUCT wins
+// outright; a product rule outranks that product's category rule either way.
+const RULE_KINDS = [
+  { value: 'INCLUDE_CATEGORY', label: 'Only this category', target: 'category' },
+  { value: 'EXCLUDE_CATEGORY', label: 'Never this category', target: 'category' },
+  { value: 'INCLUDE_PRODUCT', label: 'Only this item', target: 'product' },
+  { value: 'EXCLUDE_PRODUCT', label: 'Never this item', target: 'product' },
+];
+const RULE_LABEL = Object.fromEntries(RULE_KINDS.map((k) => [k.value, k.label]));
+
 const BLANK_FORM = {
   name: '',
   code: '',
@@ -37,12 +53,29 @@ const BLANK_FORM = {
   weekdayMask: 127,
   timeFrom: '',
   timeTo: '',
+  // The endMinute the server last told us, kept beside the editable field. See
+  // the note on submit(): endMinute may be 1440 and a time input cannot hold it.
+  timeToRaw: null,
   channel: '',
   stackable: false,
   precedence: '100',
   totalLimit: '',
   perCustomerLimit: '',
   branchIds: [],
+  rules: [],
+};
+
+const ruleText = (r, names) => {
+  const target = r.categoryId ? names.categories.get(r.categoryId) : names.products.get(r.productId);
+  return `${RULE_LABEL[r.kind]}: ${target ?? '(removed from the catalogue)'}`;
+};
+
+const sameRules = (a, b) => {
+  const key = (r) => `${r.kind}|${r.categoryId ?? ''}|${r.productId ?? ''}`;
+  if (a.length !== b.length) return false;
+  const left = a.map(key).sort();
+  const right = b.map(key).sort();
+  return left.every((k, i) => k === right[i]);
 };
 
 const benefitText = (p) =>
@@ -105,13 +138,31 @@ const sortedIds = (ids) => [...ids].sort().join(',');
 
 export default function Promotions() {
   const toast = useToast();
+  const { user, license } = useAuth();
+  const { can } = usePermissions();
   const [promotions, setPromotions] = useState(null);
   const [branches, setBranches] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [products, setProducts] = useState([]);
   const [loadError, setLoadError] = useState('');
   const [editing, setEditing] = useState(null); // null | 'new' | promotion object
   const [form, setForm] = useState(BLANK_FORM);
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState('');
+  // The rule picker's two fields: which kind, pointing at what. Reset whenever
+  // the form opens, so a half-built rule never leaks into the next edit.
+  const [ruleKind, setRuleKind] = useState('INCLUDE_CATEGORY');
+  const [ruleTarget, setRuleTarget] = useState('');
+
+  // The route is gated on promo.read, so reaching this page means the list is
+  // readable. Writing is a separate action and publishing a third — a FINANCE or
+  // REGIONAL_MANAGER user holds only promo.read and sees this screen read-only
+  // rather than being offered buttons the server will refuse.
+  const licenceOk = licenseUsable(license, user);
+  const mayWrite = can('promo.write') && licenceOk;
+  const mayPublish = can('promo.publish') && licenceOk;
 
   const load = useCallback(async () => {
     try {
@@ -131,6 +182,38 @@ export default function Promotions() {
     load();
   }, [load]);
 
+  // The catalogue is needed to NAME an item rule — both in the editor and in the
+  // list, where a rule with no name to show would read as a rule pointing at a
+  // deleted product. Loaded once, on first need, rather than on every page view:
+  // a company can have thousands of products and most promotions have no rules.
+  const loadCatalogue = useCallback(async () => {
+    if (categories.length || products.length) return;
+    try {
+      const [catRes, prodRes] = await Promise.all([
+        api.get('/catalog/categories'),
+        api.get('/catalog/products'),
+      ]);
+      setCategories(catRes.data.categories || []);
+      setProducts(prodRes.data.products || []);
+    } catch {
+      // Not fatal: without the catalogue the rule editor says so and every other
+      // field still saves.
+    }
+  }, [categories.length, products.length]);
+
+  // Rules already in use need their names on the list, not just in the editor.
+  useEffect(() => {
+    if (promotions?.some((p) => (p.rules ?? []).length)) loadCatalogue();
+  }, [promotions, loadCatalogue]);
+
+  const names = useMemo(
+    () => ({
+      categories: new Map(categories.map((c) => [c.id, c.name])),
+      products: new Map(products.map((p) => [p.id, p.name])),
+    }),
+    [categories, products],
+  );
+
   const stats = useMemo(() => {
     const list = promotions ?? [];
     return {
@@ -144,6 +227,7 @@ export default function Promotions() {
     setForm(BLANK_FORM);
     setFormError('');
     setEditing('new');
+    loadCatalogue();
   };
 
   const openEdit = (p) => {
@@ -160,20 +244,32 @@ export default function Promotions() {
       weekdayMask: p.weekdayMask ?? 127,
       timeFrom: p.startMinute === null ? '' : minToHHMM(p.startMinute),
       // endMinute may be 1440 (midnight, exclusive) which a time input cannot
-      // hold; 23:59 is the closest editable value.
+      // hold; 23:59 is the closest editable value, and timeToRaw remembers the
+      // real one so that merely opening the form does not shorten the window.
       timeTo: p.endMinute === null ? '' : minToHHMM(Math.min(p.endMinute, 1439)),
+      timeToRaw: p.endMinute,
       channel: p.channel ?? '',
       stackable: p.stackable,
       precedence: String(p.precedence),
       totalLimit: p.totalLimit === null ? '' : String(p.totalLimit),
       perCustomerLimit: p.perCustomerLimit === null ? '' : String(p.perCustomerLimit),
       branchIds: (p.stores ?? []).map((s) => s.branchId),
+      rules: (p.rules ?? []).map((r) => ({
+        kind: r.kind,
+        categoryId: r.categoryId ?? null,
+        productId: r.productId ?? null,
+      })),
     });
     setFormError('');
     setEditing(p);
+    loadCatalogue();
   };
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  // Editing the field by hand is the one thing that may discard the remembered
+  // 1440: from then on the field IS the value.
+  const setTimeTo = (e) => setForm((f) => ({ ...f, timeTo: e.target.value, timeToRaw: null }));
+  const setUntilMidnight = () => setForm((f) => ({ ...f, timeTo: '23:59', timeToRaw: 1440 }));
   const toggleDay = (i) => setForm((f) => ({ ...f, weekdayMask: f.weekdayMask ^ (1 << i) }));
   const toggleBranch = (id) =>
     setForm((f) => ({
@@ -183,10 +279,53 @@ export default function Promotions() {
         : [...f.branchIds, id],
     }));
 
+  const addRule = (rule) =>
+    setForm((f) =>
+      f.rules.some((r) => r.kind === rule.kind && r.categoryId === rule.categoryId && r.productId === rule.productId)
+        ? f
+        : { ...f, rules: [...f.rules, rule] },
+    );
+  const removeRule = (i) => setForm((f) => ({ ...f, rules: f.rules.filter((_, n) => n !== i) }));
+
+  const ruleTargetType = RULE_KINDS.find((k) => k.value === ruleKind).target;
+
+  useEffect(() => {
+    if (editing !== null) {
+      setRuleKind('INCLUDE_CATEGORY');
+      setRuleTarget('');
+    }
+  }, [editing]);
+
+  const changeRuleKind = (e) => {
+    const next = e.target.value;
+    const nextTarget = RULE_KINDS.find((k) => k.value === next).target;
+    setRuleKind(next);
+    // A category id left sitting in what is now a product select would send the
+    // server a rule pointing at nothing — 400 "One or more categories/products
+    // do not exist" — so switching target types clears the selection.
+    if (nextTarget !== ruleTargetType) setRuleTarget('');
+  };
+
+  const addPendingRule = () => {
+    if (!ruleTarget) return;
+    addRule({
+      kind: ruleKind,
+      categoryId: ruleTargetType === 'category' ? ruleTarget : null,
+      productId: ruleTargetType === 'product' ? ruleTarget : null,
+    });
+    setRuleTarget('');
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (form.weekdayMask === 0) {
       setFormError('Pick at least one day of the week');
+      return;
+    }
+    // The server refuses one minute set without the other (promotions.js:111),
+    // which as a form error is clearer said here than fetched.
+    if (!form.timeFrom !== !form.timeTo) {
+      setFormError('Set both daily times or neither');
       return;
     }
     setBusy(true);
@@ -206,7 +345,13 @@ export default function Promotions() {
       // keeps "no day restriction" distinct in the data.
       weekdayMask: form.weekdayMask === 127 ? null : form.weekdayMask,
       startMinute: hhmmToMin(form.timeFrom),
-      endMinute: hhmmToMin(form.timeTo),
+      // endMinute is EXCLUSIVE and the schema allows 1440 — midnight at the end
+      // of the day — which <input type="time"> tops out one minute short of. A
+      // form that displayed 23:59 and then saved 23:59 would shorten a
+      // to-midnight window by a minute every time anyone opened the record, so
+      // the value the server gave us is re-sent unless the operator moved the
+      // field themselves.
+      endMinute: form.timeTo === '' ? null : (form.timeToRaw ?? hhmmToMin(form.timeTo)),
       channel: form.channel || null,
       stackable: form.stackable,
       precedence: form.precedence === '' ? 100 : Number(form.precedence),
@@ -216,17 +361,28 @@ export default function Promotions() {
     try {
       if (editing === 'new') {
         const { data } = await api.post('/promotions', body);
+        // Targeting is two more routes, and they need the id the create just
+        // minted. A failure here leaves a DRAFT that exists but is not targeted
+        // — which is why the message names that outcome instead of claiming
+        // everything saved.
         if (form.branchIds.length) {
           await api.put(`/promotions/${data.promotion.id}/stores`, { branchIds: form.branchIds });
+        }
+        if (form.rules.length) {
+          await api.put(`/promotions/${data.promotion.id}/rules`, { rules: form.rules });
         }
         toast('Promotion created as a draft. Publish it to switch it on.', 'success');
       } else {
         await api.patch(`/promotions/${editing.id}`, body);
-        // PUT /stores bumps the version of a published promotion even when
-        // nothing changed, so only send it when the store set actually moved.
+        // PUT /stores and PUT /rules bump the version of a published promotion
+        // even when nothing changed, and a version bump is what redemptions
+        // snapshot — so only send them when the set actually moved.
         const before = sortedIds((editing.stores ?? []).map((s) => s.branchId));
         if (before !== sortedIds(form.branchIds)) {
           await api.put(`/promotions/${editing.id}/stores`, { branchIds: form.branchIds });
+        }
+        if (!sameRules(editing.rules ?? [], form.rules)) {
+          await api.put(`/promotions/${editing.id}/rules`, { rules: form.rules });
         }
         toast('Promotion updated', 'success');
       }
@@ -240,6 +396,8 @@ export default function Promotions() {
   };
 
   const lifecycle = async (p, action) => {
+    if (lifecycleBusy) return;
+    setLifecycleBusy(`${p.id}:${action}`);
     try {
       await api.post(`/promotions/${p.id}/${action}`);
       toast(
@@ -248,12 +406,33 @@ export default function Promotions() {
       );
       await load();
     } catch (err) {
-      toast(apiError(err, `Could not ${action}`), 'error');
+      // The server refuses an illegal transition with a 409 naming the current
+      // status, which is more useful than anything invented here. Reload either
+      // way: a refusal usually means someone else already moved it.
+      toast(apiError(err, `Could not ${action} this promotion`), 'error');
+      await load();
+    } finally {
+      setLifecycleBusy('');
     }
+  };
+
+  const archive = async () => {
+    const p = confirmArchive;
+    setConfirmArchive(null);
+    await lifecycle(p, 'archive');
   };
 
   const scopeText = (p) =>
     p.stores.length === 0 ? 'All stores' : p.stores.map((s) => s.branchName || 'Store').join(', ');
+
+  // Stores that may be targeted: the active ones, plus any store this promotion
+  // already targets even if it has since been deactivated. Filtering that one
+  // out would drop it from the form's list and then delete the link on save,
+  // silently un-targeting a store nobody asked to un-target.
+  const targetableBranches = useMemo(() => {
+    const linked = new Set(form.branchIds);
+    return branches.filter((b) => b.status === 'ACTIVE' || linked.has(b.id));
+  }, [branches, form.branchIds]);
 
   return (
     <div>
@@ -261,11 +440,22 @@ export default function Promotions() {
         title="Promotions"
         subtitle="Scheduled offers applied at the till — automatically from the offers list, or by code. The server computes every benefit."
         actions={
-          <button type="button" className="btn-primary flex items-center gap-2" onClick={openNew}>
-            <PlusCircle className="h-4 w-4" /> New promotion
-          </button>
+          mayWrite ? (
+            <button type="button" className="btn-primary flex items-center gap-2" onClick={openNew}>
+              <PlusCircle className="h-4 w-4" /> New promotion
+            </button>
+          ) : null
         }
       />
+      {/* Said plainly rather than leaving an operator hunting for a button that
+          is not there. Two separate reasons, so two separate sentences. */}
+      {!mayWrite ? (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          {licenceOk
+            ? 'You can review campaigns here. Creating, editing and publishing them needs a promotions role.'
+            : 'This company’s licence does not currently allow changes. Campaigns are shown read-only.'}
+        </div>
+      ) : null}
       <div className="mb-6 grid gap-4 sm:grid-cols-3">
         <StatCard icon={Radio} label="Live now" value={stats.live} accent="green" />
         <StatCard icon={Megaphone} label="Published" value={stats.published} />
@@ -273,11 +463,17 @@ export default function Promotions() {
       </div>
       <ErrorNote message={loadError} />
 
-      {promotions === null ? null : promotions.length === 0 ? (
+      {promotions === null ? (
+        <div className="card p-6 text-center text-sm text-slate-500">Loading campaigns…</div>
+      ) : promotions.length === 0 ? (
         <EmptyState
           icon={Megaphone}
           title="No promotions yet"
-          note="Create an offer — a happy-hour percentage, a flat amount over a minimum spend, or a coded deal — and publish it when it should start applying."
+          note={
+            mayWrite
+              ? 'Create an offer — a happy-hour percentage, a flat amount over a minimum spend, or a coded deal — and publish it when it should start applying.'
+              : 'Nobody has set up a campaign for this company yet.'
+          }
         />
       ) : (
         <div className="card overflow-x-auto">
@@ -316,6 +512,12 @@ export default function Promotions() {
                   <td className="px-4 py-3 text-xs text-slate-500">{scheduleText(p)}</td>
                   <td className="px-4 py-3 text-xs text-slate-500">
                     {scopeText(p)}
+                    {(p.rules ?? []).length ? (
+                      <div className="mt-1 flex items-start gap-1 text-slate-600">
+                        <Utensils className="mt-0.5 h-3 w-3 shrink-0" />
+                        <span>{p.rules.map((r) => ruleText(r, names)).join(' · ')}</span>
+                      </div>
+                    ) : null}
                     {p.totalLimit !== null ? (
                       <div>
                         {p.redemptionCount} of {p.totalLimit} uses
@@ -327,9 +529,13 @@ export default function Promotions() {
                     {statusBadge(p)}
                     {p.version > 1 ? <div className="mt-0.5 text-[10px] text-slate-400">v{p.version}</div> : null}
                   </td>
+                  {/* Edit needs promo.write; publish, pause and archive need
+                      promo.publish. Two different actions, so two different
+                      gates — a role may hold one without the other, and the
+                      server enforces exactly this split. */}
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      {p.status !== 'ARCHIVED' ? (
+                      {mayWrite && p.status !== 'ARCHIVED' ? (
                         <button
                           type="button"
                           className="btn-ghost flex items-center gap-1 text-xs"
@@ -338,29 +544,32 @@ export default function Promotions() {
                           <Pencil className="h-3.5 w-3.5" /> Edit
                         </button>
                       ) : null}
-                      {p.status === 'DRAFT' || p.status === 'PAUSED' ? (
+                      {mayPublish && (p.status === 'DRAFT' || p.status === 'PAUSED') ? (
                         <button
                           type="button"
                           className="btn-primary flex items-center gap-1 px-3 py-1.5 text-xs"
+                          disabled={!!lifecycleBusy}
                           onClick={() => lifecycle(p, 'publish')}
                         >
                           <Radio className="h-3.5 w-3.5" /> {p.status === 'PAUSED' ? 'Resume' : 'Publish'}
                         </button>
                       ) : null}
-                      {p.status === 'PUBLISHED' ? (
+                      {mayPublish && p.status === 'PUBLISHED' ? (
                         <button
                           type="button"
                           className="btn-ghost flex items-center gap-1 text-xs text-orange-600"
+                          disabled={!!lifecycleBusy}
                           onClick={() => lifecycle(p, 'pause')}
                         >
                           <PauseCircle className="h-3.5 w-3.5" /> Pause
                         </button>
                       ) : null}
-                      {p.status !== 'ARCHIVED' ? (
+                      {mayPublish && p.status !== 'ARCHIVED' ? (
                         <button
                           type="button"
                           className="btn-ghost flex items-center gap-1 text-xs text-slate-500"
-                          onClick={() => lifecycle(p, 'archive')}
+                          disabled={!!lifecycleBusy}
+                          onClick={() => setConfirmArchive(p)}
                         >
                           <Archive className="h-3.5 w-3.5" /> Archive
                         </button>
@@ -440,7 +649,17 @@ export default function Promotions() {
             </div>
             <div>
               <label className="label" htmlFor="promo-to">Daily until (IST, optional)</label>
-              <input id="promo-to" className="input" type="time" value={form.timeTo} onChange={set('timeTo')} />
+              <input id="promo-to" className="input" type="time" value={form.timeTo} onChange={setTimeTo} />
+              <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+                {form.timeToRaw === 1440 ? (
+                  <span className="font-semibold text-pos-royal">Runs until midnight (24:00)</span>
+                ) : (
+                  <button type="button" className="underline" onClick={setUntilMidnight}>
+                    Until midnight
+                  </button>
+                )}
+                <span>· the end time is exclusive</span>
+              </div>
             </div>
             <div>
               <label className="label" htmlFor="promo-channel">Channel</label>
@@ -493,7 +712,7 @@ export default function Promotions() {
           <div>
             <div className="label">Stores (none selected = every store)</div>
             <div className="flex flex-wrap gap-2">
-              {branches.map((b) => (
+              {targetableBranches.map((b) => (
                 <button
                   key={b.id}
                   type="button"
@@ -505,15 +724,137 @@ export default function Promotions() {
                   }`}
                 >
                   {b.name}
+                  {b.status !== 'ACTIVE' ? ' (inactive)' : ''}
                 </button>
               ))}
             </div>
+          </div>
+          <div>
+            <div className="label">Item rules (none = the whole bill)</div>
+            {form.rules.length ? (
+              <ul className="mb-2 space-y-1.5">
+                {form.rules.map((r, i) => (
+                  <li
+                    key={`${r.kind}|${r.categoryId ?? ''}|${r.productId ?? ''}`}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs"
+                  >
+                    <span className="min-w-0 truncate text-slate-600">{ruleText(r, names)}</span>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                      onClick={() => removeRule(i)}
+                      aria-label={`Remove rule: ${ruleText(r, names)}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {/* Existing rules stay listed (and removable) even when the catalogue
+                could not be read — only ADDING needs names to choose from. */}
+            {categories.length || products.length ? (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    className="input w-auto"
+                    value={ruleKind}
+                    onChange={changeRuleKind}
+                    aria-label="Rule kind"
+                  >
+                    {RULE_KINDS.map((k) => (
+                      <option key={k.value} value={k.value}>{k.label}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="input min-w-0 flex-1"
+                    value={ruleTarget}
+                    onChange={(e) => setRuleTarget(e.target.value)}
+                    aria-label={ruleTargetType === 'category' ? 'Category' : 'Item'}
+                  >
+                    <option value="">
+                      {ruleTargetType === 'category' ? 'Choose a category…' : 'Choose an item…'}
+                    </option>
+                    {(ruleTargetType === 'category' ? categories : products).map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs"
+                    disabled={!ruleTarget}
+                    onClick={addPendingRule}
+                  >
+                    Add rule
+                  </button>
+                </div>
+                {/* Mirrors lib/promotions.js:52-71 — see RULE_KINDS above. */}
+                <div className="mt-1 text-[11px] text-slate-500">
+                  “Only” rules narrow the offer to matching lines · an item rule outranks its
+                  category rule · “Never this item” always wins.
+                </div>
+              </>
+            ) : (
+              <div className="rounded-lg border border-dashed border-slate-200 px-3 py-2 text-xs text-slate-400">
+                No categories or items are available to build a rule against — the rest of the
+                form still saves.
+              </div>
+            )}
           </div>
           <ErrorNote message={formError} />
           <button type="submit" className="btn-primary w-full" disabled={busy}>
             {busy ? 'Saving…' : editing === 'new' ? 'Create draft' : 'Save changes'}
           </button>
         </form>
+      </Modal>
+
+      {/* Archive is the one transition with no way back (the server refuses
+          every edit and every lifecycle call on an ARCHIVED promotion), so it
+          is the one action that asks first. Clicking outside cancels. */}
+      <Modal
+        open={confirmArchive !== null}
+        title="Archive this promotion?"
+        onClose={() => setConfirmArchive(null)}
+      >
+        {confirmArchive ? (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-600">
+              <span className="font-semibold text-pos-ink">{confirmArchive.name}</span>
+              {confirmArchive.status === 'PUBLISHED'
+                ? ' is published — archiving switches it off at the till immediately.'
+                : ` is ${confirmArchive.status === 'DRAFT' ? 'a draft' : 'paused'} and is not applying to bills now.`}
+            </p>
+            <p className="text-sm text-slate-600">
+              Archiving is permanent: an archived promotion cannot be edited, published or
+              brought back
+              {confirmArchive.redemptionCount
+                ? `. Its ${confirmArchive.redemptionCount} recorded redemption${
+                    confirmArchive.redemptionCount === 1 ? ' stays' : 's stay'
+                  } on the books.`
+                : '.'}
+              {confirmArchive.status === 'PUBLISHED'
+                ? ' To take it off the till and bring it back later, use Pause instead.'
+                : ''}
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn-ghost flex-1"
+                onClick={() => setConfirmArchive(null)}
+              >
+                Keep it
+              </button>
+              <button
+                type="button"
+                className="btn-primary flex-1"
+                disabled={!!lifecycleBusy}
+                onClick={archive}
+              >
+                Archive permanently
+              </button>
+            </div>
+          </div>
+        ) : null}
       </Modal>
     </div>
   );

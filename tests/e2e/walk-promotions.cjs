@@ -4,7 +4,11 @@
 // Sell screen: ineligible code refused with the engine's reason (order
 // survives OPEN), automatic offer applied by picking from the offers list,
 // removal + re-apply, plain bill, receipt naming the offer, coded offer on a
-// qualifying order. Screenshots: <shots>/d-*.png; FAIL-* for failed steps.
+// qualifying order. Finally, back on the campaign screen: a DRAFT with an
+// item rule round-trips through PUT /rules and the list names the rule back,
+// and Archive asks first ("Keep it" changes nothing) before the terminal
+// DRAFT → ARCHIVED move strips the row's write controls.
+// Screenshots: <shots>/d-*.png; FAIL-* for failed steps.
 const fs = require('fs');
 const { BASE, SHOTS, creds, launchBrowser } = require('./env.cjs');
 
@@ -22,6 +26,7 @@ const RUN = String(Date.now()).slice(-6);
 const AUTO_NAME = `Walk Auto 10pc ${RUN}`;
 const CODE = `WALK${RUN}`;
 const CODE_NAME = `Walk Coded 50 ${RUN}`;
+const RULES_NAME = `Walk Rules ${RUN}`;
 
 async function main() {
   const owner = creds.owner();
@@ -187,6 +192,45 @@ async function main() {
     await page.waitForSelector(`text=${CODE_NAME}`);
     await page.waitForSelector('text=/saved ₹50\\.00/');
     await shot('coded-applied');
+  });
+
+  await step('draft with an item rule round-trips (editor, PUT /rules, list)', async () => {
+    // Stays a DRAFT on purpose: it must never reach the till, so the sell
+    // steps above keep meaning what they say on a re-run.
+    await page.goto(BASE + '/promotions', { waitUntil: 'domcontentloaded' });
+    await page.click('button:has-text("New promotion")');
+    await page.waitForSelector('#promo-name');
+    await page.fill('#promo-name', RULES_NAME);
+    await page.fill('#promo-value', '5');
+    await page.selectOption('select[aria-label="Rule kind"]', 'INCLUDE_PRODUCT');
+    // The catalogue loads when the form opens; wait for real options.
+    await page.waitForSelector('select[aria-label="Item"] option:nth-child(2)');
+    await page.selectOption('select[aria-label="Item"]', { label: 'Cappuccino' });
+    await page.click('button:has-text("Add rule")');
+    await page.waitForSelector('text=Only this item: Cappuccino');
+    await page.click('button[type="submit"]:has-text("Create draft")');
+    // The list names the rule back from the server's own row — the proof the
+    // rule survived POST + PUT and came back on GET /promotions.
+    await page.waitForSelector(`tr:has-text("${RULES_NAME}"):has-text("Only this item: Cappuccino")`);
+    await shot('rule-round-trip');
+  });
+
+  await step('archive asks first; confirming is terminal', async () => {
+    // Cancel path: the confirm modal appears and "Keep it" changes nothing.
+    await page.locator(`tr:has-text("${RULES_NAME}") button:has-text("Archive")`).click();
+    await page.waitForSelector('text=Archive this promotion?');
+    await page.click('button:has-text("Keep it")');
+    await page.waitForSelector('text=Archive this promotion?', { state: 'detached' });
+    await page.waitForSelector(`tr:has-text("${RULES_NAME}"):has-text("Draft")`);
+    // Confirm path: DRAFT → ARCHIVED, and the row loses its write controls
+    // (the server refuses every edit on an ARCHIVED promotion with a 409).
+    await page.locator(`tr:has-text("${RULES_NAME}") button:has-text("Archive")`).click();
+    await page.waitForSelector('text=Archive this promotion?');
+    await page.click('button:has-text("Archive permanently")');
+    await page.waitForSelector(`tr:has-text("${RULES_NAME}"):has-text("Archived")`);
+    const editButtons = await page.locator(`tr:has-text("${RULES_NAME}") button:has-text("Edit")`).count();
+    if (editButtons !== 0) throw new Error('archived row still offers Edit');
+    await shot('archived-terminal');
   });
 
   await ctx.close();

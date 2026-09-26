@@ -1,16 +1,26 @@
 // VC-103 kitchen screens — fixture-render verification (Part E).
-// Window 3's kitchen backend is LANDED in the x/kitchen lane (1e92440), but
-// THIS stack's backend snapshot does not mount /api/kitchen — so this walk
-// intercepts the network with fixtures that mirror the landed contract
-// EXACTLY (backend/src/api/routes/kitchen.js @ 1e92440):
+// Window 3's kitchen backend is LANDED and THIS lane's backend mounts it
+// (app.js: api.use('/kitchen', …); the lane is cut from main @ d625370) — but
+// this walk still intercepts the network with fixtures so the render
+// assertions are deterministic (fixed ages, an overdue item, a mid-poll
+// cancellation, a PARTIAL order) whatever the seed happens to hold. Real
+// backend responses are the API journeys' job, not this walk's. The fixtures
+// mirror the landed contract EXACTLY (backend/src/api/routes/kitchen.js):
 //   GET  /kitchen/stations                  → { stations }  (isDefault, not
 //                                             defaultForBranch)
 //   GET  /kitchen/stations/:id/board        → { seq, items } live snapshot
 //   GET  /kitchen/stations/:id/board?sinceSeq=N → { seq, items } deltas,
 //                                             terminal states included
 //   POST /kitchen/items/:id/state           → { item, replayed }
+//   GET  /kitchen/overview                  → { stations, ordersKitchenReady,
+//                                             lastChangeAt, seq } (managerUp —
+//                                             the supervisor's authoritative
+//                                             counts; kitchen.js:241)
 //   (NO delay endpoint; items carry name/qty/kotSeq — no productName,
 //    orderType, tableCode, invoiceNumber, modifiers or notes)
+// /branches is NOT fixtured — the owner's store picker runs against the real
+// stack, and chooseStoreIfAsked() picks the first store when the seed has more
+// than one (useKitchenBranch auto-picks only a list of exactly one).
 // Verified here: default-station preselect, name/qty render, KOT labels,
 // overdue highlight, delay reason display, snapshot→delta cancellation
 // ("do not prepare"), cross-station aggregation on expediter/supervisor,
@@ -84,6 +94,29 @@ async function main() {
     if (url.pathname.endsWith('/kitchen/stations')) {
       return route.fulfill({ json: { stations } });
     }
+    if (url.pathname.endsWith('/kitchen/overview')) {
+      // Same arithmetic the landed route does (kitchen.js:241-291), over the
+      // fixture rows: QUEUED/IN_PREP counts per station, oldest QUEUED age,
+      // whole-order readiness (every live line READY — ord-1 still cooking,
+      // ord-2 has a QUEUED line, so 0 here).
+      const per = stations.map((st) => {
+        const mine = items.filter((i) => i.stationId === st.id);
+        const queuedRows = mine.filter((i) => i.state === 'QUEUED');
+        const oldestMs = queuedRows.length
+          ? Math.max(...queuedRows.map((i) => now - new Date(i.queuedAt).getTime()))
+          : null;
+        return {
+          stationId: st.id,
+          name: st.name,
+          queued: queuedRows.length,
+          inPrep: mine.filter((i) => i.state === 'IN_PREP').length,
+          oldestQueuedAgeSec: oldestMs === null ? null : Math.round(oldestMs / 1000),
+        };
+      });
+      return route.fulfill({
+        json: { stations: per, ordersKitchenReady: 0, lastChangeAt: iso(30 * 1000), seq: LIVE_SEQ },
+      });
+    }
     const boardM = url.pathname.match(/\/kitchen\/stations\/([^/]+)\/board$/);
     if (boardM) {
       const stId = boardM[1];
@@ -128,6 +161,19 @@ async function main() {
     if (!re.test(body)) throw new Error('missing ' + what);
   };
 
+  // An OWNER always sees the store select (their PosUser.branchId is null, so
+  // every kitchen call needs a chosen store). It auto-picks only when the
+  // company has exactly ONE active store; with more, pick the first. Each
+  // page.goto remounts the SPA, so the choice must be repeated per screen.
+  const chooseStoreIfAsked = async () => {
+    await page.waitForSelector('select[aria-label="Store"] option:nth-child(2)');
+    const sel = page.locator('select[aria-label="Store"]');
+    if (!(await sel.inputValue())) {
+      const v = await sel.locator('option').nth(1).getAttribute('value');
+      await sel.selectOption(v);
+    }
+  };
+
   await step('owner signs in', async () => {
     await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#email');
@@ -139,6 +185,7 @@ async function main() {
 
   await step('station: isDefault station preselected, names/KOT render', async () => {
     await page.goto(BASE + '/kitchen', { waitUntil: 'domcontentloaded' });
+    await chooseStoreIfAsked();
     await page.waitForSelector('text=Cappuccino'); // board painted
     const sel = await page.$eval('select[aria-label="Station"]', (el) => el.value);
     if (sel !== 'st-hot') throw new Error(`default station is ${sel}, want st-hot (isDefault)`);
@@ -171,6 +218,7 @@ async function main() {
 
   await step('expediter: cross-station aggregation + partial readiness', async () => {
     await page.goto(BASE + '/kitchen/expediter', { waitUntil: 'domcontentloaded' });
+    await chooseStoreIfAsked();
     await page.waitForSelector('text=KOT #1'); // orderLabel falls back to KOT
     await bodyHas(/1 of 3 lines ready/i, '"x of y lines ready" line');
     await bodyHas(/PARTIAL/, 'PARTIAL badge');
@@ -183,11 +231,28 @@ async function main() {
 
   await step('supervisor: stations, delayed reasons, cancellation feed', async () => {
     await page.goto(BASE + '/kitchen/supervisor', { waitUntil: 'domcontentloaded' });
+    await chooseStoreIfAsked();
     await page.waitForSelector('text=Hot Kitchen');
     await bodyHas(/Cold Station/, 'second station card');
     await bodyHas(/Waiting on bread delivery/, 'delayed list shows the reason');
     await page.waitForSelector('text=Cold Brew'); // cancellation via delta
     await shot('supervisor-board');
+  });
+
+  await step('supervisor: authoritative /kitchen/overview consumed', async () => {
+    // Three proofs the counts came from overview and not the board fallback:
+    // the "Last kitchen change" footer renders only from overview.lastChangeAt;
+    // "Orders ready to serve" shows a number, never the pre-overview '—'; and
+    // no overview error banner is up.
+    await page.waitForSelector('text=Last kitchen change');
+    const body = await page.evaluate(() => document.body.innerText);
+    if (/Orders ready to serve\s*\n\s*—/i.test(body)) {
+      throw new Error("'Orders ready to serve' still shows — (overview never answered)");
+    }
+    if (/Could not load the kitchen overview/i.test(body)) {
+      throw new Error('overview error banner is visible');
+    }
+    await shot('supervisor-overview');
   });
 
   await ctx.close();

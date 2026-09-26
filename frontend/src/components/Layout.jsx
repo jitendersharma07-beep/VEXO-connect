@@ -11,7 +11,10 @@ import {
   CalendarClock,
   ChefHat,
   ClipboardCheck,
+  ConciergeBell,
   CookingPot,
+  Flame,
+  Gauge,
   KeyRound,
   Landmark,
   Layers,
@@ -20,6 +23,7 @@ import {
   ListChecks,
   LogOut,
   Map,
+  Megaphone,
   Menu,
   MonitorSmartphone,
   Package,
@@ -217,6 +221,32 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
                   <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
                 </>
               ) : null}
+              {/* ==== LANE operator-ui — VC-103 kitchen display ====
+                  "Kitchen display", NOT "Central kitchen": that label belongs to
+                  /inventory/production, which plans production batches and is a
+                  different screen for different people. Two kitchens in one
+                  sidebar is confusing enough without giving them the same name.
+
+                  This sits inside canSell, which is ['CASHIER','BRANCH_MANAGER',
+                  'CUSTOMER_OWNER'] — the same three roles as kitchen.js's
+                  `operate` (kitchen.js:26). Supervisor adds isManagerUp, which is
+                  `managerUp` (kitchen.js:27). Those equalities are the reason
+                  these helpers are reused instead of new predicates; if either
+                  server list changes, this breaks in the right direction (a
+                  hidden link, never an offered refusal).
+
+                  Icons: ChefHat and CookingPot are already spoken for by
+                  "Recipes & food cost" and "Central kitchen" below, so the
+                  kitchen display uses its own three. */}
+              <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
+                Kitchen display
+              </div>
+              <NavItem to="/kitchen" icon={Flame} label="Station" end />
+              <NavItem to="/kitchen/expediter" icon={ConciergeBell} label="Expediter" />
+              {isManagerUp(user) ? (
+                <NavItem to="/kitchen/supervisor" icon={Gauge} label="Supervisor" />
+              ) : null}
+              {/* ==== /LANE operator-ui ==== */}
               <div className="mt-4 px-3 pb-1 text-[10px] font-bold uppercase tracking-[0.15em] text-blue-300/60">
                 Manage
               </div>
@@ -240,6 +270,16 @@ function SidebarBody({ user, license, isAtc, isOwner, atcScope, onExitAtcScope }
             <NavItem to="/integrations" icon={Plug} label="Integrations" />
           ) : null}
           {isOwner ? <NavItem to="/discounts" icon={BadgePercent} label="Discounts" /> : null}
+          {/* LANE operator-ui — VC-102. promo.read, not isOwner: the server admits
+              every promo.read holder to GET /api/promotions, which is Finance, a
+              regional manager and a store manager as well as the owner and
+              COMPANY_ADMIN. They get a read-only list — the screen hides each
+              write control behind the action that authorises it, so nobody is
+              shown a button that comes back 403. Beside Discounts because an
+              operator looking for "why is this bill cheaper" looks in one place. */}
+          {can('promo.read') ? (
+            <NavItem to="/promotions" icon={Megaphone} label="Promotions" />
+          ) : null}
           {isOwner ? <NavItem to="/licence" icon={BadgeCheck} label="Licence" /> : null}
           {/* ==== LANE inventory ==== (spec Part B §8)
               One condition for the whole section, matching the route gate in
