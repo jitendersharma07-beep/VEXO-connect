@@ -49,10 +49,13 @@ was written for. §7d.
 backend answers `GET /health` (§7h); the frontend serves its bundle with the cache
 headers and SPA fallback its config intends (§7j). Two images that each work alone is
 a weaker claim than a stack, and it is the only one this lane makes — the compose
-project that would settle it is written and owner-gated (§7j). The frontend build
-also answers **Q5**: nothing in the shipped bundle reads `receipt.seller`, and
-`promotions` occurs nowhere in it, so evidence screenshot `C1` was not produced by
-this candidate and no rebuild of it will reproduce that screenshot.
+project that would settle it is written and owner-gated (§7j). One of its five
+questions did not need it: all three healthchecks were run per-image against the
+shipped argv, and the backend's against a 200, a 503, a hang and a dead port — one
+zero, in the right row. The frontend build also answers **Q5**: nothing in the
+shipped bundle reads `receipt.seller`, and `promotions` occurs nowhere in it, so
+evidence screenshot `C1` was not produced by this candidate and no rebuild of it
+will reproduce that screenshot.
 
 What remains unproven is physical: **no ESC/POS byte has ever reached the
 store's printer**, so nothing here claims paper. `CONFIRMED` means the agent
@@ -268,7 +271,7 @@ and the rows below say which parts are which rather than averaging them.
 | Recovery behaviour | PASS | `accountRecovery` 33/33 and `accountRecoveryOutage` 5/5. §7b |
 | **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7g |
 | Fresh-migration and populated-migration evidence | **PASS** | 41 applied to an empty database twice (§2b at 40, §7a at 41), and now to a **populated** one: migrated to 40, loaded to 100,000 customers / 200,000 links / 64 MB, then the 41st applied on top — 41 applied, index built, all 300,000 rows survived. Prisma recorded 342 ms; a concurrent writer was blocked **6.714 s**, which is the number the migration’s own production note was missing. §7d |
-| Release images and build context | PARTIAL | **both images now built.** Backend: 53.7 s, booted, `GET /health` → `200` (§7h). Frontend: 19.4 s, 20.2 MiB, serves its bundle with `no-store` on `index.html`, `immutable` on hashed assets, working SPA fallback, and a build context measured clean of `.env`, `node_modules`, `dist*` and `public/_proof/` (§7j). Five findings — A4, A5, A7, A8 and the new **A10** — and several things done right, including a design comment in `nginx.conf` that was tested and holds. Still PARTIAL, and deliberately: **the two images have never been pointed at each other.** The compose stack is written and owner-gated |
+| Release images and build context | PARTIAL | **both images now built.** Backend: 53.7 s, booted, `GET /health` → `200` (§7h). Frontend: 19.4 s, 20.2 MiB, serves its bundle with `no-store` on `index.html`, `immutable` on hashed assets, working SPA fallback, and a build context measured clean of `.env`, `node_modules`, `dist*` and `public/_proof/` (§7j). Five findings — A4, A5, A7, A8 and the new **A10** — and several things done right, including a design comment in `nginx.conf` that was tested and holds. All three healthchecks were then run per-image against the shipped argv, the backend's against a 200, a 503, a hang and a dead port: one zero, in the right row (§7j). Still PARTIAL, and deliberately: **the two images have never been pointed at each other.** The compose stack is written and owner-gated |
 | **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7i, A6 |
 | Defects returned to the responsible window | PASS | A1–A10 in §7c–§7j, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
 | **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7i, A6 |
@@ -1113,8 +1116,72 @@ this section claims two images, not a stack. And the fact that a prod-shaped sta
 of the *previous* candidate has been healthy for 15 hours is weak positive evidence
 that the compose wiring is sound in practice, offered as exactly that: it is a
 different tree, three days older, and it is not evidence about `d625370`. The
-command is in §8 for the owner to run, and it is the last mechanical item in Part 4
-that a person other than the owner could have closed.
+command is in §8 for the owner to run.
+
+**One of the five did not need the stack, and it is now closed.** Probe 2 asks
+whether both healthchecks reach `healthy`, but the *risk* that made it worth asking
+is per-image, not per-stack, and the compose file states it itself: *"a healthcheck
+calling a binary the image lacks reports unhealthy forever — a fault that looks
+exactly like the fault it was added to detect."* That decomposes. The backend is
+healthy iff `node` exists **and** the script is valid and its exit logic is right
+**and** `/api/health` returns 200; §7h measured the third term directly. So
+`w6-audit-healthchecks.sh` measures the first two, per image, with no compose
+project, no `.env` and no published port — and it does not retype the commands:
+the `test:` arrays are parsed out of the shipped bytes with a real YAML parser and
+executed as argv, because the backend's check is a three-line YAML block scalar and
+retyping one by line number is precisely the class of error this audit has already
+made three times.
+
+| image | check calls | `node` | `curl` | `wget` | `pg_isready` |
+|---|---|---|---|---|---|
+| `node:20-bookworm-slim` | `node -e` | present | **absent** | **absent** | — |
+| `nginx:1.27-alpine` | `wget` | **absent** | present | present, `/usr/bin/wget → /bin/busybox`, BusyBox v1.37.0 | — |
+| `postgres:16-alpine` | `pg_isready` | — | — | — | present |
+
+So the peer's two comments — *"node:20-bookworm-slim ships neither (verified in the
+running container, not assumed)"* and *"nginx:1.27-alpine has wget (busybox) and no
+node"* — are both **true as written**, down to the busybox part. Each check calls a
+binary its own image has and the other's image lacks. The only thing the comments
+understate is that nginx's image also carries `curl`, which changes no decision.
+
+A check that exits 0 for the wrong reason is worse than one that never passes,
+because it reports healthy *through* the outage it exists to catch. So the backend's
+shipped argv was run unmodified against four different realities rather than one:
+
+| the listener on `127.0.0.1:5000` | exit | elapsed |
+|---|---|---|
+| returns `200` | **0** | 153 ms |
+| returns `503` | 1 | 194 ms |
+| accepts and never answers | 1 | **4182 ms** |
+| nothing listening at all | 1 | 163 ms |
+
+One zero, in the right row. The 4182 ms is the script's own `timeout: 4000` firing
+inside compose's `timeout: 5s` — an inner deadline below the outer one, so the check
+always returns its own verdict instead of being killed mid-probe, with about 800 ms
+of measured margin. And the frontend's argv, against the image that actually ships:
+
+| | exit |
+|---|---|
+| shipped argv, nginx serving | **0** |
+| same argv, dead port — the control, because a check that cannot fail is not a check | 1 |
+| `…/api/health` with no backend, i.e. a real `502` from the shipped config | 1 |
+| `…/no-such-asset.js` | **0** |
+
+The last row is **A10 seen from inside the healthcheck's own binary**: busybox
+`wget` fails correctly on a 502, so the check *can* fail — but the SPA fallback
+means almost no static path can produce a non-200 while nginx is alive. Which
+sharpens something worth saying plainly: **no healthcheck in this stack traverses
+the proxy hop.** The backend's check deliberately does not touch the database, the
+frontend's `GET /` needs no backend, so both can read `healthy` while every
+`/api/` request 502s. That is very likely deliberate rather than an oversight — the
+compose file's own `depends_on` comment argues for exactly this decoupling, *"a
+served UI saying it cannot reach the server is far easier to diagnose than a refused
+connection"* — and it is recorded as a property of the design, not a defect. It does
+mean `docker compose ps` is not sufficient evidence that the release works.
+
+What stays open is compose's half: `interval`, `retries` and `start_period` as
+compose applies them, and whether `depends_on: condition: service_healthy` on
+postgres genuinely gates the backend's start. Those need the stack.
 
 ### 7k. What this audit does not cover
 
@@ -1147,10 +1214,15 @@ this lane, and this section will not claim it:
   intends (§7j). What is *not* covered is the pair working together: the backend ran
   against an empty database, the frontend ran with no backend on its network and
   returned the correct `502` for it, and **at no point was one pointed at the other**.
-  No compose project was brought up, so `depends_on`, the two healthchecks, the
-  `prisma migrate deploy` boot command and the same-origin cookie path are all still
-  unexercised. Two images that each work alone is a weaker claim than a stack, and it
-  is the only one this lane makes.
+  No compose project was brought up, so `depends_on`, the `prisma migrate deploy`
+  boot command and the same-origin cookie path are all still unexercised. Two images
+  that each work alone is a weaker claim than a stack, and it is the only one this
+  lane makes. The healthchecks are the one exception and are **no longer on this
+  list**: both were run per-image against the shipped argv, and the backend's against
+  a 200, a 503, a hang and a dead port, so "can this check ever pass, and does it fail
+  when it should" is answered (§7j). What compose *does* with those checks —
+  `start_period`, `retries`, and `service_healthy` gating the backend's start — is
+  not.
 - **A production migration window.** The 41 migrations against a populated database
   are no longer on this list — §7d closed that, and found the number the migration's
   own note was missing. What is still uncovered is the thing a dev box cannot supply:
@@ -1236,15 +1308,31 @@ true rather than asserting it, and both DSNs in it are safe to read.
                                the four nested `.md` and nothing else; the cache
                                headers; `[emerg] host not found in upstream` from the
                                literal arm; and the bundle presence table behind Q5
+  w6-audit-healthchecks.sh     probe 2 of the five, answered WITHOUT the stack, because
+                               the risk that motivates it is per-image. Parses the
+                               `test:` arrays out of the shipped compose with pyyaml and
+                               runs them as argv rather than retyping a YAML block
+                               scalar; checks binary presence in all three base images;
+                               runs the backend's check against a 200, a 503, a hang and
+                               a dead port; runs the frontend's against the image that
+                               ships plus a dead-port control. Deletes nothing —
+                               containers run `--rm` so teardown is `docker stop`
+  w6-healthchecks-20260926.log one zero in the right row (0 / 1 / 1 / 1), the 4182 ms
+                               inner timeout inside compose's 5 s, `curl` and `wget`
+                               both ABSENT from node:20-bookworm-slim and `node` absent
+                               from nginx:1.27-alpine — so both peer comments are true
+                               as written — and `/no-such-asset.js` exiting 0, which is
+                               A10 seen from inside the healthcheck's own binary
   w6-audit-stack.sh            the compose stack — WRITTEN AND NOT RUN. The session's
                                tooling declined `docker compose up` against a file
                                named `docker-compose.prod.yml`, twice, which is the
                                correct conservatism for a lane instructed to perform
-                               no production operations. Left in place for the owner
-                               because it is the last mechanical Part 4 item, and it
-                               already contains the guard that matters: a `pos-prod`
-                               project of the PREVIOUS candidate is live on this box
-                               and `docker-compose.prod.yml` carries `name: pos-prod`,
+                               no production operations. Left in place for the owner:
+                               four of its five probes are still open (probe 2 is closed
+                               by the script above), and it already contains the guard
+                               that matters: a `pos-prod` project of the PREVIOUS
+                               candidate is live on this box and
+                               `docker-compose.prod.yml` carries `name: pos-prod`,
                                so it forces `-p vcx-w6-stack`, binds 127.0.0.1:18110
                                only, mints throwaway credentials for its own volume,
                                and diffs the peer's container IDs before and after

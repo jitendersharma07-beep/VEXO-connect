@@ -151,10 +151,23 @@ owners.
 - **The stack.** Both release images have now been built and served — backend
   `GET /health` → `200`, frontend serving its bundle with the right cache headers and
   a working SPA fallback — but **they have never been pointed at each other**. No
-  compose project was brought up, so `depends_on`, both healthchecks, the
-  `prisma migrate deploy` boot command and the same-origin cookie path are unexercised.
-  The script that would close it is written (`w6-audit-stack.sh`) and needs the owner
-  to run it: this lane's tooling declined `docker compose up` against a file named
+  compose project was brought up, so `depends_on`, the `prisma migrate deploy` boot
+  command and the same-origin cookie path are unexercised. **The healthchecks are no
+  longer in that list**: the risk that made them worth testing is per-image, not
+  per-stack, so all three were run against the shipped argv — parsed out of the compose
+  file rather than retyped — and the backend's against a listener returning 200, one
+  returning 503, one that accepts and never answers, and nothing at all. One exit 0, in
+  the right row. `curl` and `wget` are both genuinely absent from
+  `node:20-bookworm-slim` and `node` from `nginx:1.27-alpine`, so both of your comments
+  are true as written. What is still open is what *compose* does with those checks:
+  `start_period`, `retries`, and whether `service_healthy` on postgres gates the
+  backend's start. One thing to know either way — **no healthcheck in the stack
+  traverses the proxy hop**, so both services can read `healthy` while every `/api/`
+  request 502s. That looks deliberate, and your own `depends_on` comment argues for it;
+  it is recorded as a property of the design, not a defect. It does mean
+  `docker compose ps` is not sufficient evidence that the release works.
+  The script for the other four probes is written (`w6-audit-stack.sh`) and needs the
+  owner to run it: this lane's tooling declined `docker compose up` against a file named
   `docker-compose.prod.yml`, correctly, given the standing instruction to perform no
   production operations. Worth knowing before anyone runs it by hand — **a `pos-prod`
   project of the *previous* candidate is live on this box right now**, and
