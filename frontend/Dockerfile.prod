@@ -19,3 +19,14 @@ COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
+
+# Re-declared rather than inherited: an ARG is scoped to the stage that declares
+# it, so the `build` stage above cannot pass these down to here. A static bundle
+# has no process to ask, so `docker inspect` is the ONLY provenance channel for
+# this image — which is why the labels sit on the final stage and not on `build`,
+# where they would be discarded with the builder.
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+LABEL org.opencontainers.image.title="atc-pos-web" \
+      org.opencontainers.image.revision="$GIT_SHA" \
+      org.opencontainers.image.created="$BUILD_TIME"
