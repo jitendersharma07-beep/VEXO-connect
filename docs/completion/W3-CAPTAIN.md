@@ -4,9 +4,15 @@ Status **2026-09-26**. Everything below is either a measured result with the
 command that produced it, or a named gap. Nothing here rests on a successful
 build: a compile proves the gate parses, not that it refuses.
 
-Scope of this document: `backend/src/api/routes/orders.js`,
-`backend/src/api/routes/tableQr.js`, `backend/src/middleware/rbac.js`,
-`backend/src/middleware/permissions.js`. Nothing else was touched.
+Scope of this document. Product code changed, four files:
+`backend/src/api/routes/orders.js`, `backend/src/api/routes/tableQr.js`,
+`backend/src/middleware/rbac.js`, `backend/src/middleware/permissions.js`.
+Also changed, and not product behaviour: `frontend/src/lib/pos.js` (one comment
+corrected — `canSell` is untouched and still excludes CAPTAIN),
+`backend/tests/captainWorkflow.test.js`, and a new
+`backend/tests/permissionsCoverage.test.js`. Eight files with this document;
+`git diff --name-only b3617f7 7969764` is the authority on that list. No schema,
+no migration, no route added or removed.
 
 ---
 
@@ -371,18 +377,21 @@ behind a 50-minute run or corrupting it.
 | — `kitchen.test.js` / `floorplan.test.js` | | 11/11, 16/16 |
 | — `permissionsCoverage.test.js` | | 6/6 — the enforcement map, §2 |
 | Live HTTP, real server | `bash ~/vcx-experience-local/captain-reach.sh` | captain **201** order, **200** add-line, **201** KOT; discount/bill/payment **403**; order unchanged `OPEN/189.00`; cashier control **201** |
-| Browser, routed screens | `./vcxe accept staff` | **45 passed / 0 failed**, exit 0 (05:57Z) — incl. new section D driving the CAPTAIN through `/captain` |
+| Browser, routed screens | `./vcxe accept staff` | **60 passed / 0 failed**, exit 0 (06:34Z) — incl. new section D driving the CAPTAIN through `/captain`, and a rewritten section F that puts three tables in three states at once |
 | Enforcement map (one-off) | `/tmp/w3-action-map.mjs` | superseded by `permissionsCoverage.test.js` |
 | Role delta | `/tmp/w3-role-delta.mjs` | §5 table |
-| Full gate | see §8 | |
+| Suite-order repro, scratch DB | `npx vitest run tests/catalogModifiers.test.js tests/captainWorkflow.test.js` on `vcx_w3order_test` | before **35 skipped**, exit 1; after **92 passed / 92**, exit 0 |
+| Full gate, run 1 | `./w3gate.sh /tmp/w3-cand-d7108cf d7108cf` | **53 files passed, 1 failed; 1661 passed, 35 SKIPPED** — the skip was mine, see below |
+| Full gate, certifying | `./w3gate.sh /tmp/w3-cand-3754f64 3754f64` | **54/54 files, 1696/1696 tests, 0 skipped, 0 failed, exit 0**, 1907.96s — §8 |
 
 Logs kept at `~/vcx-experience-local/evidence/w3-20260926/`
-(`captain-reach.log`, `staff-browser-postfix.log`).
+(`captain-reach.log`, `staff-browser-postfix.log`, `staff-browser-sectionF.log`,
+`staff-browser-final.log`), screenshots at `~/vcx-experience-local/evidence/shots/`.
 
 The 15 console `401`s in the browser log are all `GET /api/auth/me` on page load
 before a token exists — role-independent and pre-existing. Not a finding.
 
-### Two harness defects found by running it, both of which faked a result
+### Five harness defects found by running it, every one of which faked a result
 
 Worth recording because each one produced a *confident wrong answer*, which is
 more dangerous than a crash:
@@ -403,8 +412,51 @@ more dangerous than a crash:
    opens an order its own table, and by deleting a cashier-then-owner fallback in
    the money block whose fixture author depended on which arm answered first.
 
-Both are the same failure in different clothes — an assertion that passes or fails
-for a reason other than the one it names.
+3. **Section F measured the page's LEGEND, not the floor.** `/floor-status`
+   carries a permanent "what the colours mean" panel that prints every state
+   label and its note. The old section asserted `"Served" appears` and
+   `"clear table" appears` on a floor of seven empty tables — both matched the
+   legend, so neither could fail, and one of them carried an explicit
+   `|| !/Paid/` escape hatch on top. Rewritten: section F now drives three
+   scratch tables into IN_KITCHEN, SERVED and PAID **at the same time**, reads
+   the label out of each table's OWN tile, and asserts the three words are three
+   distinct strings. On the way it proved two things about the app, both of
+   which the old section could not have seen — a line sitting READY on the pass
+   still leaves the table IN KITCHEN (it is not on the table yet), and PAID is
+   derivable only for an order tied to a `DiningVisit`, which is why the PAID
+   table has to be built through the guest QR path.
+4. **A one-shot `count()` reported a slow render as a missing control.** Section
+   B asked `await more.count()` for the draft-line quantity button immediately
+   after adding a line. On a box carrying three other test suites the add
+   round-trip had not returned, so the button did not exist yet and the run
+   reported *"no quantity control found on the draft line"* — while the same run
+   went on to send that very line to the kitchen. Every such guard now uses the
+   harness's `appears()` (wait up to 20 s for visible), so a red there means the
+   control never arrived rather than that it was late.
+
+5. **The first full gate ran the captain file and asserted nothing — and the
+   summary line still read green.** `w3gate.sh /tmp/w3-cand-d7108cf d7108cf`
+   returned *53 files passed, 1 failed; 1661 passed, 35 skipped*. The 35 skipped
+   were the whole of `captainWorkflow.test.js`: its top-level `beforeAll` threw
+   at line 98 on `ModifierGroup_productId_fkey` — `catalogModifiers.test.js` runs
+   immediately before it and leaves ModifierGroup rows that the hand-written
+   `wipe()` had no statement for — so vitest skipped every test in the file. A
+   file that proves a CAPTAIN can work the floor and cannot touch money had
+   proved neither, and nothing in the totals said so. It is the second time the
+   same shape of bug hit this file (the first was `UserInvitation`'s ON DELETE
+   RESTRICT), and both were invisible when the file was run alone, which is how
+   both reached a gate. The list is gone: `wipe` is now `wipeAll()` — one
+   `truncate <139 tables> restart identity cascade`, already the pattern in the
+   five inventory suites — so no model added tomorrow can reintroduce it.
+   Reduced to a two-file repro on a scratch database before and after the fix
+   (35 skipped / exit 1 → 92 passed / exit 0).
+
+**Read a skip as a failure.** Four of these five faked a pass; the fifth faked a
+whole file. The only reliable defence found here was to make every check fail
+for exactly one reason and then to go and cause that reason.
+
+All five are the same failure in different clothes — an assertion that passes or
+fails for a reason other than the one it names.
 
 **The browser harness had to be corrected, and the correction matters.**
 `browser-acceptance.mjs` asserted `POST /api/orders as CAPTAIN is still refused
@@ -422,6 +474,189 @@ started before 05:14Z and describe the pre-fix build.
 
 ## 8. Verdict
 
-Filled in by §9 of the handoff once the pinned full gate has run. Nothing in
-this document should be read as "the POS release is complete" — it covers four
-files and the Captain journey, and §2 and §5 are both open questions for Window 1.
+### PASS, for the Captain and table-service workstream only
+
+The certifying full gate, run once on the pinned candidate:
+
+```
+w3gate.sh /tmp/w3-cand-3754f64 3754f64
+SHA          3754f64c9b1a3b13d21bf7112fc3ed7e36f8d7b9
+Test Files   54 passed (54)
+Tests        1696 passed (1696)
+Skipped      0          Failed  0
+Duration     1907.96s   (tests 1851.77s, collect 39.46s, transform 2.82s)
+Start        2026-09-26T07:58:50Z          exit=0
+Database     vcx_experience_w3_test        (no other window touches it)
+log          evidence/w3-20260926/w3gate-3754f64.log
+             457 lines, 48616 bytes, md5 b316255d582bec5f15552a0ee90c58cb
+```
+
+**Zero skips, and that is the number this gate existed to produce.** Run 1 on
+`d7108cf` read *53 passed | 1 failed; 1661 passed | 35 skipped* — the 35 were the
+whole of `captainWorkflow.test.js`, which asserted nothing while the totals looked
+healthy (§7, defect 5). The delta is exactly the one file and nothing else:
+
+| | run 1 · `d7108cf` | run 2 · `3754f64` |
+|---|---|---|
+| Files | 53 passed, **1 failed** (54) | **54 passed** (54) |
+| Tests | 1661 passed, **35 skipped** (1696) | **1696 passed**, 0 skipped |
+| `captainWorkflow.test.js` | **35 skipped**, 208ms | **35 passed**, 8638ms |
+| exit | 1 | **0** |
+
+The one grep hit for "skipped" in the log is a test *name*
+(`globalLimiter skipped (NODE_ENV=test at load)`), not a skip. Checked, because
+that is the same class of mistake as reading a green summary line over a dead file.
+
+### Why this verdict is attributable to that SHA
+
+A start-only identity guard would not have earned the word PASS: a co-tenant
+commit landing mid-run would leave the log describing bytes that no longer exist.
+So the export was re-verified **after** vitest exited, in both directions:
+
+```
+tracked files in 3754f64 vs export, hash for hash : 619 checked, 0 drift
+in export but not in 3754f64                      : 0
+in 3754f64 but not in export                      : 0
+```
+
+Measured on a **loaded** box — loadavg 10.9–11.3 throughout, with two foreign
+vitest runs live — so 1907.96s against run 1's 1615.86s is contention, not a
+regression. A quiet-box number would be lower, and nothing here depends on it.
+
+### What PASS covers, and what it does not
+
+Covered: the Captain journey end to end (store, table, order, draft edits, KOT,
+guest QR acceptance), the negative authorisation set proved in the captain's own
+store, scope containment answering 404, the three table states distinct in text,
+and the enforcement map held by a test rather than by this document.
+
+**Not covered, and not claimed:**
+
+- **This is not "the POS release is complete."** It is four product files and one
+  journey. §2 and §5 are open policy questions for Window 1, and the gate says
+  nothing about either — a policy decision cannot be tested.
+- **The gate ran on a merge candidate, not on `x/experience`,** for the reason in
+  §9. The pushed branch tip is `7969764`, whose seven code files are byte-identical
+  to the gated tree (verified hash for hash); `3754f64` adds only W2's `49e1791`
+  as a second parent.
+- **The doc commit sits above the gated tree.** It changes this markdown file and
+  nothing else, so it cannot move a test result, but it is honest to say the
+  branch tip after it is one commit past what was gated.
+- **No physical hardware was exercised.** Nothing in W3 touches a printer, a
+  drawer or a terminal, so there is no hardware claim to make either way.
+- **Nothing was deployed.** No production system was written to at any point.
+
+## 9. Handoff to Window 1
+
+### What to integrate
+
+Branch `x/experience`, four commits, a fast-forward from the PR head `78ea0ae`:
+
+| commit | what |
+|---|---|
+| `b3617f7` | (not W3's — already on the branch when this work started) |
+| `1611c59` | the Captain fix: action gates, `denyPlatformSelling`, `branchInScope`, 35 tests, the enforcement map, this document |
+| `03612b7` | `captainWorkflow.test.js` sets `POS_QR_BASE_URL` before importing `app.js` — the defect W1 reported |
+| `7969764` | `captainWorkflow.test.js` wipes with `wipeAll()` instead of a hand-written list — the defect the first gate found |
+
+W3's three commits touch **eight** files (`git diff --name-only b3617f7 7969764`),
+of which four are product code: `orders.js`, `tableQr.js`, `middleware/rbac.js`,
+`middleware/permissions.js` — plus `frontend/src/lib/pos.js`, a corrected comment
+only (`canSell` is unchanged and still excludes CAPTAIN). The remaining three are
+`captainWorkflow.test.js`, `permissionsCoverage.test.js` and this document.
+`git diff 78ea0ae 7969764` shows **nine** files rather than eight; the extra one
+is `docs/completion/W5-EXPERIENCE.md`, which belongs to `b3617f7` and is not W3's.
+
+### What was gated, and what that SHA is
+
+The gate does not run on `x/experience`. It cannot: that branch is based on
+`b3617f7`, which predates main's `UserInvitation` model, and 15 sibling test
+files on main call `prisma.userInvitation.deleteMany()` in their wipes. So the
+gate runs on a pinned two-parent merge of the branch and W2's PR-5 merge preview
+`49e1791`, built for that purpose and not for pushing:
+
+```
+3754f64  = merge(7969764, 49e1791)     ← the SHA the gate certifies
+```
+
+`git diff 3754f64 49e1791` is exactly the eight W3 files and nothing else, and
+`w3gate.sh` re-hashes every extracted file against the commit in both directions
+before vitest starts, so the export cannot drift from the SHA mid-run. That
+guard exists because W2 had to withdraw an integration result earlier the same
+day for exactly that reason.
+
+### Merging onto today's main: the wipe helper moved, and this still resolves
+
+Checked against the live remote, not assumed. While this gate was running, main
+advanced to `728a57c` (W1 certified it 08:13Z) and carries `09127b1`, "Share one
+catalog-driven wipe", which moved every file's wipe into a **new**
+`backend/tests/helpers/wipe.js` across 36 test files. Neither `49e1791` nor
+therefore `3754f64` contains it — both have only `helpers/inventory.js` — so this
+gate measured the pre-`09127b1` world. Three consequences, all verified:
+
+1. **The import still resolves.** `728a57c:backend/tests/helpers/inventory.js`
+   line 17 is `export { wipeAll } from './wipe.js';` — a re-export. The
+   `await import('./helpers/inventory.js')` in `captainWorkflow.test.js` keeps
+   working on main unchanged. Nothing to fix at merge time.
+2. **The idiomatic form on main is `./helpers/wipe.js` directly.** Purely
+   cosmetic, a one-line change, and W1 may prefer to normalise it while merging.
+   It is not required for correctness and was deliberately not pre-emptively
+   changed here, because doing so would have made the tested tree differ from the
+   gated SHA.
+3. **The fix and `09127b1` reached the same conclusion independently**, which is
+   the useful part. `09127b1`'s own header records three separate incidents from
+   per-file hand-written wipe lists — `integrations.test.js`'s RESTRICT FKs
+   failing 17 of 23 files, `printJobs.test.js` after the sequencer moved it, and
+   `KitchenItem`/`OrderItemModifier`/`PromotionRedemption` aborting the OrderItem
+   delete inside the *inventory* suites — and concludes that "a per-file list
+   encodes two things a lane cannot keep true: which tables exist, and which
+   order they must go in." §7 defect 5 is a fourth instance of exactly that, found
+   independently in this lane on the same day. Two lanes converging on one
+   diagnosis from different symptoms is the strongest evidence available that the
+   hand-written list was the defect and not the trigger.
+
+One measured note for whoever reads the timings: main's `wipeAll` is DELETE with
+referential integrity disabled for one transaction, **not** TRUNCATE, because
+TRUNCATE cost 2274ms median and 11.9s at worst over ~150 calls a run and timed out
+`inventoryScheduler`'s 30s `beforeEach`. Main measures 2274ms → 6ms median and the
+five inventory files 681.80s → 193.41s. This gate ran the older TRUNCATE version,
+so `captainWorkflow.test.js`'s time here is a **ceiling** — it should get faster on
+main, not slower.
+
+### What Window 1 has to decide, not verify
+
+1. **§5 — the role delta.** Honouring the action model honours it for every role
+   holding the action, so `COMPANY_ADMIN` and `REGIONAL_MANAGER` also gain the
+   till, and `DELIVERY`/`AUDITOR` gain read-only `table.read`. Measured, listed
+   in §5. If that is not wanted, the narrow reversal is `DEFAULT_OFF` entries for
+   the two manager roles, which leaves the CAPTAIN fix intact.
+2. **§2 — `order.item.void`.** Declared, in CASHIER's and CAPTAIN's baselines,
+   enforced by no route. Wiring it up would switch the authority on for every
+   existing cashier in every tenant, silently, on upgrade. The recommendation is
+   to remove it from those baselines rather than wire it. Not a refactor's call.
+
+### Known, in scope, and deliberately not changed
+
+- A CAPTAIN with no store assignment and no `branchId` now gets **404** rather
+  than 403 and still cannot work. Not a regression — before the fix they got 403
+  everywhere — but the remedy is to assign the captain a store, and support
+  should be told that, because a 404 does not say so.
+- `kitchen.js` still gates on `requireRole('CUSTOMER_OWNER','BRANCH_MANAGER',
+  'CASHIER')`. Out of W3's scope and left alone on purpose: a captain does not
+  need the kitchen display to work the floor, and widening it is a separate
+  decision with its own blast radius.
+- A table with no `DiningVisit` reads FREE the instant it is paid (§6, "known
+  gap"). Staff-rung orders never get a `visitId`; only `acceptSubmission()` sets
+  one. Fixing it means writing `visitId` on the staff path, which changes what
+  PAID means for every till, not just a captain's.
+
+### Blockers
+
+None in software. No hardware blocker either: nothing in W3 touches a printer,
+a drawer or a terminal. The two open items above are **policy** decisions, not
+work.
+
+### Not claimed
+
+This is the Captain and table-service workstream only. Nothing here says the POS
+release is complete, and nothing here was deployed anywhere.
