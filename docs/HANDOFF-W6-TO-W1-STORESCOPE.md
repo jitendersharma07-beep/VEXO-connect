@@ -4,7 +4,7 @@
 **`x/identity-coverage`**, based on **`728a57c`** (= `github/main` at the time of
 writing, verified by `git ls-remote`).
 
-Three files, nothing else:
+That commit is three files, nothing else:
 
 | File | Lines | Kind |
 |---|---|---|
@@ -12,7 +12,13 @@ Three files, nothing else:
 | `backend/tests/orgIdentity.test.js` | +1117 | new, 59 tests |
 | `backend/tests/storeScopeResolution.test.js` | +352 | new, 16 tests |
 
-The branch is **committed but NOT pushed** — `git push` to a shared remote is
+The **branch** carries one further commit, **`6bc5a2c`** — this file and the two
+other handoffs, docs only, no code. It is deliberately separate so the certified
+change stays exactly the three reviewed files: cherry-pick `f672c56` alone if you
+want the fix without the paperwork, or take both if you want the analysis in the
+tree. Nothing in `6bc5a2c` is required for the fix to work or to be tested.
+
+Both commits are **committed but NOT pushed** — `git push` to a shared remote is
 denied on this box. Exact command to run, unchanged, from any checkout of the
 lane:
 
