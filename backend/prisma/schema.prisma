@@ -308,6 +308,12 @@ model PosUser {
   discountPolicies  DiscountPolicy[] @relation("DiscountPolicySubject")
   discountsApproved Order[]          @relation("OrderDiscountApprovedBy")
 
+  // LANE tables — bills this user is credited with serving, and the ones whose
+  // attribution this user set. Two relations because they answer two different
+  // questions: "what did she sell?" and "who decided that?".
+  ordersServed      Order[]          @relation("OrderWaiter")
+  waiterAttributions Order[]         @relation("OrderWaiterSetBy")
+
   // LANE inventory
   inventoryLocationAccess InventoryLocationAccess[]
 
@@ -541,6 +547,27 @@ enum OrderStatus {
   PAID
   VOID
   REFUNDED
+  // LANE tables. The terminal state of a bill merged into another one: its lines
+  // have moved, its total is 0, and the row is kept rather than deleted so the
+  // BILL_MERGE audit row still resolves to a real order.
+  //
+  // WHY NOT VOID, which already exists. lib/reporting/metrics.js:244 counts
+  // status === 'VOID' into voidedOrders, so every merge would read as a
+  // cancelled sale and corrupt the void rate an owner uses to spot till fraud.
+  // A merge is the opposite of a cancellation: the money did not go away, it
+  // moved onto the other cheque.
+  //
+  // WHY A NEW VALUE IS CHEAP HERE — which is what makes this the right answer
+  // and not merely the tidy one. Every Order-status filter in src/ is an
+  // ALLOWLIST, so MERGED is excluded from each of them without one being edited:
+  // SALES_STATUSES ['BILLED','PAID','REFUNDED'] keeps it out of netSales,
+  // invoiced, tax, discounts and the AOV denominator; OPEN_STATUSES
+  // ['OPEN','BILLED'] keeps it off the floor and frees the table; the dues query
+  // asks for BILLED alone. The status GUARDS run the other way — `!== 'OPEN'`,
+  // `!== 'BILLED'` — so a merged bill refuses new lines, payments, billing,
+  // splitting and transferring by default. In statusCounts it lands in neither
+  // the VOID bucket nor the OPEN one, so no number an owner reads today moves.
+  MERGED
 }
 
 enum OrderItemStatus {
@@ -910,6 +937,37 @@ model Order {
   // repeated callback creating a second bill.
   externalOrderId String?
 
+  // ---- LANE tables --------------------------------------------------------
+  // Covers seated against this bill — what the party actually numbered, never
+  // the table's capacity. Null means nobody has said yet, and null is NOT zero:
+  // sales-per-cover divides by this, so a 0 default would either divide by zero
+  // or quietly report that a table of four ate for nothing. The CHECK in the
+  // migration refuses 0 and negatives for that reason.
+  //
+  // Held on the order and not on DiningVisit because a visit exists only for a
+  // party that scanned a card, while covers have to be recordable for the dine-in
+  // order a captain opens at the till — which is most of them.
+  pax             Int?
+  // Who is serving the table, and therefore who the sale is credited to.
+  // Deliberately not openedById: openedBy is the immutable fact of who created
+  // the row — a cashier, or on a QR order whoever accepted the first submission —
+  // while the server changes at a shift handover and has to be reassignable
+  // without rewriting that history.
+  //
+  // Composite FK on (waiterId, companyId): the tenant is the one already on this
+  // order, so a user from another company cannot be credited even by a route that
+  // forgot to scope. Store membership is the narrower rule and is checked in the
+  // route instead, because an owner working the floor of a single outlet carries
+  // no branchId at all and must still be creditable.
+  waiterId        String?
+  waiter          PosUser?  @relation("OrderWaiter", fields: [waiterId, companyId], references: [id, companyId], onDelete: Restrict)
+  // When, and by whom, the attribution was last set. Kept on the row rather than
+  // left to the audit trail because a shift report reads it per bill, and joining
+  // every bill to the audit log to discover its server would be absurd.
+  waiterSetAt     DateTime?
+  waiterSetById   String?
+  waiterSetBy     PosUser?  @relation("OrderWaiterSetBy", fields: [waiterSetById], references: [id], onDelete: Restrict)
+
   items       OrderItem[]
   kots        Kot[]
   payments    Payment[]
@@ -940,6 +998,11 @@ model Order {
   @@index([qrCodeId])
   // LANE providers — the Orders screen filters by where the order came from.
   @@index([companyId, channel, billedAt])
+  // LANE tables — a waiter's shift report is "this server, this store, this
+  // day", and the same index answers the Restrict check when a leaver's account
+  // is deleted without scanning every bill the company has ever issued.
+  @@index([companyId, waiterId, billedAt])
+  @@index([waiterSetById])
 }
 
 model OrderItem {

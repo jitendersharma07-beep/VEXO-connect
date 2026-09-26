@@ -1,0 +1,33 @@
+-- LANE tables — one OrderStatus member, and nothing that reads it.
+--
+-- Postgres refuses to read a value added by ALTER TYPE ... ADD VALUE inside the
+-- transaction that added it, so a migration that both adds a member and names it
+-- in a CHECK or an UPDATE cannot exist. This file therefore adds the member
+-- alone; the same split the payments lane had to make for PaymentChannel
+-- 'TERMINAL' (20260924900000_payments_enum_values).
+--
+-- MERGED is the terminal state of a bill that was merged into another one: its
+-- lines have moved, its total is 0, and the row is kept rather than deleted so
+-- the BILL_MERGE audit row still resolves to a real order.
+--
+-- WHY NOT VOID, which already exists. lib/reporting/metrics.js:244 counts
+-- status = 'VOID' into voidedOrders, so every merge would read as a cancelled
+-- sale and corrupt the void rate an owner uses to spot till fraud. A merge is
+-- the opposite of a cancellation: the money did not go away, it moved onto the
+-- other cheque.
+--
+-- WHY THIS COSTS NOTHING TO ADD. Every Order-status filter in src/ is an
+-- ALLOWLIST, so MERGED is outside all of them without one being edited:
+-- SALES_STATUSES ('BILLED','PAID','REFUNDED') keeps it out of netSales,
+-- invoiced, tax, discounts and the AOV denominator; OPEN_STATUSES
+-- ('OPEN','BILLED') keeps it off the floor and frees the table; the dues query
+-- asks for BILLED alone. The status guards run the other way — <> 'OPEN',
+-- <> 'BILLED' — so a merged bill refuses new lines, payments, billing,
+-- splitting and transferring by default. In statusCounts it lands in neither
+-- the VOID bucket nor the OPEN one, so no figure an owner reads today moves.
+--
+-- Nothing is backfilled and no existing row is touched: every order that exists
+-- today keeps the status it has, because none of them was ever merged.
+
+-- AlterEnum
+ALTER TYPE "OrderStatus" ADD VALUE 'MERGED';

@@ -85,12 +85,35 @@ export const ACTIONS = Object.freeze([
   A('table.read', 'Catalog', 'View tables', 'STORE'),
   A('table.write', 'Catalog', 'Edit tables', 'STORE'),
 
+  // ==== LANE tables ====
+  // Working the floor, as distinct from designing it. table.write is the layout
+  // — how many tables there are and what they are called — and belongs to a
+  // manager. These two are what happens during service and belong to whoever is
+  // standing on the floor, which is why a CAPTAIN has them and does not have
+  // table.write.
+  //
+  // Split three ways rather than one 'table.service' covering everything,
+  // because the three carry different consequences. Recording covers or naming
+  // the server changes no money at all. Moving a party to another table moves
+  // an open bill, and therefore what prints. Splitting a bill divides money
+  // between two bills, which is the one a business may well want to keep away
+  // from the person taking the order — so it is separately switchable, and off
+  // in the CAPTAIN baseline.
+  A('table.service', 'Catalog', 'Record covers and the serving staff member', 'STORE'),
+  A('table.transfer', 'Catalog', 'Move or merge a party between tables', 'STORE'),
+
   // Selling
   A('order.read', 'Selling', 'View orders', 'STORE'),
   A('order.create', 'Selling', 'Open an order', 'STORE'),
   A('order.item.void', 'Selling', 'Void a line', 'STORE'),
   A('order.void', 'Selling', 'Void an order', 'STORE'),
   A('order.bill', 'Selling', 'Issue a bill', 'STORE'),
+  // LANE tables. Separate from order.bill because issuing one bill for the
+  // table and dividing it into several are different decisions: the split
+  // decides who owes what, and a party disputing its share disputes this action
+  // rather than the prices. Kept in Selling, not with the two floor keys above,
+  // because what it moves is money.
+  A('bill.split', 'Selling', 'Split a bill into separate cheques', 'STORE'),
   A('kot.read', 'Selling', 'View kitchen tickets', 'STORE'),
   A('payment.record', 'Selling', 'Record a payment', 'STORE'),
   A('refund.issue', 'Selling', 'Issue a refund', 'STORE'),
@@ -233,7 +256,14 @@ const ALL = ACTION_KEYS.filter((k) => actionMeta(k).scope !== 'PLATFORM');
 // otherwise is one the store works around by wedging the drawer open. What a
 // cashier does NOT get is drawer.open.manual — opening the till with no sale
 // behind it is the movement worth authorising separately.
-const SELL = ['order.read', 'order.create', 'order.bill', 'kot.read', 'payment.record', 'drawer.open', 'table.read', 'catalog.read', 'promo.apply', 'loyalty.lookup', 'loyalty.redeem'];
+const SELL = ['order.read', 'order.create', 'order.bill', 'kot.read', 'payment.record', 'drawer.open', 'table.read', 'catalog.read', 'promo.apply', 'loyalty.lookup', 'loyalty.redeem',
+  // LANE tables. A cashier gets all three floor actions, including bill.split:
+  // "can we pay separately?" is asked at the till, of the person holding the
+  // card machine, and a cashier who cannot answer it sends the customer to find
+  // a manager for something that is simply how the party is paying. Splitting
+  // divides a total between bills and cannot reduce it — unlike order.void and
+  // refund.issue, which a cashier still does not get.
+  'table.service', 'table.transfer', 'bill.split'];
 // LANE providers added the two loyalty keys: a bill is where points are both
 // earned and spent, so they belong to whoever can take a bill.
 
@@ -281,6 +311,8 @@ const ROLE_ACTIONS = Object.freeze({
   REGIONAL_MANAGER: Object.freeze([
     'org.store.read', 'org.brand.read', 'org.region.read', 'org.gst.read', 'org.legalEntity.read',
     'catalog.read', 'table.read', 'table.write',
+    // LANE tables — the floor actions, over the stores the region holds.
+    'table.service', 'table.transfer', 'bill.split',
     'order.read', 'order.create', 'order.bill', 'order.void', 'order.item.void', 'kot.read',
     'payment.record', 'refund.issue', 'dayclose.read', 'dayclose.perform',
     'report.sales.read', 'report.tax.read', 'promo.read', 'promo.apply',
@@ -300,6 +332,8 @@ const ROLE_ACTIONS = Object.freeze({
   BRANCH_MANAGER: Object.freeze([
     'org.store.read', 'org.brand.read', 'org.gst.read',
     'catalog.read', 'table.read', 'table.write',
+    // LANE tables — the floor actions, over the store they run.
+    'table.service', 'table.transfer', 'bill.split',
     'order.read', 'order.create', 'order.bill', 'order.void', 'order.item.void', 'kot.read',
     'payment.record', 'refund.issue', 'dayclose.read', 'dayclose.perform',
     'report.sales.read', 'promo.read', 'promo.apply',
@@ -320,7 +354,17 @@ const ROLE_ACTIONS = Object.freeze({
 
   // Takes orders, sends them to the kitchen, hands the bill to someone who can
   // collect. No payment action.
-  CAPTAIN: Object.freeze(['order.read', 'order.create', 'order.item.void', 'kot.read', 'table.read', 'catalog.read']),
+  //
+  // LANE tables gives a captain table.service and table.transfer and withholds
+  // bill.split. Covers and the server are the captain's own observations —
+  // nobody else is standing at the table to count four people — and moving a
+  // party from table 6 to table 9 is the job. Dividing what they owe is the
+  // "restricted financial action" the spec keeps out of this role at line 567;
+  // the captain calls a cashier for it, as they already do to take the money.
+  CAPTAIN: Object.freeze([
+    'order.read', 'order.create', 'order.item.void', 'kot.read', 'table.read', 'catalog.read',
+    'table.service', 'table.transfer',
+  ]),
 
   KITCHEN: Object.freeze(['kot.read', 'order.read', 'catalog.read']),
 

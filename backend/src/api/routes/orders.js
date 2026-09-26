@@ -23,7 +23,7 @@ import {
   terminalUnavailable,
 } from '../../lib/errors.js';
 import { env } from '../../config/env.js';
-import { audit } from '../../lib/audit.js';
+import { audit, auditRequired } from '../../lib/audit.js';
 import {
   requirePosAuth,
   resolveCompanyScope,
@@ -43,6 +43,9 @@ import { guardDiscountChange } from '../../lib/discountGuard.js';
 import { combinedPctMilli, exposureOf, limitForAudit } from '../../lib/discountPolicy.js';
 import { nextInvoiceNumber, sellerOfRecord, billingSnapshot } from '../../lib/invoice.js';
 import { routeKotItems } from '../../lib/kitchen.js';
+// ==== LANE tables ====
+import { splitBill } from '../../lib/tables/splitBill.js';
+// ==== END LANE tables ====
 // ==== LANE inventory ====
 import { consumeForOrder } from '../../lib/inventory/consumption.js';
 // ==== END LANE inventory ====
@@ -1210,6 +1213,92 @@ router.delete(
       meta: { promotionId: reversed.promotionId, name: reversed.promotionName, branchId: order.branchId },
     });
     res.json({ order: await fullOrder(order.id) });
+  }),
+);
+
+// --- split bill (LANE tables) ------------------------------------------------
+// Spec §B "Tables (Pro): ... split bill". Placed before billing on purpose: a
+// cheque is divided while it is still OPEN, and each half then takes its own
+// invoice number through the route below.
+//
+// The gate is requireRole + requireAction and NOT requireAction alone, which is
+// the one thing about it worth arguing over. ROLE_ACTIONS hands POS_SUPER_ADMIN
+// every action key (permissions.js:274) and `bill.split` is not in
+// SUPPORT_GRANT_REQUIRED, so an action-only gate — the shape `promoGate` above
+// uses — would let a VEXO operator divide a tenant's bill. That contradicts this
+// file's own header contract ("ATC operators are read-only here"), so the
+// explicit role list is what enforces it. CAPTAIN is listed even though
+// ROLE_ACTIONS withholds `bill.split` from them: the role list is the ATC
+// exclusion, and requireAction remains the real authority, so an owner who
+// grants the action through customPermissions gets a captain who can split
+// without this file changing.
+//
+// All money decisions live in lib/tables/splitBill.js, and all money EVALUATION
+// stays in recomputeOrder(). This route resolves scope, opens one transaction,
+// and records who did it.
+const canSplit = [
+  requireRole(
+    'CUSTOMER_OWNER',
+    'COMPANY_ADMIN',
+    'REGIONAL_MANAGER',
+    'BRANCH_MANAGER',
+    'CASHIER',
+    'CAPTAIN',
+  ),
+  requireUsableLicense,
+  loadPermissionContext,
+  requireAction('bill.split'),
+];
+
+router.post(
+  '/:id/split',
+  ...canSplit,
+  asyncHandler(async (req, res) => {
+    // No .min(1) on the array: an empty selection is allowed through to
+    // assertSplittable so the caller gets "Choose the lines to move to the new
+    // cheque" — a sentence a floor screen can show — instead of a zod shape error.
+    const body = z.object({ itemIds: z.array(z.string().min(1)) }).parse(req.body);
+    const order = await loadOrder(req);
+    await resolveStoreInScope(req, order.branchId);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const out = await splitBill(tx, {
+        orderId: order.id,
+        itemIds: body.itemIds,
+        actorId: req.user.id,
+      });
+      // auditRequired, not audit: a bill divided with no record of who divided it
+      // is precisely the dispute this row exists to settle, so the row and the
+      // split commit together or neither does. audit() swallows its own failures,
+      // which is right for a read but wrong for money moving between cheques.
+      await auditRequired(tx, req, {
+        action: 'BILL_SPLIT',
+        entity: 'Order',
+        entityId: out.originalId,
+        companyId: order.companyId,
+        meta: {
+          chequeId: out.chequeId,
+          movedItemIds: out.movedItemIds,
+          kitchenItemsRepointed: out.kitchenItemsRepointed,
+          branchId: order.branchId,
+          totalBeforePaise: out.totalBefore,
+        },
+      });
+      return out;
+    });
+
+    // Both sides come back fully recalculated, matching this file's contract that
+    // every mutation answers with the order as it now stands. The caller needs
+    // both because the till has to print or hold two cheques.
+    res.json({
+      split: {
+        chequeId: result.chequeId,
+        movedItemIds: result.movedItemIds,
+        kitchenItemsRepointed: result.kitchenItemsRepointed,
+      },
+      order: await fullOrder(result.originalId),
+      cheque: await fullOrder(result.chequeId),
+    });
   }),
 );
 
@@ -3078,7 +3167,14 @@ router.post(
 
 // --- reads ------------------------------------------------------------------
 
-const STATUSES = ['OPEN', 'BILLED', 'PAID', 'VOID', 'REFUNDED'];
+// The statuses `GET /orders?status=` will accept. This gates the query string
+// only — it is not a policy list, and nothing is written from it, so a value
+// missing here does not hide those orders from the unfiltered listing, it just
+// makes them impossible to ask for on their own. MERGED is included for that
+// reason: a merged-away cheque is exactly the row somebody reconciling a
+// BILL_MERGE audit entry needs to pull up, and `?status=MERGED` answering
+// "Unknown status MERGED" would send them to the database instead.
+const STATUSES = ['OPEN', 'BILLED', 'PAID', 'VOID', 'REFUNDED', 'MERGED'];
 
 router.get(
   '/',
