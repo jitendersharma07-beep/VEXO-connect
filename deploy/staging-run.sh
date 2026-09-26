@@ -94,9 +94,14 @@ load_env() {
   export PORT="$API_PORT"
   export HOST=127.0.0.1
   # Both of these come from deploy/staging-local.env.sh, which explains why the
-  # edge origin has to appear in each of them. They are NOT overridable from the
-  # environment on purpose: getting CORS_ORIGIN wrong produces a 500 that only a
-  # browser can see, so there is no safe way to let a caller's shell win.
+  # edge origin has to appear in each of them. They default to the loopback edge
+  # and a caller MAY override them — publishing this stack on a real hostname is
+  # impossible otherwise. What makes that safe is staging-assert.sh rather than
+  # the value being unassignable: it refuses a CORS allow-list that has dropped
+  # the edge origin, which is the mistake that produces a 500 only a browser can
+  # see. An earlier version of this comment claimed they were not overridable;
+  # they were not, and the result was that COOKIE_SECURE alone took effect and
+  # the published stack set a Secure cookie for a 127.0.0.1 APP_URL.
   export APP_URL="$VCX_STAGING_APP_URL"
   export CORS_ORIGIN="$VCX_STAGING_CORS_ORIGIN"
   export LOG_LEVEL="${LOG_LEVEL:-info}"

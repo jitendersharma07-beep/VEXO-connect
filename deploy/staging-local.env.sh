@@ -54,7 +54,15 @@ VCX_STAGING_BASE_PATH="/"
 # --- backend origins --------------------------------------------------------
 # APP_URL is the origin users are sent to (password-reset links and the like),
 # so it is the edge, never the bare vite preview.
-VCX_STAGING_APP_URL="http://127.0.0.1:${VCX_STAGING_EDGE_PORT}"
+#
+# Defaulted rather than assigned, so a caller publishing this stack behind a real
+# hostname can export the public origin and have it survive. It could not before:
+# this line overwrote the caller unconditionally and staging-run.sh then exported
+# the overwritten value, so `VCX_STAGING_APP_URL=https://… vcxcr up` went on
+# minting password-reset links to 127.0.0.1 — while COOKIE_SECURE, which does
+# pass through, turned the cookie Secure. Half the change landing is worse than
+# none of it landing, because the stack looks configured.
+VCX_STAGING_APP_URL="${VCX_STAGING_APP_URL:-http://127.0.0.1:${VCX_STAGING_EDGE_PORT}}"
 
 # CORS_ORIGIN is a comma-separated allow-list; backend/src/app.js splits it on
 # "," and compares the request Origin against the result.
@@ -67,7 +75,14 @@ VCX_STAGING_APP_URL="http://127.0.0.1:${VCX_STAGING_EDGE_PORT}"
 # through. Command-line sign-in evidence cannot detect this; only a browser can.
 #
 # :5640 stays listed so the bare `vite preview` workflow keeps working.
-VCX_STAGING_CORS_ORIGIN="http://127.0.0.1:${VCX_STAGING_EDGE_PORT},http://127.0.0.1:${VCX_STAGING_WEB_PORT}"
+#
+# Also defaulted, for the same reason as APP_URL — a public hostname has to be
+# able to add itself to the allow-list, or every browser POST from it is refused.
+# What keeps that safe is NOT this line being unassignable: it is
+# staging-assert.sh, which fails the run unless the loopback edge origin is still
+# present. So a caller may ADD origins and may not silently drop the one whose
+# absence produces the browser-only 500 described above.
+VCX_STAGING_CORS_ORIGIN="${VCX_STAGING_CORS_ORIGIN:-http://127.0.0.1:${VCX_STAGING_EDGE_PORT},http://127.0.0.1:${VCX_STAGING_WEB_PORT}}"
 
 export VCX_STAGING_API_PORT VCX_STAGING_WEB_PORT VCX_STAGING_EDGE_PORT
 export VCX_STAGING_EDGE_NAME VCX_STAGING_EDGE_IMAGE

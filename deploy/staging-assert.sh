@@ -136,9 +136,18 @@ case "$VCX_STAGING_CORS_ORIGIN" in
   *)
     bad "CORS allow-list is missing the edge origin — browser login will 500" ;;
 esac
-[ "$VCX_STAGING_APP_URL" = "$EDGE" ] \
-  && ok "APP_URL is the edge origin" \
-  || bad "APP_URL is $VCX_STAGING_APP_URL, expected $EDGE"
+# Either the loopback edge (the default, private stack) or an https:// origin (a
+# published hostname sitting in front of that same edge). Pinning it to $EDGE
+# alone meant that the moment APP_URL was pointed at a real hostname this assert
+# failed — and staging-run.sh hard-gates `build` on this script, so following the
+# publish procedure broke every subsequent build. Plain http:// on a public name
+# stays refused: COOKIE_SECURE is true by then and the cookie would never come
+# back.
+case "$VCX_STAGING_APP_URL" in
+  "$EDGE")   ok "APP_URL is the edge origin" ;;
+  https://*) ok "APP_URL is a published https origin ($VCX_STAGING_APP_URL)" ;;
+  *)         bad "APP_URL is $VCX_STAGING_APP_URL, expected $EDGE or an https:// origin" ;;
+esac
 
 if [ "${1:-}" = "--live" ]; then
   echo "staging-assert: running stack"

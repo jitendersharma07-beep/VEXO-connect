@@ -54,14 +54,37 @@ lane or worktree was modified.
 | Email delivery + password reset | **BLOCKED** — ⚠ **superseded, see [After the merge](#after-the-merge--email-recovery-now-works)**: now **PASS** for the software, **BLOCKED** only for real-provider delivery | `1c7e8e6`; superseded by `98c11a2` | `evidence/04-*` | The capability is absent from this build (0 occurrences in the shipped bundle). A complete implementation sits on unmerged lane `x/accounts`. Merge decision is the owner's; then verify with authorized inbox access. |
 | Tenant / store isolation | **PASS** — 58/58 probes, all **authenticated** and all pre-merge — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 5**: the merged *unauthenticated* recovery paths were not covered by these, and are now covered separately | `1c7e8e6`; extended at `bcfa6ed` | `evidence/05-*`; `backend/tests/authTenantIsolation.test.js` | Inventory scope untestable here because inventory is not in this build. |
 | Billing / payment / inventory / reporting | **PASS for what this build implements** — re-checked at `bcfa6ed`, still accurate | `1c7e8e6` | `evidence/06-*` | Three sub-checks are **NOT IN THIS BUILD** (recipe/modifier consumption, stock quantity/unit handling, restocking policy) — they live on unmerged lane `x/inventory`, confirmed **not an ancestor** of the candidate. Re-run after merge; see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 4. |
-| Encrypted backup restore | **PASS** for schedule + restore (16/16); **BLOCKED** for decryption — ⚠ **superseded, see [Reconciliation](#reconciliation--2026-09-25t0240z-at-bcfa6ed) item 6**: the rehearsal round-trip is not evidence about the owner's actual archive, and closing decryption does not close recoverability | archive `pos-prod-20260923T211456Z` | `evidence/07-*` | One owner-run command closes the decryption half. Destination-side deletion protection is **NOT VERIFIED**. Key custody (CR-3) is the larger issue. |
+| Encrypted backup restore | **PASS** for the full chain — ⚠ **twice superseded, see [Reconciliation](#reconciliation--2026-09-26t0700z) 2026-09-26**: decryption was closed by the owner's run on 09-25, and archive→decrypt→`pg_restore`→reconcile was closed 09-26 at **22/22** against real production bytes, with a deliberately-broken control run to prove the assertions can fail | archive `pos-prod-20260924T211406Z`, inner dump `45cc0768…` | `evidence/07-*`, `evidence/runs/*.log` | The mechanism is proven; the **production key has never been used in a restore** (the 22/22 run used a throwaway recipient) — one owner command closes it. Destination-side deletion protection still **NOT VERIFIED**. **Key custody (CR-3) is untouched and remains the largest item.** |
 | Physical printer acceptance | **PARTIAL** — hardware/driver **VERIFIED**, VEXO output on paper **NOT TESTED** | owner photographs, 2026-09-25 | `docs/PRINTER-UAT-RUNBOOK.md` Record A | DC RP30 self-test and a Windows print via `POS-80C` on `USB001` are photographed, so the unit and the spooler→driver→USB chain are proven. **No photograph shows a VEXO document**, so receipt/KOT/reprint on paper stay NOT TESTED and Record B is PENDING in full. Never claim from emulation, and never let Record A stand in for Record B. Owner-attested — the images are not filed in this evidence set. |
 
 Evidence directory: `/home/atc-noc/vcx-cloudready-local/evidence/` on `atc-noc`.
-It is kept **outside this repository on purpose** — it records host addresses,
-a backup destination, a key fingerprint and staging account names, and this
-repository is public. No password, code, token or SMTP credential appears in
-either place.
+It is kept **outside this repository on purpose**, because this repository is
+public: `private: false`, re-confirmed 2026-09-26 by an unauthenticated API call
+that returned 200. No password, recovery code, token, SMTP credential or private
+key appears in either place — that holds, and it is the part that matters.
+
+> **Corrected 2026-09-26. The sentence above used to claim this repository
+> excludes "host addresses, a backup destination, a key fingerprint and staging
+> account names". Two of those four are in it.** Measured, not assumed:
+> the backup key's fingerprint appears in **6 published Markdown files**, and
+> the production IP appears 3 times in this file alone. Only the off-host
+> destination address is genuinely absent (0 occurrences).
+>
+> Severity, stated at its real strength rather than alarmingly: a GPG
+> **public-key fingerprint is not a secret** — fingerprints exist to be
+> published, and knowing one buys an attacker nothing without the passphrase and
+> the secret half. The production IP is DNS-discoverable. So this is a **policy
+> statement that was false, not a credential leak**, and the remediation is to
+> correct the sentence, which is what has been done.
+>
+> The disclosure actually worth weighing is not a literal at all: **CR-3 and
+> CR-4 are described in full in this public file.** Together they state that the
+> only copy of the backup key sits on the same host as the dumps, and that
+> whatever can SSH as the operator can delete the off-host copies. Individually
+> each is a fair finding to document; published together they are a short guide
+> to making this deployment unrecoverable. Rewriting public history is an owner
+> decision and is *not* proposed here — the content is already cloneable, so the
+> effective remedy is to **close CR-3 and CR-4**, not to unpublish them.
 
 ## What each result rests on
 
@@ -1248,3 +1271,119 @@ narrows blocker 2 to a single missing credential without closing it.
 
 Nothing in this section is evidence that the product is complete. A backend test
 count cannot establish that, and this section adds no test count at all.
+
+## Reconciliation — 2026-09-26T07:00Z
+
+Fifth pass. Two rows move, one policy statement was false and is corrected, and
+one blocker is closed by software that is written and tested but **not deployed**.
+
+### 1. The encrypted-archive restore chain is closed — 22/22
+
+Row 7 read "restore of the dump that came out of an encrypted archive: NOT
+VERIFIED" for good reason: the 16/16 drill used a *plaintext* dump from 09-23,
+while the owner's decryption run opened the *09-24* archive. Two disjoint halves,
+never joined.
+
+They are joined now. `restore_from_archive.py` runs ciphertext → `gpg --decrypt`
+→ `tar` → `pg_restore --exit-on-error` → row-level reconciliation against the
+manifest **read from inside the archive**, and returned **22/22 PASS** on the
+real 09-24 production bytes. All 23 models at their recorded counts, payment
+total `4467.52`, 12 migrations with 0 half-applied, 16 staff hashes usable, 42
+foreign keys, 76 indexes, 0 orphaned payments.
+
+Three of the 22 are negative assertions, and they are why the other 19 mean
+something: a tampered archive must fail to decrypt, a truncated dump must fail
+the restore, and the database left by that failure must not look complete.
+
+**The assertions were then proved falsifiable.** The same archive re-sealed with
+the *wrong night's* manifest failed on exactly the three rows that should notice —
+size, sha256, and per-model reconciliation — and exited 1. Decryption and
+`pg_restore` still passed in that run, because the dump was fine and only its
+paperwork was wrong, which is precisely the failure this suite exists to catch.
+
+Logs, verbatim, in `evidence/runs/`.
+
+**What is still open in this row:** the 22/22 run used a **throwaway recipient
+key**, not the production backup key. The production key is proven to *decrypt*
+(owner run, 09-25) and has never participated in a *restore*. One owner command,
+`owner-verify-backup-restore.sh`, closes that; it restores into a freshly-named
+throwaway database and asserts the same 22 rows.
+
+It does **not** drop that database afterwards, deliberately — "the script cannot
+destroy a database by being wrong about a name". The consequence is stated in
+`evidence/07` and repeated here because it is easy to miss: the `mktemp` cleanup
+protects the decrypted *dump file*, not the *restored rows*. Each run leaves a
+full copy of production, staff password hashes included, in a scratch database
+until somebody drops it. "No decrypted dump left on disk" is true and narrow.
+
+### 2. A model count in the last reconciliation was wrong
+
+The 09-25 correction table distinguished the two dumps as reconciling "23" and
+"24" models. **Every manifest, on all three nights, carries 23** — verified by
+counting `rows` in each. The two dumps are genuinely different artifacts on the
+evidence in every other row (different day, different sha256, 857 bytes apart),
+so the conclusion held, but a table-count difference that does not exist was
+cited to support it. Corrected in `evidence/07` and `evidence/07b`.
+
+Recorded because the same wrong pair of numbers was copied into at least one
+in-tree note, and anyone reconciling from that note will reach the same error.
+
+A related non-obvious fact, since it looks alarming and is not: the 09-24 and
+09-25 dumps are **the same length with different sha256s**. `pg_dump -Fc` embeds
+a creation timestamp, so two dumps of unchanged content differ in a few header
+bytes without changing length. Equal size is not evidence of a duplicated
+artifact; unequal hash is not evidence the data moved.
+
+### 3. First-login enforcement was UI-only — now enforced server-side
+
+Reviewed as part of this pass and found to be a real hole, not a documentation
+gap. `mustChangePassword` was loaded by the auth middleware and **never checked**;
+the only gate keyed on it was a discount guard. The block was a frontend banner
+and modal rendered *over* a live `<Outlet/>`. Confirmed by bypass: a session
+minted from a temporary password could `POST /api/orders` and get 201.
+
+Fixed on lane `x/firstlogin-gate`: the check moved into the middleware that 29
+feature routers already mount, with a narrow `requirePosAuthForSetup` variant for
+the only three routes such a session may reach — read own identity, change
+password, log out. Temporary sessions get their own short TTL, and leaving the
+temporary state revokes every sibling session and re-mints the cookie, so the
+credential that arrived by WhatsApp stops working the moment it is replaced.
+
+14/14 on a dedicated suite. **Proved falsifiable**: with the gate neutered to
+`if (false && …)` the suite went 6 failed / 8 passed, including the original
+bypass. The enumeration walks the live Express router stack rather than a
+hand-list, which is how it surfaced 12 routers that are legitimately
+unauthenticated (account recovery, invitation redemption, print-agent enrolment)
+and forced each to be classified instead of assumed.
+
+**Not deployed.** Production is v1.0.1 and unchanged.
+
+### 4. Staging publish was half-wired — two in-repo defects fixed
+
+`deploy/staging-local.env.sh` assigned `APP_URL` and `CORS_ORIGIN`
+unconditionally, so a caller publishing behind a real hostname had both silently
+overwritten — while `COOKIE_SECURE`, which *does* pass through, turned the cookie
+`Secure`. Half the change landing is worse than none of it, because the stack
+looks configured: password-reset links kept pointing at `127.0.0.1` and every
+browser POST from the public origin was refused by the allow-list.
+
+Both are now `:-` defaults, and the safety property moved rather than
+disappearing — `deploy/staging-assert.sh` fails the run unless the loopback edge
+origin is still in the allow-list, so a caller may **add** origins and may not
+silently drop the one whose absence produces the browser-only 500. Plain
+`http://` on a public name stays refused.
+
+Verified in three configurations: default loopback → PASS; an `https://` public
+origin → PASS; and a control with `http://` plus the edge origin dropped → **both
+lines FAIL**. The loosened assert is not vacuous.
+
+### Verdict — one blocker closed on paper, none closed in production
+
+**Still NOT READY for owner acceptance**, and the reason is unchanged in kind:
+what remains is not code. Recovery of the archives is now proven end to end, so
+the backup row is no longer the weak one. The weak ones are custody (CR-3),
+destination protection (CR-4), real inbox delivery, and a public hostname — all
+four requiring an owner action that no amount of testing here can substitute for.
+
+Nothing in this section is evidence that the product is complete, and nothing in
+it has been deployed.
