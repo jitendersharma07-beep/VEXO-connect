@@ -204,7 +204,12 @@ async function main() {
     await page.fill('#promo-value', '5');
     await page.selectOption('select[aria-label="Rule kind"]', 'INCLUDE_PRODUCT');
     // The catalogue loads when the form opens; wait for real options.
-    await page.waitForSelector('select[aria-label="Item"] option:nth-child(2)');
+    // state:'attached' is required: waitForSelector defaults to
+    // state:'visible', and an <option> inside a collapsed <select> has no box,
+    // so the default spelling can never resolve however well the catalogue
+    // loaded. Measured against this screen with seven options in the DOM —
+    // 'visible' timed out at 4000ms, 'attached' resolved in 9ms.
+    await page.waitForSelector('select[aria-label="Item"] option:nth-child(2)', { state: 'attached' });
     await page.selectOption('select[aria-label="Item"]', { label: 'Cappuccino' });
     await page.click('button:has-text("Add rule")');
     await page.waitForSelector('text=Only this item: Cappuccino');

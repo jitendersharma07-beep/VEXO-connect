@@ -166,7 +166,14 @@ async function main() {
   // company has exactly ONE active store; with more, pick the first. Each
   // page.goto remounts the SPA, so the choice must be repeated per screen.
   const chooseStoreIfAsked = async () => {
-    await page.waitForSelector('select[aria-label="Store"] option:nth-child(2)');
+    // state:'attached'. waitForSelector defaults to 'visible', and an <option>
+    // inside a collapsed <select> has no box, so it is never visible: measured
+    // against this very picker (3 options, value=''), 'visible' times out at
+    // 4003ms and 'attached' resolves in 16ms. With the default spelling the
+    // store is never chosen, useKitchenBranch.ready stays false, not one
+    // /kitchen call is ever made, and all seven board steps fail for that one
+    // reason. walk-promotions.cjs:207 carried the identical bug.
+    await page.waitForSelector('select[aria-label="Store"] option:nth-child(2)', { state: 'attached' });
     const sel = page.locator('select[aria-label="Store"]');
     if (!(await sel.inputValue())) {
       const v = await sel.locator('option').nth(1).getAttribute('value');

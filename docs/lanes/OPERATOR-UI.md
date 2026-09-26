@@ -79,6 +79,67 @@ edited here; flagged for the owner.
 
 ## 4 · Verification status — read this before claiming VC-102/VC-103 done
 
+> **Status, 2026-09-26 — §4 below is superseded. Read this block first.**
+>
+> Everything §4 lists as "still NOT verified" has since been verified, and one
+> figure it reports as GREEN was measured against the wrong artifact. The
+> original text is left in place because its *reasoning* is still correct — the
+> controls argument, and "a build proves the module graph resolves, not a
+> workflow". Only the results moved.
+>
+> **The 2,067.13 kB build was a development-React build, not a production one.**
+> `assets/index-Bi_2dgeE.js` at 2,067.13 kB / 369.71 kB gzip is what `vite build`
+> emits when `NODE_ENV=development` leaks into its environment — which happens if
+> the runner does `set -a; source .env` before building, because the lane `.env`
+> sets `NODE_ENV=development` for the API. Vite then resolves the development
+> React entry. The module count is *identical* (1717) and the manifest looks
+> normal, so nothing in the output says it happened; the only signal is that the
+> bundle is roughly twice the size it should be. The true production artifact,
+> built with a clean environment on this tree:
+>
+> | | reported at `07fd3c0` | verified 2026-09-26 |
+> |---|---|---|
+> | file | `assets/index-Bi_2dgeE.js` | `assets/index-Bskb8Yso.js` |
+> | raw / gzip | 2,067.13 kB / 369.71 kB | **983.94 kB / 253.41 kB** |
+> | modules | 1717 | 1717 |
+> | sha256 | not recorded | `6c5b34feed6f528f013d17645c4e9b01cd21db4907af810f05facb0c792df497` |
+> | dev-React markers | not checked | **0** |
+>
+> A matching bundle filename or module count would *not* have caught this; the
+> filename is a content hash of a file nobody weighed.
+>
+> **The lane is now journey-verified.** All three gaps §4 names are closed:
+>
+> - **Cross-tenant isolation ran**, in both the API harness and a real browser.
+>   The answer is exactly `404`, asserted as `404` and not as "a refusal" — a
+>   `403` would confirm the id exists in another tenant, which is the leak.
+>   The rival-tenant station check builds a probe station of its own first, so
+>   the "sees none of tenant A's stations" assertion cannot pass vacuously
+>   against an empty table.
+> - **The journey harnesses exist and are green.** Promotions create → publish →
+>   rules → archive, and KDS station build → KOT → board → transition, each
+>   asserted against the Postgres row rather than the HTTP status.
+> - **Browser acceptance ran.** Chromium, real sessions, real API.
+>
+> Focused gate on this tree: **332 passed, 0 failed, 3 open gaps** — promo 82/0,
+> kds 156/0, authz 47/0, journeys 47/0. Kitchen fixture walk **9/9**, 15 kitchen
+> routes served, 0 console errors.
+>
+> **The 3 gaps are not passes.** They are K-1 and K-2 from §3, reported by the
+> harness as a distinct `GAP` outcome and reprinted under `OPEN GAPS`; the
+> verdict line reads `GREEN — with 3 OPEN GAP(S), not a clean pass`. They are
+> W3's policy calls and are written up for W3 in
+> [`docs/VC103-KITCHEN-AUTHZ-QUESTIONS.md`](../VC103-KITCHEN-AUTHZ-QUESTIONS.md).
+> Counting a test that reproduces a hole as evidence of a control is how the
+> hole gets certified.
+>
+> **§5's pointer to `vcxo fixtures` is stale.** That subcommand is retired; the
+> harnesses self-provision their extra roles and the rival tenant. Its two traps
+> (argon2, and `Branch.publicId`) are still real and still worth reading.
+>
+> So: **VC-102 and VC-103 are journey-verified**, with two open authorization
+> questions owned by W3 and the Sell-offers panel out of this lane's scope.
+
 **Frontend build: GREEN.** `vite build`, 1717 modules, at `07fd3c0`
 (`assets/index-Bi_2dgeE.js`, 2,067.13 kB / 369.71 kB gzip).
 
