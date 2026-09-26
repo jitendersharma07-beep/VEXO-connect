@@ -2774,9 +2774,25 @@ describe('historical loyalty import', () => {
     // NEXT run's problem: wipe() deletes them one table at a time in beforeAll,
     // and at this volume that alone exceeded the 30s hook timeout and failed a
     // suite that had nothing to do with imports. Links first — the FK to Customer
-    // is Restrict, which is also why wipe() orders them this way.
+    // is Cascade, so clearing the children up front leaves the trigger below
+    // nothing to find, which is also why wipe() orders them this way.
+    const linksStarted = Date.now();
     await prisma.loyaltyProfileLink.deleteMany({ where: { connectionId: connId, externalCustomerId: { startsWith: 'P-' } } });
+    const linkSeconds = (Date.now() - linksStarted) / 1000;
+    const customersStarted = Date.now();
     await prisma.customer.deleteMany({ where: { companyId: company.id, phone: { startsWith: '9110' } } });
+    const customerSeconds = (Date.now() - customersStarted) / 1000;
+    // Split reported separately from [import] above because the two halves fail
+    // for different reasons and the single total hid that for three runs. The
+    // customer delete fires LoyaltyProfileLink's cascade trigger once per row,
+    // and before LoyaltyProfileLink_customerId_companyId_idx existed the trigger
+    // had no index to use and seq-scanned the whole child table per parent —
+    // ~1,005s of trigger work against a 900s budget, overrunning during CLEANUP
+    // while every assertion above had already passed. If this line climbs back
+    // into the hundreds the index is gone, not the box busy: the import phase is
+    // load-insensitive (199 rows/s quiet, 205 rows/s under three-way contention),
+    // so contention shows up here and nowhere else.
+    console.log(`[cleanup] links ${linkSeconds.toFixed(1)}s, customers ${customerSeconds.toFixed(1)}s`);
   }, 900_000);
 
   it('still recognises an imported customer at the till, and reads their balance live', async () => {
