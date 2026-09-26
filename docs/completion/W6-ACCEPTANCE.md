@@ -11,20 +11,22 @@ result forward from a prior session's prose.
 ## Verdict
 
 **The agent lane is complete, passes its own suite, and has been demonstrated
-end to end against the real server. It is not an approval of the release, and
-this document does not give one.** Two release blockers are open (§6), one of
-which is not in this lane's code.
+end to end against the real server. The independent audit of the combined
+candidate is NOT complete. This is not an approval of the release, and this
+document does not give one.** Two release blockers are open (§6), one of which is
+not in this lane's code, and five areas of the audit remit are unmeasured (§7d).
 
-Two separate figures, deliberately not added together:
+Three separate figures, deliberately not added together:
 
 | | Result | What it covers |
 |---|---|---|
 | `67/67`, exit 0 (§2) | the print agent's own suite | the agent alone — no database, no network, no printer |
 | `7/7`, exit 0 (§2b) | the end-to-end seam | the shipped client and runner over real HTTP against `createApp()`, with a real TCP printer, asserting database rows and socket bytes together |
+| `153/153`, exit 0 (§7a) | **not this lane's code** | the candidate's own gateway and phone-orders suites, run because nobody had a result for them — the first measurement the money path has ever produced |
 
-Neither is a project figure. Neither may be combined with other lanes' totals or
-turned into a percentage of the whole — the agent is one component, and 74
-passing tests say nothing about the other 51 backend test files.
+None is a project figure. None may be combined with other lanes' totals or turned
+into a percentage of the whole — the agent is one component, and the third figure
+above is somebody else's code that this lane merely measured.
 
 What remains unproven is physical: **no ESC/POS byte has ever reached the
 store's printer**, so nothing here claims paper. `CONFIRMED` means the agent
@@ -218,6 +220,24 @@ from inspection alone.
 | Printer model / media / printable width confirmed | PARTIAL | see §4 |
 | Receipt, KOT, paid/refunded, reprint cases prepared | PASS | §4 |
 
+### Part 4 — independent audit of the combined candidate
+
+Audited against `d625370`. This is the part of the remit that is **not complete**,
+and the rows below say which parts are which rather than averaging them.
+
+| Requirement | Status | Evidence |
+|---|---|---|
+| Verify *those exact bytes*, not a lane's working copy | PASS | `git archive d625370` into a scratch tree, three files sha256-checked against `git show`. §7 |
+| Payments / refunds / gateway reconciliation | PASS | 153/153, exit 0 — the two suites nobody had a result for. §7a |
+| Tenant isolation | PARTIAL | the cross-tenant cases inside those two suites pass, including *"never shows one tenant the gateway traffic of another"*. Isolation outside them is unverified |
+| Fresh-migration evidence | PASS | 41 migrations applied to an empty database, twice over (§2b at 40, §7a at 41), both logged |
+| Defects returned to the responsible window | PASS | A1 and A2 in §7b/§7c, each with the command that establishes it; D4–D6 and F1–F6 in §5. No peer file was edited by this lane |
+| Admin / company / licence / user workflows | **NOT VERIFIED** | §7d |
+| Table/QR, Captain/Kiosk, customer display | **NOT VERIFIED** | §7d |
+| Licence enforcement and recovery | **NOT VERIFIED** | §7d |
+| Release images and build context | **NOT VERIFIED** | §7d |
+| Restore-from-backup evidence | **NOT VERIFIED** | §7d |
+
 ## 4. Not executed, and exactly why
 
 One item has left this section. Earlier revisions carried a **§4a** for the
@@ -386,12 +406,129 @@ them, that test fails and says so.
 | B1 | **D4** — KOT has no table name. A restaurant cannot run dine-in service on tickets that do not say which table. | print-agent server route |
 | B2 | **Printable width is unmeasured**, and the operator has already reported paper being wasted by a print that lands inset on the roll (photo `B2`). No `PrintTarget.widthChars` is verified for the pilot roll, and no browser measurement can supply one. At ~32 columns or fewer the unit is 58 mm, which is a code change rather than a setting — so this gates the roll type too. One `selftest` and one photograph closes it. | operator at the till |
 
-Not a blocker, but open and unresolved: Window 1's candidate is uncertified by its
-own record (§1).
+Not blockers of this lane's making, but open and unresolved:
 
-**This lane does not approve production.** Two blockers are open.
+- **The candidate is still uncertified**, by its own record (§1) and now by
+  measurement: the certification run in flight at the time of writing does not
+  contain the index it exists to certify, and its tree changed 36 seconds after it
+  started (§7b, A1).
+- **Five areas of Part 4 are NOT VERIFIED** — admin/licence workflows, Table/QR and
+  Captain/Kiosk, customer display, licence enforcement and recovery, release images
+  and restore evidence (§7d). They are recorded as gaps, not as passes, and this
+  lane's independent acceptance is therefore **incomplete**.
 
-## 7. Evidence
+**This lane does not approve production.** Two blockers are open, the candidate is
+uncertified, and a third of the audit remit is unmeasured.
+
+## 7. Independent audit of the integration candidate
+
+Candidate audited: **`d625370a711fba8de65f94ad99828eaab9a5bc10`**, committed
+2026-09-26 03:54:56Z, *"Index the cascade Postgres was scanning, so deleting
+customers stops being quadratic"*. Its bytes were taken with
+`git archive d625370` into a tree outside every lane, and the three files that
+matter were sha256-checked against `git show d625370:<path>` before anything ran.
+No peer working directory was read from or written to.
+
+### 7a. The 153 money-path tests, executed for the first time
+
+`docs/INTEGRATION-VERIFICATION-CF9C4A0.md` records that `gateway.test.js` (76) and
+`phoneOrders.test.js` (77) both lost their `beforeAll` to the 30 s `hookTimeout`,
+contain no authored skip, and were therefore unmeasured while the run summary
+still read `46 passed`. That is the whole Razorpay and phone-orders money path.
+They now have a result.
+
+```bash
+bash ~/vexo-connect-x-evidence/printagent/w6-audit-moneypath.sh
+```
+
+| | |
+|---|---|
+| Result | `Test Files 2 passed (2)` · `Tests 153 passed (153)` |
+| Exit code | `0` |
+| Duration | 70.49 s — `gateway` 76 in 47.6 s, `phoneOrders` 77 in 15.5 s |
+| Run at | 2026-09-26T04:27:13Z |
+| Database | `vcx_w6_audit_test`, created empty for this audit, **41** migrations applied |
+| Authored skips | `0` in either file, re-checked against the candidate's own bytes |
+| Contention | `[test-db-lock] acquired as vcx-test-lock:1` — no waiting, no reconnection |
+| Log | `~/vexo-connect-x-evidence/printagent/w6-audit-moneypath-20260926.log` |
+
+The index under audit was **asserted present, not assumed**, by querying
+`pg_indexes` between `migrate deploy` and the run:
+`LoyaltyProfileLink_customerId_companyId_idx ON public."LoyaltyProfileLink" USING btree ("customerId", "companyId")`.
+A pass against the wrong schema would have been worthless.
+
+**What this does not prove, stated because it is the whole point.** The database
+was private, so no peer could leave rows in it. The run therefore *measures the
+153 tests* — their first result — but it **cannot certify the new index**, because
+a private database removes the very pollution the index exists to survive. This
+run cannot distinguish "the index works" from "there was nothing to scan".
+Certifying the index needs `integrations.test.js` and these two files in one
+database, in that order. No such run exists yet.
+
+### 7b. A1 — the in-flight certification run does not contain the fix it is meant to certify
+
+**Owner: Window 1 and Window 5. Verified, not inferred, and time-sensitive.**
+
+| Fact | How it was established |
+|---|---|
+| Window 5's certification run began against `vcx_integration_test` and reported **`40 migrations found in prisma/migrations`** | `/tmp/w5-quiet-cert.log`, last written 2026-09-26T03:53:27Z |
+| `vcx_integration_test` has **40** applied migrations and **no** `LoyaltyProfileLink` index on `(customerId, companyId)` | `pg_indexes` and `_prisma_migrations`, queried 04:29Z — five indexes present, none of them the new one |
+| The 41st migration appeared in that same lane tree at **03:54:03Z**, 36 s after the run started, and `d625370` was committed at **03:54:56Z** | `stat` on `20260926040000_loyalty_profile_link_customer_index/migration.sql`; `git log -1 --format=%ci` |
+| That database held **53,514** `LoyaltyProfileLink` rows at 04:29Z, having been truncated to empty at 03:53Z | `SELECT count(*)`, and the `[test-db-lock] emptied 139 tables` line in their own log |
+
+Two consequences, and neither is a criticism of the analysis in that document:
+
+1. **The run cannot be cited as certifying `d625370`.** The fix is a database
+   index, and the index is not in the database. Whatever the run reports about
+   cascade-delete timing describes the *unfixed* schema.
+2. **Its bytes are not one commit.** The tree changed 36 seconds in. Vitest loads
+   test files as it reaches them, so files collected after 03:54:03Z could be read
+   from a different tree than files collected before it. A certification run has
+   to be taken from a tree nothing is still writing to — `git archive` into a
+   scratch directory costs seconds and removes the whole question.
+
+The cheapest correct next attempt: `migrate deploy` first so the 41st migration
+lands, assert the index exists, and run from an extracted tree.
+
+### 7c. A2 — every suite's `beforeAll` deletes every other suite's rows
+
+**Owner: Window 1. A design observation with a measured consequence, not a bug report.**
+
+`gateway.test.js` opens with **37** unqualified `deleteMany()` calls and
+`phoneOrders.test.js` with **40** — whole-table deletes, no `where`, one round trip
+each. Their own comments say why: *"Shared test database: another suite's
+kitchen/print rows RESTRICT the station delete inside this wipe's Branch cascade."*
+So the wipes are correct for the environment they were written for, and that
+environment is the problem: on a shared database every file's setup must delete
+every other file's data, through whatever cascades that data has accumulated.
+`d625370`'s commit message describes the result exactly — 100,000 customers
+deleted through an unindexed cascade *"left 200,000 rows behind, and then failed
+the next files when their 30 s `beforeAll` wipe inherited them."*
+
+Indexing the cascade makes the inherited delete survivable. It does not make the
+inheritance go away, and the 30 s `hookTimeout` is still spent on rows no test in
+that file created. §7a is the counterfactual: the same 153 tests, the same bytes,
+a database of their own, `vcx-test-lock:1`, 70 seconds, green. Private databases
+per lane are already in use on this box — `vcx_cert625_test`, `vcx_idxrun_test`,
+`vcx_tables_test` and others — so this is a convention that has begun spreading on
+its own, and is worth making the rule.
+
+### 7d. What this audit does not cover
+
+Recorded so the gaps are not read as passes. None of the following was verified by
+this lane, and this section will not claim them:
+
+admin/company/licence/user workflows and tenant isolation beyond the cross-tenant
+leakage cases inside the two files above · billing and stock-effect reconciliation
+outside the gateway suite · Table/QR · Captain/Kiosk · customer display · licence
+enforcement and recovery · the release images and build context · restore-from-
+backup evidence. Two peer certification runs were in flight throughout (Window 5
+on `vcx_integration_test`, another on `vcx_cert625_test`) and this lane
+deliberately did not start a third full-suite run: 21 foreign `vitest` processes
+were live at 04:22Z, and contention is the defect under investigation. Adding to
+it would have corrupted the measurement it was meant to check.
+
+## 8. Evidence
 
 Raw evidence is kept outside `/tmp`, which loses files — Window 1's record notes
 `/tmp/inv-fullsuite3.log` is gone and its 1012/1012 figure unrecoverable. Nothing
@@ -413,6 +550,10 @@ true rather than asserting it, and both DSNs in it are safe to read.
   w6-e2e-run.sh                the §2b run, start to finish, with no credential;
                                host-guarded, because it names a container
   w6-e2e-run-20260926.log      its output — 7/7, exit 0, all 40 migrations
+  w6-audit-moneypath.sh        the §7a audit: the candidate's 153 money-path tests
+                               on a database of their own, from an extracted tree
+  w6-audit-moneypath-20260926.log  its output — 153/153, exit 0, 41 migrations,
+                               and the pg_indexes line proving the schema
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
