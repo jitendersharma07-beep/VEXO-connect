@@ -2,12 +2,18 @@
 // own branch). Writes: CUSTOMER_OWNER anywhere, BRANCH_MANAGER in their own
 // branch; ATC is read-only here. DELETE retires; a table with an open or
 // billed order can neither be retired nor renamed away from under it.
+//
+// LANE tables adds POST /:id/service — covers and the table's server. That is
+// floor work rather than layout work, so it is gated separately (see canServe)
+// and resolves the table through the permission scope rather than through
+// loadTable's legacy branch pin. Both shapes are deliberate; the note on
+// loadTable says why the four original endpoints keep theirs.
 
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
-import { audit } from '../../lib/audit.js';
+import { audit, auditRequired } from '../../lib/audit.js';
 import {
   requirePosAuth,
   resolveCompanyScope,
@@ -15,18 +21,78 @@ import {
   branchIdFilterFor,
 } from '../../middleware/auth.js';
 import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
+import { loadPermissionContext, requireAction } from '../../middleware/permissions.js';
+import { branchWhereForScope } from '../../lib/permissions.js';
 import { num } from '../../lib/orders.js';
+import {
+  MAX_PAX,
+  assertServiceEditable,
+  publicService,
+  resolveWaiter,
+  serviceUpdateData,
+} from '../../lib/tables/service.js';
+import { isDestinationTaken, transferParty } from '../../lib/tables/transfer.js';
 
 const router = Router();
 router.use(requirePosAuth, resolveCompanyScope);
 
 const canWrite = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER'), requireUsableLicense];
 
+// Recording covers and naming the server is not editing the floor plan, so the
+// gate is not canWrite. Every role that can work a table is listed, and the
+// platform role is NOT — ATC stays read-only in this router, which is the one
+// property the role list is here to preserve. requireAction then lets a tenant
+// take the capability off a role it does not want doing this.
+const canServe = [
+  requireRole(
+    'CUSTOMER_OWNER',
+    'COMPANY_ADMIN',
+    'REGIONAL_MANAGER',
+    'BRANCH_MANAGER',
+    'CASHIER',
+    'CAPTAIN',
+  ),
+  requireUsableLicense,
+  loadPermissionContext,
+  requireAction('table.service'),
+];
+
+// Same list, same reasoning, and separately switchable: a business may well let
+// a captain record covers but keep moving parties to a manager, because a
+// transfer decides which bill a subsequent round lands on. POS_SUPER_ADMIN is
+// absent here for the same reason it is absent everywhere else in this router.
+const canTransfer = [
+  requireRole(
+    'CUSTOMER_OWNER',
+    'COMPANY_ADMIN',
+    'REGIONAL_MANAGER',
+    'BRANCH_MANAGER',
+    'CASHIER',
+    'CAPTAIN',
+  ),
+  requireUsableLicense,
+  loadPermissionContext,
+  requireAction('table.transfer'),
+];
+
 const OPEN_STATUSES = ['OPEN', 'BILLED'];
 const CURRENT_ORDER_INCLUDE = {
   orders: {
     where: { status: { in: OPEN_STATUSES } },
-    select: { id: true, status: true, type: true, total: true },
+    select: {
+      id: true,
+      status: true,
+      type: true,
+      total: true,
+      // LANE tables. Carried on the floor list because "table 6, four covers,
+      // Meera" is what the screen is for; a second request per table to learn
+      // it would make the 15-second poll on TablesAdmin.jsx cost N+1 queries.
+      pax: true,
+      waiterId: true,
+      waiter: { select: { fullName: true } },
+      waiterSetAt: true,
+      waiterSetById: true,
+    },
     take: 1,
   },
 };
@@ -43,6 +109,8 @@ const publicTable = (t) => ({
         status: t.orders[0].status,
         type: t.orders[0].type,
         total: num(t.orders[0].total),
+        // Additive: existing callers read status/type/total and are unaffected.
+        service: publicService(t.orders[0]),
       }
     : null,
 });
@@ -100,6 +168,11 @@ router.post(
   }),
 );
 
+// The legacy resolver, and it stays as it is. A pinned caller reaching another
+// branch gets 403 rather than 404, which does leak that the table exists — but
+// it is the documented behaviour of these four endpoints and other suites assert
+// it, so changing it here would be an unrelated contract break smuggled in
+// alongside a new feature. loadTableInScope below is the shape new endpoints use.
 const loadTable = async (req) => {
   const table = await prisma.diningTable.findFirst({
     where: { id: req.params.id, branch: { companyId: req.companyScope.id } },
@@ -176,6 +249,167 @@ router.delete(
       meta: { name: table.name },
     });
     res.json({ table: publicTable(updated) });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// LANE tables — covers and server
+// ---------------------------------------------------------------------------
+
+// Proves the table is inside BOTH the tenant and the caller's own scope, and
+// answers identically when it is in neither. A store manager probing ids must
+// not be able to map the company's other outlets, and "wrong tenant" and "never
+// existed" must read the same — hence one notFound() for all three cases rather
+// than the forbidden() loadTable throws.
+const loadTableInScope = async (req) => {
+  const table = await prisma.diningTable.findFirst({
+    where: {
+      id: req.params.id,
+      branch: { companyId: req.companyScope.id, ...branchWhereForScope(req.perm.scope) },
+    },
+    select: { id: true, branchId: true, name: true },
+  });
+  if (!table) throw notFound('Table not found');
+  return table;
+};
+
+// The bill the party is currently running. OPEN and BILLED both count as
+// "occupied" for the floor, and the difference between them is the difference
+// between editable and not — assertServiceEditable is what draws that line, so
+// both are fetched and it decides.
+const currentOrderOf = (tableId) =>
+  prisma.order.findFirst({
+    where: { tableId, status: { in: OPEN_STATUSES } },
+    select: { id: true, status: true },
+    orderBy: { createdAt: 'desc' },
+  });
+
+// `null` clears, absent leaves alone, and the two are different instructions —
+// see serviceUpdateData. z.nullish() accepts both, and the refine below is what
+// stops a body that says neither from being answered 200 for doing nothing.
+const serviceSchema = z
+  .object({
+    pax: z.number().int().min(1).max(MAX_PAX).nullish(),
+    waiterId: z.string().min(1).nullish(),
+  })
+  .refine((d) => d.pax !== undefined || d.waiterId !== undefined, {
+    message: 'Send pax, waiterId, or both',
+  });
+
+router.post(
+  '/:id/service',
+  ...canServe,
+  asyncHandler(async (req, res) => {
+    const table = await loadTableInScope(req);
+    const data = serviceSchema.parse(req.body);
+    const order = assertServiceEditable(await currentOrderOf(table.id));
+
+    // Eligibility is proved against the table's OWN store, not the caller's.
+    // A regional manager standing in outlet A2 may credit A2's captain, and may
+    // not credit A1's — the scope that decides what the caller may touch is a
+    // different question from who may be credited with the table they touched.
+    let waiter = null;
+    if (data.waiterId) {
+      waiter = await resolveWaiter({
+        companyId: req.companyScope.id,
+        branchId: table.branchId,
+        waiterId: data.waiterId,
+      });
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: serviceUpdateData({
+        pax: data.pax,
+        waiterId: data.waiterId,
+        actorId: req.user.id,
+      }),
+      select: {
+        id: true,
+        pax: true,
+        waiterId: true,
+        waiterSetAt: true,
+        waiterSetById: true,
+        waiter: { select: { fullName: true } },
+      },
+    });
+
+    // Audited against the Order, because the order is what changed and is what a
+    // shift report disputes. The table is in the meta so the floor can be
+    // searched by it.
+    await audit(req, {
+      action: 'TABLE_SERVICE_SET',
+      entity: 'Order',
+      entityId: order.id,
+      companyId: req.companyScope.id,
+      meta: {
+        tableId: table.id,
+        tableName: table.name,
+        branchId: table.branchId,
+        ...(data.pax !== undefined ? { pax: data.pax } : {}),
+        ...(data.waiterId !== undefined
+          ? { waiterId: data.waiterId, waiterName: waiter?.fullName ?? null }
+          : {}),
+      },
+    });
+
+    res.json({ service: publicService(updated) });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// LANE tables — transfer
+// ---------------------------------------------------------------------------
+
+const transferSchema = z.object({ toTableId: z.string().min(1) });
+
+// Only the SOURCE table is resolved through the caller's scope. The destination
+// is then resolved against the source's own branch inside transferParty, which
+// is what makes "may this person touch this floor?" one question asked once
+// instead of two that can disagree. See lib/tables/transfer.js.
+router.post(
+  '/:id/transfer',
+  ...canTransfer,
+  asyncHandler(async (req, res) => {
+    const from = await loadTableInScope(req);
+    const { toTableId } = transferSchema.parse(req.body);
+
+    let moved;
+    try {
+      moved = await prisma.$transaction(async (tx) => {
+        const result = await transferParty(tx, { from, toTableId, actorId: req.user.id });
+        // auditRequired, not audit: a party that moved with no record of who
+        // moved it is the dispute this row exists to settle, so the row and the
+        // move commit together or neither does.
+        await auditRequired(tx, req, {
+          action: 'TABLE_TRANSFER',
+          entity: 'DiningTable',
+          entityId: from.id,
+          companyId: req.companyScope.id,
+          meta: {
+            fromTableId: result.from.id,
+            fromTableName: result.from.name,
+            toTableId: result.to.id,
+            toTableName: result.to.name,
+            branchId: from.branchId,
+            visitId: result.visitId,
+            orderIds: result.orderIds,
+            ordersMoved: result.ordersMoved,
+          },
+        });
+        return result;
+      });
+    } catch (err) {
+      // The destination was claimed between our check and our write. The unique
+      // constraint on DiningVisit.openTableId is what caught it; this turns it
+      // into an answer about the floor instead of a 500 about the database.
+      if (isDestinationTaken(err)) {
+        throw conflict('That table was taken while the party was being moved');
+      }
+      throw err;
+    }
+
+    res.json({ transfer: moved });
   }),
 );
 
