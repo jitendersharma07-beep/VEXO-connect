@@ -9,12 +9,18 @@ prior one.
 | | |
 |---|---|
 | **Branch** | `x/operator-ui` — **now on the remote** |
-| **Head** | `2ae5c1c` |
 | **Remote** | `github` = `jitendersharma07-beep/VEXO-connect` |
 | **Branched from** | `d625370` |
+| **Gate ran at** | **`2ae5c1c`** — everything after it is documentation |
 | **PR** | **not opened — `gh` is not installed on this box.** See §5 |
 | **Focused gate** | **332 passed, 0 failed, 3 open gaps** |
 | **Verdict** | `GREEN — with 3 OPEN GAP(S), not a clean pass` |
+
+Take the branch tip as head rather than a SHA written here: this file cannot
+name its own commit, and the commit that adds it necessarily moves the tip past
+whatever it claims. The SHA that matters for the evidence is the one the gate
+ran against, and it is pinned above. Every commit after it touches `docs/` only,
+so the tested artifact is unchanged.
 
 The three gaps are two authorization questions on W3's `kitchen.js`. They are
 **not failures of this lane and not passes**. §3.
