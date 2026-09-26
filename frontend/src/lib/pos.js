@@ -125,8 +125,26 @@ export const isLicenseError = (err) => apiErrorCode(err).startsWith('POS_LICENSE
 
 // --- roles (§5 role table) ---------------------------------------------------
 export const isAtc = (user) => user?.role === 'POS_SUPER_ADMIN';
+// "May work the till", which includes taking money. Deliberately NOT widened to
+// CAPTAIN: every screen behind this one offers a bill, a discount or a payment.
 export const canSell = (user) =>
   ['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER'].includes(user?.role);
+// A captain takes orders and never touches money, so the handheld is offered to
+// this role and the till is not.
+//
+// The server now AGREES (2026-09-26, W3). It used to refuse: the gate on
+// POST /orders was `operate` = requireRole('CUSTOMER_OWNER','BRANCH_MANAGER',
+// 'CASHIER'), so a captain's own screen got a 403 from every write on it. That
+// was WINDOW-5-BACKEND-REQUEST.md §1 and it is now closed — the till routes gate
+// on requireAction('order.create'), which ROLE_ACTIONS.CAPTAIN holds. See
+// docs/completion/W3-CAPTAIN.md.
+//
+// What did NOT change is `canSell` above: still deliberately not widened to
+// CAPTAIN, because the server still refuses this role the bill, the payment, the
+// refund and the void of a sent line. The screens behind canSell offer exactly
+// those four, so widening it would be offering buttons the API answers 403 to.
+// The server stays the authority either way.
+export const isCaptain = (user) => user?.role === 'CAPTAIN';
 export const isManagerUp = (user) =>
   ['BRANCH_MANAGER', 'CUSTOMER_OWNER'].includes(user?.role);
 export const canWriteCatalog = (user) =>
