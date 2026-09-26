@@ -576,6 +576,77 @@ and the enforcement map held by a test rather than by this document.
   drawer or a terminal, so there is no hardware claim to make either way.
 - **Nothing was deployed.** No production system was written to at any point.
 
+### Addendum, 2026-09-26 11:09Z — gated a second time, on today's main
+
+The verdict above is still true and is left standing, but on its own it had
+stopped being the useful statement. It was measured on `3754f64`, a merge of
+`7969764` with W2's `49e1791`, whose main side was `d625370` — two
+certifications ago, and before `09127b1` moved every file's wipe into a shared
+`backend/tests/helpers/wipe.js`. A PASS on the tree a lane was written against
+is not a PASS on the tree it is going to be merged into, and only the second one
+answers "can this be integrated".
+
+So the merge was built and gated on its own:
+
+| | |
+|---|---|
+| candidate | `82b57d95aa7c2ea08c800c7e32f1dab73d32126b` |
+| parents | `^1 728a57c` certified main · `^2 8f21b40` `x/experience` tip |
+| tree | `008a01f8` — `git merge-tree --write-tree`, clean, no conflicts |
+| parked | `refs/w3/merge-728a57c-8f21b40`, so gc cannot reap it |
+| result | **54/54 files, 1696/1696 tests, 0 failed, 0 skipped, exit 0**, 1063.84s |
+| database | `vcx_experience_w3_test`, recreated for this run with the §7 line |
+| log | `evidence/w3-20260926/w3gate-merged-82b57d9.log`, 439 lines / 45424 bytes, md5 `dce7df7bf1a31d535523933b9f00963c` |
+
+**Finish identity, not only start identity.** `w3gate.sh` re-hashes the export
+before vitest starts; that catches a bad export but not a file edited during the
+run. After vitest exited, all 621 files were re-hashed against the commit in
+both directions: **0 drift, 0 absent**. A start-only check would have left the
+verdict inconclusive rather than wrong, which is a distinction worth keeping.
+
+**Skips, checked rather than assumed.** One `grep -i skip` hit in the whole log,
+and it is a test *name* — `globalLimiter skipped (NODE_ENV=test at load)`, a
+passing test. Zero `.only`, zero `.todo`. Run 1 of this workstream hid 35 real
+skips behind a green summary line, which is why this is now counted every time
+and not read off the total.
+
+**The frontend was built, which no backend certification does.** Six of the
+fifteen files this merge brings to main are under `frontend/src`, and W1's
+certifications run vitest only. `vite build` v6.4.3, **1714 modules transformed,
+exit 0**, twice: plain (5.38s) and with `VITE_BASE_PATH=/pos/` (4.80s), which is
+what production serves under.
+
+Two things that only the second build shows, both worth knowing before a deploy:
+
+- The JS bundle **hash changes with the base path** — `index-CqFvfrvd.js`
+  becomes `index-W3UbY6eM.js`. The path is baked into the bundle, not just into
+  `index.html`. A deploy that forgets `VITE_BASE_PATH` therefore ships assets
+  referencing `/assets/…`, which 404 behind `/pos/`, and the build exits 0 while
+  doing it. `docs/DEPLOY-PHASE2.md` §5 already requires the variable; this is
+  the measurement of what happens if it is missed.
+- `dist/index.html` keeps `href="./favicon.svg"` relative while the CSS and JS
+  refs become `/pos/assets/…`. Under `…/pos/` that resolves; under `…/pos` with
+  no trailing slash it resolves to `/favicon.svg` and 404s. Cosmetic, named here
+  so nobody spends an afternoon on it later.
+
+**How this relates to W1's own acceptance run.** W1 certified `0f12212`
+(tree `e0106d9`) as `ACCEPTED_PR5` at 08:58:38Z with the same 54/54 and
+1696/1696. That tree and this one differ by exactly 30 added lines of *this
+markdown file*: `backend`, `backend/src`, `backend/tests`, `backend/prisma` and
+`frontend` are byte-identical between them, checked subtree hash by subtree hash.
+So this is a third independent run of the same code on a third database, not a
+new unknown — and the agreement across three runs is the point.
+
+**Timing, stated with the caveat it needs.** 1063.84s here against 955.70s for
+W1's run of the same 54 files. Loadavg was 3.62 at start and 6.22 at finish on a
+12-core box, and W1's began at 6.79, so the difference belongs to the box and not
+to the code. Both are far under the 1907.96s the first W3 gate took.
+
+One correction this addendum owes the bullet list above: it says the pushed tip
+is `7969764`. That was true when it was written and is not now — the tip is
+`8f21b40`, two docs commits later, and the gated tree is the merge of that tip
+with main.
+
 ## 9. Handoff to Window 1
 
 ### What to integrate
