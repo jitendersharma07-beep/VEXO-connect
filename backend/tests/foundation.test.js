@@ -269,6 +269,45 @@ describe('role gates', () => {
   });
 });
 
+describe('build provenance', () => {
+  it('the commit SHA is readable by ATC operators and nobody else', async () => {
+    const anon = await request(app).get('/api/version');
+    expect(anon.status).toBe(401);
+    expect(anon.body.gitSha).toBeUndefined();
+
+    // A signed-in customer principal is refused too: the SHA names which
+    // published fixes this deploy is missing, which is not a tenant's business.
+    for (const t of [tokens.ownerA, tokens.managerA1, tokens.cashierA1]) {
+      const res = await request(app).get('/api/version').set(auth(t));
+      expect(res.status).toBe(403);
+      expect(res.body.gitSha).toBeUndefined();
+    }
+
+    const atc = await request(app).get('/api/version').set(auth(tokens.atc));
+    expect(atc.status, JSON.stringify(atc.body)).toBe(200);
+    expect(atc.body.service).toBe('atc-pos-api');
+    // Compared against env rather than pinned to the literal "unknown": the
+    // deploy runbook has the owner `export GIT_SHA=$(git rev-parse HEAD)`, and a
+    // suite run in that same shell must not go red for it. What this proves is
+    // that the route reports the configured value instead of a baked-in string,
+    // and that neither field is ever blank — the explicit-"unknown" fallback
+    // itself is proven by building an image with no build args.
+    expect(atc.body.gitSha).toBe(env.GIT_SHA);
+    expect(atc.body.builtAt).toBe(env.BUILD_TIME);
+    expect(atc.body.gitSha).not.toBe('');
+    expect(atc.body.builtAt).not.toBe('');
+    expect(atc.body.version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it('/api/health stays public and carries no provenance', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.status).toBe(200);
+    // deploy/prod-verify.mjs asserts on both of these, and the compose
+    // healthcheck on the status code.
+    expect(res.body).toEqual({ status: 'ok', service: 'atc-pos-api' });
+  });
+});
+
 describe('licensing', () => {
   it('branch create stops at the licence limit and resumes after an ATC add-on', async () => {
     // Company A: MULTI_STORE base 2, already has A1+A2 active.

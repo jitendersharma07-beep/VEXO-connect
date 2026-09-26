@@ -90,18 +90,27 @@ Read it back three ways, in increasing order of what has to be working:
 docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' pos-prod-backend:latest
 docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' pos-prod-frontend:latest
 
-# 2. The process — answers with the database down.
-curl -s localhost:${HTTP_PORT:-8110}/api/version
+# 2. The container — answers with the database down, needs a shell on the host.
+docker exec pos-prod-backend-1 printenv GIT_SHA BUILD_TIME
 
-# 3. The full stack, edge through to the database.
-curl -s localhost:${HTTP_PORT:-8110}/api/health
+# 3. Over HTTP — needs the database, and a POS_SUPER_ADMIN token.
+TOKEN=$(curl -s localhost:${HTTP_PORT:-8110}/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"<atc-admin-email>","password":"<password>"}' | jq -r .token)
+curl -s localhost:${HTTP_PORT:-8110}/api/version -H "Authorization: Bearer $TOKEN"
 ```
 
-`/api/version` returns `{ service, version, gitSha, builtAt }` and deliberately
-does not touch the database, so it still answers during exactly the kind of
-broken deploy that makes you ask the question. `version` comes from
-`backend/package.json`, which ships inside the image; `gitSha` and `builtAt`
-come from the build args.
+`/api/version` returns `{ service, version, gitSha, builtAt }`. It is gated at
+`POS_SUPER_ADMIN`, because a commit SHA tells a reader which published fixes this
+deploy does **not** have — so it is not something to hand to the public or to a
+tenant's staff. `/api/health` stays public and stays two keys for that reason.
+
+The trade-off: the gate reads `PosSession` and `PosUser`, so #3 needs a working
+database. During a bad deploy — when the database is usually the thing that is
+down — use #1 or #2, which answer with nothing running but dockerd.
+
+`version` comes from `backend/package.json`, which ships inside the image;
+`gitSha` and `builtAt` come from the build args.
 
 Before this existed, identifying the live commit meant git-blob-hashing all 51
 backend source files out of the running container — and that still could not

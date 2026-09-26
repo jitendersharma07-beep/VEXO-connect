@@ -26,11 +26,13 @@ EXPOSE 5000
 # and anything that consumes an ARG invalidates the cache from that layer down —
 # above this line, `npm ci` and `prisma generate` still hit the cache.
 #
-# Both a label and an env var because they answer the question from different
-# places. The label survives in the image and is readable with `docker inspect`
-# when the container will not start at all; the env var is what the running
-# process reports over /api/version, which is the only channel available to
-# someone who has HTTP to the service but no shell on the host.
+# Both a label and an env var because they serve different readers. The label is
+# readable with `docker inspect` when the container will not start at all, and
+# `printenv` inside a live one needs neither the database nor a token — those are
+# the channels the deploy runbook uses. The env var is also what the process
+# reports over GET /api/version, the only channel open to someone with HTTP to
+# the service but no shell on this host; that route is gated at POS_SUPER_ADMIN,
+# because the SHA names which published fixes this deploy does not have.
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 LABEL org.opencontainers.image.title="atc-pos-api" \

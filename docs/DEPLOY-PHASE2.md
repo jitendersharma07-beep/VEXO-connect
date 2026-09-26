@@ -212,18 +212,29 @@ for svc in backend frontend; do
   docker inspect --format "$svc {{index .Config.Labels \"org.opencontainers.image.revision\"}}" \
     "pos-prod-$svc:latest"
 done
-curl -s "localhost:${HTTP_PORT:-8110}/api/version"
+docker exec pos-prod-backend-1 printenv GIT_SHA BUILD_TIME
 ```
 
-Both labels and the `gitSha` field must equal the `GIT_SHA` you echoed above.
-Any of them reading `unknown` means the export did not reach the build — rebuild
-before moving on, because this is the only chance to get it right.
+All three values must equal the `GIT_SHA` you echoed above. Any of them reading
+`unknown` means the export did not reach the build — rebuild before moving on,
+because this is the only chance to get it right.
 
-`/api/version` does not touch the database, so it answers even when §4's health
-check does not. That is the point: it is the provenance channel that survives a
-half-broken deploy. Also note the frontend is a static bundle with no process to
-ask — `docker inspect` is its *only* channel, which is why the loop covers both
-images rather than trusting the API's answer for the whole stack.
+Neither command needs the database or a token, which is why these are the two
+used here: the stack has only just come up. The frontend is a static bundle with
+no process to ask at all, so `docker inspect` is its *only* channel — that is why
+the loop covers both images rather than trusting one answer to describe the whole
+stack.
+
+`GET /api/version` reports the same `{ service, version, gitSha, builtAt }` over
+HTTP, for whoever has the API but no shell on this host. It is gated at
+`POS_SUPER_ADMIN` — the SHA names which published fixes this deploy is missing,
+so it is not something to serve publicly — and the gate reads `PosSession` and
+`PosUser`, so it needs a working database. Run it after §4, reusing that
+sign-in's token:
+
+```sh
+curl -s "localhost:${HTTP_PORT:-8110}/api/version" -H "Authorization: Bearer $TOKEN"
+```
 
 ## 4. Verify (read-only, in this order)
 
