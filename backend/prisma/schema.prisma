@@ -5672,6 +5672,12 @@ model LoyaltyProfileLink {
   // integrations.test.js, left 200,000 rows behind, and then failed the next
   // files when their 30s `beforeAll` wipe inherited them.
   //
+  // Before removing this index, read the number. Measured 2026-09-26 by dropping
+  // it and re-running the same 100k+100k shape in raw SQL on one database:
+  // 13,222ms with it, 642,838ms without — 48.6x. The larger figure is a FLOOR,
+  // because autovacuum ran 11 times mid-delete and kept shrinking the table the
+  // seq scans had to walk; unrescued it projects to ~1,005s.
+  //
   // Leading on `customerId` is what makes it usable: that is the selective
   // column in the trigger's predicate, and `companyId` second keeps the lookup
   // index-only.

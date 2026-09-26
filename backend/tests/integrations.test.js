@@ -2786,9 +2786,20 @@ describe('historical loyalty import', () => {
     // for different reasons and the single total hid that for three runs. The
     // customer delete fires LoyaltyProfileLink's cascade trigger once per row,
     // and before LoyaltyProfileLink_customerId_companyId_idx existed the trigger
-    // had no index to use and seq-scanned the whole child table per parent —
-    // ~1,005s of trigger work against a 900s budget, overrunning during CLEANUP
-    // while every assertion above had already passed.
+    // had no index to use and seq-scanned the whole child table per parent.
+    //
+    // Measured 2026-09-26 by DROPPING the index and re-running, rather than by
+    // assuming what its absence would cost. Same database, same 100k+100k shape,
+    // raw SQL with no Prisma and no vitest in the path:
+    //
+    //     with the index      13,222ms
+    //     without it         642,838ms      48.6x
+    //
+    // 642,838ms is a FLOOR, not the true cost: autovacuum ran 11 times on
+    // LoyaltyProfileLink DURING that delete, shrinking the table each successive
+    // seq scan had to walk, so the arm was being rescued mid-flight. Unrescued,
+    // the same shape projects to ~1,005s. Either number overran the 900s budget
+    // during CLEANUP, while every assertion above had already passed.
     //
     // Reading these two numbers: BOTH halves are load-sensitive, so neither is
     // worth anything without the box's load recorded beside it.
