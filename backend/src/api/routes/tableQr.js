@@ -42,7 +42,6 @@ const canOperate = [
   requireUsableLicense,
 ];
 
-const OPEN_STATUSES = ['OPEN', 'BILLED'];
 const MAX_BULK_CARDS = 300;
 
 const codedConflict = (code, message) => new AppError(409, code, message);
