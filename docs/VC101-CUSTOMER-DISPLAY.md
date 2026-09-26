@@ -105,3 +105,6 @@ session; integrated by agreement).
 Integrated into the lab RC `sprint/client-handover-rc` as replayed commits
 `0a98c97` / `46b1940` / `ca0d983` / `3e9e4ec` under one `--no-ff` merge
 `629461b`; the conditional drop at the freeze is `git revert -m 1 629461b`.
+(Historical record — the branch has since diverged. Core RC-1 deploys from
+code-final `114ffc9`; see `docs/RELEASE-HANDOVER-CHECKLIST.md`, "The
+candidate".)

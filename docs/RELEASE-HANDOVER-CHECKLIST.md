@@ -21,7 +21,7 @@ code changes to verified areas; documentation only after the freeze.
 
 | | |
 |---|---|
-| Branch | `sprint/client-handover-rc` — lab `vexo-lab`, `~/atc-pos` |
+| Branch | `sprint/client-handover-rc` — lab `vexo-lab`, `~/atc-pos`. **The branch has since diverged past RC-1 and is not a deploy handle; the code-final sha on the next row is the only deploy source** |
 | **Code-final** | **`114ffc9`** (`114ffc9d592022132579d4264b87048f1778bfd8`). Everything after it is `docs/` only — check with `git diff --name-only 114ffc9 HEAD`. Moved on 2026-09-23 from `a1e5228`, whose only code successor is a one-line day-close fix in `frontend/src/pages/DayClose.jsx`. |
 | Tip at time of writing | `5659243` (docs). The **release-final sha is stamped at the freeze**, after the last documentation commits land; it is not known yet and is not invented here. |
 | Package for the deployment owner | `/home/atc-noc/pos-rc-v1.1-rc1-20260923/` — bundle, `RELEASE-V1.1-RC.md`, `CLIENT-HANDOVER-SCOPE.md`, README, `SHA256SUMS` (**re-verified OK 2026-09-23**) |

@@ -8,8 +8,8 @@ handover to session `7565dff8`, which owns production (`DEPLOY-OWNER.md`).
 
 | | |
 |---|---|
-| Branch | `sprint/client-handover-rc` (lab `vexo-lab`, `~/atc-pos`) |
-| Code final at | **`a1e5228`**. Later commits on the branch are documentation only. Check with `git diff --stat a1e5228 HEAD` — every path must be under `docs/`. |
+| Deploy from | **commit `114ffc9`** (`114ffc9d592022132579d4264b87048f1778bfd8`) — an immutable sha. Historically branch `sprint/client-handover-rc` (lab `vexo-lab`, `~/atc-pos`); that branch has since diverged past RC-1 and **must not be checked out by name for this deploy** |
+| Code final at | **`114ffc9`** — re-stamped 2026-09-23 from `a1e5228`; the one code change between them is a one-line day-close fix in `frontend/src/pages/DayClose.jsx`. Check with `git diff --name-only 114ffc9 <release-final>` — every path must be under `docs/`. |
 | Base | `4a01c7e` — the v1.0.1 line; build inputs identical to deployed `55bf2dc` |
 | Migrations | **13** (v1.0.1 has 12). New: `20260923160000_refund_method` |
 | Feature freeze | ≈ 2026-09-25 14:00 UTC. RC-1 is the candidate at 2026-09-23 15:00 UTC. |
@@ -151,9 +151,12 @@ compose file was not run.
 The frontend bundle hash matches the host build byte for byte:
 `index-CgVCfGcR.js` came out of both the `node:20` image and Node 22 on the
 host. The images were built at `a899f46`, which differs from `a1e5228` only in
-`deploy/e2e-workflow.mjs` — not a build input — so they are the RC-1 images.
-Production builds its own images from the tree it deploys (§3); these only
-prove that the tree builds.
+`deploy/e2e-workflow.mjs` — not a build input — so they are the images of the
+`a1e5228`-era RC-1. **Code-final has since been re-stamped to `114ffc9`, which
+adds a one-line `frontend/src/pages/DayClose.jsx` fix — a frontend build
+input — so these images predate the current pin and stand as buildability
+evidence only.** Production builds its own images from the tree it deploys
+(§3); these only prove that the tree builds.
 
 ## 5 · Acceptance matrix
 

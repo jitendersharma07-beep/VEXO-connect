@@ -1,7 +1,9 @@
 # VEXO Connect — client handover scope (sprint v1.1)
 
-**The release candidate is RC-1 on `sprint/client-handover-rc` (lab `vexo-lab`,
-`~/atc-pos`), built on the deployed v1.0.1 line. Every Core flow in scope is
+**The release candidate is RC-1 — code-final `114ffc9`
+(`114ffc9d592022132579d4264b87048f1778bfd8`), built on `sprint/client-handover-rc`
+(lab `vexo-lab`, `~/atc-pos`) on the deployed v1.0.1 line. That branch has since
+diverged and is not a deploy handle: deploy from the sha. Every Core flow in scope is
 proven end to end on it. Two Core defects were found and fixed, and the
 customer display (VC-101) is integrated. What still blocks the handover is
 input only the owner can give, not code.**
@@ -10,7 +12,7 @@ input only the owner can give, not code.**
 |---|---|
 | As of | 2026-09-23, 15:00 UTC |
 | Sprint window | brief received ≈ 2026-09-23 14:00 UTC → **feature freeze ≈ 2026-09-25 14:00 UTC** (T+48 h) → handover ≈ 2026-09-26 14:00 UTC (T+72 h) |
-| Candidate | `sprint/client-handover-rc` — **code-final `a1e5228`** (later commits are docs only); full commit list in `docs/RELEASE-V1.1-RC.md` |
+| Candidate | **code-final `114ffc9`** (`114ffc9d592022132579d4264b87048f1778bfd8`), superseding `a1e5228` on 2026-09-23 — the only code change between them is a one-line day-close fix in `frontend/src/pages/DayClose.jsx` (`docs/RELEASE-HANDOVER-CHECKLIST.md`, "The candidate"). Branch `sprint/client-handover-rc` has diverged since — deploy from the sha, never the branch name. Full commit list in `docs/RELEASE-V1.1-RC.md` |
 | Base | `4a01c7e` = the v1.0.1 line; build inputs identical to deployed `55bf2dc` |
 | Production deployment owner | session `7565dff8` (`DEPLOY-OWNER.md`). Nothing in this sprint deploys. |
 | Maintained by | Window 1 — Core correctness and integration |
@@ -53,7 +55,7 @@ is not "deployed", and a print preview is not paper.
 
 | Area | Owner | Where |
 |---|---|---|
-| Core correctness, integration, release candidate, this file | Window 1 (this session) | lab `vexo-lab` — `~/atc-pos`, branch `sprint/client-handover-rc` |
+| Core correctness, integration, release candidate, this file | Window 1 (this session) | lab `vexo-lab` — `~/atc-pos`, branch `sprint/client-handover-rc` (RC-1 deploy pin: code-final `114ffc9` — the branch has diverged; use the sha) |
 | VC-101 customer display, printer run-book, onboarding checklist, quick guide | Window 3 — session "vexo-connect-dev connectivity setup" | original box — `~/vexo-connect-dev`, branch `sprint/vc101-customer-display` |
 | Production deploy | session `7565dff8`. `DEPLOY-OWNER.md` scopes it to v1.0.1 post-deploy verification, so **the owner must confirm the grant covers the v1.1 deploy**. | original box |
 | Go/no-go sheet for the deploy handoff | Window 3 — `docs/RELEASE-HANDOVER-CHECKLIST.md` (defers to this file and `RELEASE-V1.1-RC.md`) | in RC-1 |
@@ -85,7 +87,7 @@ fresh database, **52/52 on RC-1**. "Suite" is the backend vitest suite:
 | Refunds: manager-and-up, capped, reason required, **tender recorded** | Core | REF-1..5; **fix `5f8ef01`** |
 | Sales and activity reports | Core | suite; REP-1, REP-2 |
 | **Day close** — expected cash counts only cash that left the drawer; an honest count closes at zero | Core | DC-1..5; **fix `5f8ef01`**; rollback RB-1..8 |
-| **VC-101 customer display** — pairing, live bill mirror, amount due, thank-you, sign-out ends it. **Accepted as INCLUDED by the owner, 2026-09-23, on the merged-build evidence (relayed by Window 3).** Merged at `629461b`; its docs at `ae98beb`; RC code-final `a1e5228`, to be re-stamped at the freeze. **Supported deployment: ONE customer display per counter.** Several displays paired to one station is not supported — see F-8. | Window 3 | W3 suite 13/13; W3 Chromium walkthrough 8/8 (original box); DSP-1..8 and ISO-9 run independently by Window 1 |
+| **VC-101 customer display** — pairing, live bill mirror, amount due, thank-you, sign-out ends it. **Accepted as INCLUDED by the owner, 2026-09-23, on the merged-build evidence (relayed by Window 3).** Merged at `629461b`; its docs at `ae98beb`; RC code-final re-stamped `114ffc9` on 2026-09-23 (was `a1e5228`). **Supported deployment: ONE customer display per counter.** Several displays paired to one station is not supported — see F-8. | Window 3 | W3 suite 13/13; W3 Chromium walkthrough 8/8 (original box); DSP-1..8 and ISO-9 run independently by Window 1 |
 | Licensing, session revocation, server-side tenant scope, log redaction | Core | shipped v1.0.1; suite |
 | Navigation below 768 px | Core | shipped v1.0.1, measured 33/33 |
 | Quick guide and onboarding checklist (DEMO-labelled) | Window 3 | `docs/QUICK-GUIDE.md`, `docs/CLIENT-ONBOARDING-CHECKLIST.md` |
