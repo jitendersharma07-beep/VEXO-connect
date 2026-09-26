@@ -63,12 +63,27 @@ public: `private: false`, re-confirmed 2026-09-26 by an unauthenticated API call
 that returned 200. No password, recovery code, token, SMTP credential or private
 key appears in either place — that holds, and it is the part that matters.
 
-> **Corrected 2026-09-26. The sentence above used to claim this repository
-> excludes "host addresses, a backup destination, a key fingerprint and staging
-> account names". Two of those four are in it.** Measured, not assumed:
-> the backup key's fingerprint appears in **6 published Markdown files**, and
-> the production IP appears 3 times in this file alone. Only the off-host
-> destination address is genuinely absent (0 occurrences).
+> **Corrected 2026-09-26, then corrected again the same day. The sentence above
+> used to claim this repository excludes "host addresses, a backup destination, a
+> key fingerprint and staging account names". All four categories are in it.**
+>
+> The first attempt at this correction said "two of those four" and called the
+> off-host destination "genuinely absent (0 occurrences)". Both were wrong, and
+> they were wrong for an avoidable reason: the measurement used one regex with an
+> `|` in it and then attributed the file count to whichever literal was being
+> discussed. Re-measured one literal at a time, by file:
+>
+> | Category | Published in |
+> |---|---|
+> | Backup key fingerprint (short id) | **4** files — full 40-hex form in 2 of them |
+> | Off-host destination address | **4** files — *not* absent |
+> | Production host address | 2 files |
+> | Backup directory path | 5 files |
+>
+> The literals are deliberately not reproduced here. A negative claim does not
+> need to restate what it denies, and writing them out to deny them is how a
+> sentence becomes false about itself — a trap a peer session hit and documented
+> in `RELEASE-HANDOVER-CHECKLIST.md`.
 >
 > Severity, stated at its real strength rather than alarmingly: a GPG
 > **public-key fingerprint is not a secret** — fingerprints exist to be

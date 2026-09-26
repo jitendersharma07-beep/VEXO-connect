@@ -6,10 +6,22 @@
 **Deployed to production:** **nothing.** Production is v1.0.1 and untouched.
 
 Sanitised for a public repository: `private: false`, re-confirmed today by an
-unauthenticated API call returning 200. No credential, recovery code, token,
-passphrase or private key appears below. Host addresses, the backup destination
-and the key fingerprint live only in `/home/atc-noc/vcx-cloudready-local/evidence/`
-on `atc-noc`, which is not a Git repository.
+unauthenticated API call returning 200. **No credential, recovery code, token,
+passphrase or private key appears below**, and that is the claim that matters.
+
+What this file does *not* claim, because the draft did and it was false: that
+host addresses, the backup destination and the key fingerprint exist only in the
+evidence directory outside Git. **All three are already in this public
+repository** — measured one literal at a time, the key fingerprint in 4 tracked
+files, the off-host destination in 4, the production host in 2. They are not
+reproduced here, since a negative claim does not need to restate what it denies.
+
+The distinction to hold on to: a GPG **public-key fingerprint is not a secret**
+— fingerprints exist to be published and buy an attacker nothing without the
+passphrase and the secret half, neither of which is anywhere in Git. So this is a
+policy statement that was wrong, not a credential leak. The disclosure worth
+weighing is §B and §C being documented together in public; see the note in the
+verification ledger.
 
 ## The table
 
@@ -36,8 +48,17 @@ An earlier reconciliation distinguished the 09-23 and 09-24 dumps as reconciling
 "23" and "24" models. **Every manifest carries 23**, verified by counting `rows`
 in all three nights. The dumps really are different artifacts (different day,
 different sha256, 857 bytes apart) so the conclusion stood, but the number cited
-for it was wrong, and the same wrong pair was copied into at least one in-tree
-note. Anyone reconciling from that note will reach the same error.
+for it was wrong.
+
+**Two copies of that wrong number are still live and neither is mine to fix:**
+
+| Where | Status |
+|---|---|
+| `docs/RELEASE-HANDOVER-CHECKLIST.md` line 285 — "102 726 bytes, 24 models" | **Tracked and published.** That file is currently uncommitted in another session's hands (it is named as theirs in `PEER-NOTE-PUSH-AUTHORISED.md`), so editing it here would either clobber their in-flight buffer or sweep their hunks into my commit. Left for them, flagged here |
+| `PEER-NOTE-PUSH-AUTHORISED.md` line 76 — the same `23 \| 24` table | Untracked, never published. Cosmetic, but anyone reconciling from that note reaches the same error |
+
+Corrected everywhere this lane owns: `evidence/07-backup-recovery.md`,
+`evidence/07b-recovery-owner-procedure.md`, and the verification ledger.
 
 Related, because it looks alarming and is not: the 09-24 and 09-25 dumps are the
 **same length with different hashes**. `pg_dump -Fc` embeds a creation timestamp,
