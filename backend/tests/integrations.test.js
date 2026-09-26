@@ -2788,10 +2788,21 @@ describe('historical loyalty import', () => {
     // and before LoyaltyProfileLink_customerId_companyId_idx existed the trigger
     // had no index to use and seq-scanned the whole child table per parent —
     // ~1,005s of trigger work against a 900s budget, overrunning during CLEANUP
-    // while every assertion above had already passed. If this line climbs back
-    // into the hundreds the index is gone, not the box busy: the import phase is
-    // load-insensitive (199 rows/s quiet, 205 rows/s under three-way contention),
-    // so contention shows up here and nowhere else.
+    // while every assertion above had already passed.
+    //
+    // Reading these two numbers: BOTH halves are load-sensitive, so neither is
+    // worth anything without the box's load recorded beside it.
+    //
+    //   import   199 rows/s at load 2.68 | 205 at load 7.57 | 146 at load 13.65
+    //   cleanup  customers 13.0s at load 13.65; ~3.2s against an idle database
+    //
+    // An earlier version of this comment called the import load-INsensitive,
+    // reading the first two figures as flat. The third disproves it: the plateau
+    // runs out somewhere above load ~8, and at 13.65 the import lost 182s —
+    // most of the budget's headroom. What still separates the two causes is
+    // SCALE, not sensitivity. Contention moves this cleanup line by single-digit
+    // seconds; a missing index moves it into the HUNDREDS. Tens of seconds means
+    // the box is busy. Hundreds means the index is gone.
     console.log(`[cleanup] links ${linkSeconds.toFixed(1)}s, customers ${customerSeconds.toFixed(1)}s`);
   }, 900_000);
 
