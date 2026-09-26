@@ -34,6 +34,7 @@ import {
   waiterTargetsOf,
 } from '../../lib/tables/service.js';
 import { isDestinationTaken, transferParty } from '../../lib/tables/transfer.js';
+import { mergeBills } from '../../lib/tables/mergeBill.js';
 
 const router = Router();
 router.use(requirePosAuth, resolveCompanyScope);
@@ -481,6 +482,87 @@ router.post(
     }
 
     res.json({ transfer: moved });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// LANE tables — merge
+// ---------------------------------------------------------------------------
+
+const mergeSchema = z.object({ toTableId: z.string().min(1) });
+
+// Deliberately the SAME SHAPE as transfer above, because it is the same verb from
+// the floor's point of view: `:id` is the table the party is leaving and the body
+// names the table it is joining. A merge is what a transfer becomes when the
+// destination already has somebody at it, so a floor screen that can call one can
+// call the other, and assertMergeable says exactly that in the refusal it gives
+// for an empty destination.
+//
+// THE GATE IS canTransfer AND NOT A NEW PERMISSION KEY, which is the one thing
+// about this route worth arguing over. permissions.js:103 already registers
+// `table.transfer` as "Move or merge a party between tables" — the catalog entry
+// was written for both halves — so a tenant who granted the capability granted
+// this, and minting `table.merge` now would silently REMOVE the ability from every
+// role set that already has it until somebody re-granted it. It is also the right
+// grouping on its merits: both decide which bill the next round lands on, which is
+// the reason canTransfer exists separately from canServe in the first place.
+//
+// All money decisions live in lib/tables/mergeBill.js and all money EVALUATION
+// stays in recomputeOrder(). This route resolves scope, opens one transaction, and
+// records who did it.
+//
+// Only the SOURCE table is resolved through the caller's scope; the destination is
+// resolved against the source's own branch inside mergeBills, so "may this person
+// touch this floor?" is one question asked once instead of two that can disagree.
+router.post(
+  '/:id/merge',
+  ...canTransfer,
+  asyncHandler(async (req, res) => {
+    const from = await loadTableInScope(req);
+    const { toTableId } = mergeSchema.parse(req.body);
+
+    const merged = await prisma.$transaction(async (tx) => {
+      const result = await mergeBills(tx, { from, toTableId, actorId: req.user.id });
+      // auditRequired, not audit: a bill emptied into another one with no record
+      // of who did it is precisely the dispute this row exists to settle, so the
+      // row and the merge commit together or neither does. audit() swallows its
+      // own failures, which is right for a read and wrong for money moving
+      // between cheques.
+      //
+      // Entity is the SURVIVING order and not the table, unlike TABLE_TRANSFER.
+      // The row has to be reachable from the bill somebody is querying, and after
+      // a merge the bill that exists is the survivor — the same choice BILL_SPLIT
+      // makes when it audits against the original rather than the cheque. The
+      // tables are in the meta so the floor can still be searched by them.
+      await auditRequired(tx, req, {
+        action: 'BILL_MERGE',
+        entity: 'Order',
+        entityId: result.targetOrderId,
+        companyId: req.companyScope.id,
+        meta: {
+          fromTableId: result.from.id,
+          fromTableName: result.from.name,
+          toTableId: result.to.id,
+          toTableName: result.to.name,
+          branchId: from.branchId,
+          // No FK links a merged bill to its survivor — the same deliberate
+          // absence split lives with — so these two lists ARE the linkage, and a
+          // reconciliation that cannot find them cannot be done at all. Hence
+          // auditRequired rather than audit.
+          mergedOrderIds: result.mergedOrderIds,
+          movedItemIds: result.movedItemIds,
+          kitchenItemsRepointed: result.kitchenItemsRepointed,
+          closedVisitId: result.closedVisitId,
+          totalsBeforePaise: result.totalsBeforePaise,
+          totalBeforePaise: result.totalBeforePaise,
+          paxBefore: result.paxBefore,
+          pax: result.pax,
+        },
+      });
+      return result;
+    });
+
+    res.json({ merge: merged });
   }),
 );
 

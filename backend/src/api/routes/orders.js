@@ -3089,7 +3089,14 @@ router.post(
 
 // --- reads ------------------------------------------------------------------
 
-const STATUSES = ['OPEN', 'BILLED', 'PAID', 'VOID', 'REFUNDED'];
+// The statuses `GET /orders?status=` will accept. This gates the query string
+// only — it is not a policy list, and nothing is written from it, so a value
+// missing here does not hide those orders from the unfiltered listing, it just
+// makes them impossible to ask for on their own. MERGED is included for that
+// reason: a merged-away cheque is exactly the row somebody reconciling a
+// BILL_MERGE audit entry needs to pull up, and `?status=MERGED` answering
+// "Unknown status MERGED" would send them to the database instead.
+const STATUSES = ['OPEN', 'BILLED', 'PAID', 'VOID', 'REFUNDED', 'MERGED'];
 
 router.get(
   '/',

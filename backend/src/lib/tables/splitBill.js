@@ -9,9 +9,10 @@
 // true before — asserted below, inside the transaction, so a split that would
 // lose a paise rolls back instead of printing.
 //
-// WHY A SPLIT DOES NOT NEED A NEW OrderStatus. Merge is blocked because it
-// empties a bill, and an emptied bill needs a terminal status that OrderStatus
-// does not have (see WINDOW-1-HANDOFF-TABLES §6.1). A split empties nothing:
+// WHY A SPLIT DOES NOT NEED A NEW OrderStatus. Merge needed one, because it
+// empties a bill and an emptied bill needs a terminal status — OrderStatus.MERGED,
+// added later in migration 20260926091200_order_status_merged, see mergeBill.js.
+// A split empties nothing:
 // the original order KEEPS ITS ID and becomes the first cheque, and the other
 // cheques are new orders. Nothing reaches a terminal state. Keeping the
 // original id is also independently right — payments, KOTs, audit rows and
@@ -151,9 +152,12 @@ export const assertSplittable = async (tx, { orderId, itemIds }) => {
     if (!activeIds.has(id)) throw badRequest('That line is not on this bill', 'itemIds');
   }
   // A split that moves EVERY line is not a split: it leaves an empty original
-  // behind, which is exactly the emptied-bill problem that blocks merge, and it
-  // would need the terminal status OrderStatus does not have. Refused here so
-  // split never backs into merge's blocker by accident.
+  // behind, and an emptied bill is a MERGE — a different operation, with a
+  // terminal status, a different audit action and its own conservation proof. The
+  // refusal stands now that mergeBill.js exists, and stands for a better reason
+  // than before: an emptied original left OPEN here would sit on the floor as a
+  // zero-total bill that can never be billed, which is exactly the state
+  // OrderStatus.MERGED was added to avoid.
   if (wanted.size === active.length) {
     throw badRequest(
       'Leave at least one line on the original cheque — moving everything is not a split',

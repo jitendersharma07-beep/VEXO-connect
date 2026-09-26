@@ -229,8 +229,22 @@ router.get(
         where: { id: pointer.orderId, companyId, branchId },
         include: ORDER_INCLUDE,
       });
-      if (!order || order.status === 'VOID' || order.status === 'REFUNDED') {
+      if (
+        !order ||
+        order.status === 'VOID' ||
+        order.status === 'REFUNDED' ||
+        order.status === 'MERGED'
+      ) {
         // Straight to IDLE — a voided bill is not thanked.
+        //
+        // MERGED belongs in this list and not in the ACTIVE branch below. It is
+        // the one status the customer display would otherwise get wrong by
+        // falling through: a bill merged into another one has had its lines
+        // moved away, so the guest would watch their order empty itself to a
+        // zero total on the screen in front of them while the till rings the
+        // whole party up on the surviving cheque. Every other status filter in
+        // src/ is an allowlist that excludes MERGED for free; this one runs the
+        // other way, so it has to name it.
         clearPointer(stationKey);
       } else if (order.status === 'PAID') {
         const s = serializeOrder(order);

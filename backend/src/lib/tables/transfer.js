@@ -1,9 +1,12 @@
 // Table transfer — moving a seated party from one table to another. LANE
 // tables; spec §B "Tables (Pro): floor/table layout, pax, waiter, transfer/merge
-// table, split bill", the transfer half. MERGE IS NOT HERE and cannot be until
-// the owner answers the OrderStatus question (see WINDOW-1-HANDOFF-TABLES §5):
-// merging needs a terminal status for the bill that gets emptied, and VOID would
-// report every merge as a cancelled sale.
+// table, split bill", the transfer half. MERGE IS NOT HERE — it is in
+// mergeBill.js, which reuses resolveDestination below rather than re-deriving the
+// "same floor, not retired, and answers identically for a table you may not see"
+// rules. The two verbs meet at an empty destination: a party joining a table with
+// nobody at it is a TRANSFER, and assertMergeable refuses that case by name and
+// says so, because moving a bill without touching an amount is always the safer
+// of the two.
 //
 // LIKE service.js, THIS FILE TOUCHES NO MONEY. A party moving from table 5 to
 // table 6 owes exactly what it owed before it stood up. Nothing here calls
