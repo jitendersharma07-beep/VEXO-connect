@@ -73,7 +73,7 @@ one of them is a regression that must be resolved first.
 | 3 | The v1.0.1 → v1.1 release jump (31 migrations, multi-lane) needs an owner decision and a release-level acceptance plan. | owner / deploy owner |
 | 4 | Production's worktree is dirty on `DayClose.jsx`; a build from it would ship an unreviewed edit. Build from a `git archive` scratch copy, never in place. | deploy owner |
 | 5 | ~~The functional matrix has not been executed in a deployed environment.~~ **CLEARED 2026-09-26.** Seed pasted; matrix run against the deployed stack: **235 checks, 0 failed, 5/5 phases exit 0** (§C of `10-STAGING-RESULTS.md`, harness committed at `4db36a3`). | ~~me~~ done |
-| 6 | The **production boot guards have never executed** — staging runs `NODE_ENV=development`, which is the branch that skips them. `deploy/stg-tables-verify/06-prod-boot-guards.mjs` closes this and is **unrun** (classifier refuses the `docker exec -e` form). One pasted command. | me, once unblocked |
+| 6 | ~~The production boot guards have never executed.~~ **CLEARED 2026-09-26.** Phase F run inside the production image: **22 checks, 0 failed**. Production-shaped config loads; ten misconfigurations are each refused *and* refused for the stated reason (§C2 of `10-STAGING-RESULTS.md`). | ~~me~~ done |
 | 7 | **Policy question, not a defect:** a `POS_SUPER_ADMIN` can author a promotion campaign inside a customer tenant (observed 201). Contained — lands DRAFT, tenant-scoped — but the floor verbs deliberately exclude the same operator, so the inconsistency should be decided, not inherited. | owner |
 
 ## 2. Mechanics production actually uses
@@ -223,7 +223,7 @@ Must pass before production approval is requested:
 |---|---|
 | Blockers 1–4 (§1) cleared | **open** |
 | Functional matrix executed on staging: login, role isolation, transfer/split/merge, QR→KOT, billing/payment/refund, promotions, kitchen, reports | **PASSED** — 235 checks, 0 failed, 5/5 phases exit 0 |
-| `06-prod-boot-guards.mjs` green (production config accepted, bad config refused *with the right message*) | **written, unrun** (blocker 6) |
+| `06-prod-boot-guards.mjs` green (production config accepted, bad config refused *with the right message*) | **PASSED** — 22 checks, 0 failed |
 | Promotion-authoring authority for the platform role decided | **open** (blocker 7) |
 | 31 migrations timed against **restored production data** | **open** — gates the downtime figure |
 | Old code proven to tolerate the new schema (forward-compat, for §5) | **open** |
@@ -235,9 +235,10 @@ Must pass before production approval is requested:
 ## 7. What I am and am not asking for
 
 **Not asking for production approval.** The instruction was to request it only
-once the complete change set is ready for review. It is not. The largest gate —
-the functional matrix — is now **closed and green**, but seven of the ten remain
-open, and the reasons are not ones more testing can fix:
+once the complete change set is ready for review. It is not. **Both gates that
+were mine are now closed and green** — the functional matrix (235/0) and the
+production boot guards (22/0). What remains is six items, and the reasons are not
+ones more testing can fix:
 
 - **Three are other people's decisions.** Integrating `12fa573`, porting hotfix
   `888af1e`, and the v1.0.1 → v1.1 release jump over a 31-migration multi-lane
@@ -250,11 +251,10 @@ open, and the reasons are not ones more testing can fix:
   is the pre-hardware checklist, not a print.
 - **One is a policy question** about who may author a tenant's discounts.
 
-**Asking for exactly two things**, both cheap and both on isolated stacks:
-
-1. The boot-guard command in `10-STAGING-RESULTS.md` §C — closes blocker 6. It
-   starts no server, opens no socket, and touches no database.
-2. A decision on blocker 7, or an explicit "leave as is".
+**Asking for exactly one thing:** a decision on blocker 7 — may a platform
+operator author a campaign inside a customer's tenant — or an explicit "leave as
+is". Everything else on this list belongs to the integration owner, the deploy
+owner, or physical hardware.
 
 The staging stack stays up at `http://127.0.0.1:8113/pos/` (loopback only) for
 independent inspection. Nothing in this document has been run against production.

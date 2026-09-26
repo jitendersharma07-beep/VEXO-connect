@@ -84,8 +84,9 @@ run-20260926-134237.log      235 checks passed · 0 failed · all five phases ex
 
 Why this is a separate claim from the 1767 unit tests: those prove the routes
 against the code. These prove them against **this** artifact's compiled client,
-this migrated database, and this reverse proxy. The scripts live in `verify/`
-and are re-runnable — each resets its own fixtures through real routes.
+this migrated database, and this reverse proxy. The scripts live in `verify/` here
+and are committed at `deploy/stg-tables-verify/` in the repo; all are re-runnable,
+each resetting its own fixtures through real routes.
 
 **The fixtures.** `docker exec pos-stgtbl-backend node prisma/seed.js`, pasted by
 the owner (`db:seed` is deny-listed to me), writing only to `pos_stgtbl`. Seed
@@ -221,28 +222,83 @@ were promoted into **additional** assertions rather than reset past: party
 isolation on a second phone (4 new checks), the till refusing to double-print a
 KOT (2), and refusing to re-cook an already-cooking line (1).
 
-Two harness bugs of my own are also fixed rather than tolerated: `check()` prints
+Three harness bugs of my own are also fixed rather than tolerated: `check()` prints
 its detail on **PASS** as well as FAIL, so five green lines were printing details
-phrased as the failure they were not; and phase 2 crashed on the first clean
+phrased as the failure they were not; phase 2 crashed on the first clean
 end-to-end run because the transfer and split blocks consumed five of the branch's
 six tables, starving the merge fixture — the fixture was starved by its
-predecessors, nothing about merge was wrong.
+predecessors, nothing about merge was wrong; and phase F's missing-`DATABASE_URL`
+probe never actually removed the variable (see below).
 
-### Still blocked
+## C2. Phase F — the production boot guards — PASSED
 
-`verify/06-prod-boot-guards.mjs` is written but **unrun**: it passes
-production-shaped `POS_JWT_SECRET` / `POS_PAYMENT_SECRET_KEY` values via
-`docker exec -e`, which the classifier reads as credential injection. It starts
-no server and opens no socket — it loads `config/env.js` in a child process and
-asserts each production guard both accepts valid config and refuses invalid
-config *with the right message*. Run it with:
+The gap this closes: staging runs `NODE_ENV=development` (§D), which is exactly
+the branch that **skips** the guards in `config/env.js` that would refuse a
+misconfigured *production* deploy. Shipping a production change set without
+exercising them would mean the first time they ever run is against production.
+
+```
+run-bootguards-20260926-142721.log      20 passed · 1 failed · exit 1   (the probe bug, below)
+run-bootguards-20260926-142812.log      22 passed · 0 failed · exit 0   (after the fix)
+```
+
+Both logs are kept. The failing one is not embarrassing, it is the evidence that
+the gate can actually fail — a phase that has only ever been seen green tells you
+nothing about whether it would catch anything.
+
+It is pure configuration validation: `config/env.js` is imported in a child
+process inside the **production image** with a candidate environment, and the
+result recorded. **No server starts, no socket opens, no database is touched, no
+hostname is published.** The baseline values are shapes, not credentials —
+`x`×48, `a`×64, `https://pos.example.com/pos`.
+
+The test is **two-sided on purpose**: "production config loads" alone would also
+pass if every guard had been deleted, so each refusal is asserted **by its own
+message** as well. A refusal with the wrong message means a different guard fired
+and this one may be gone.
+
+| Guard | Refusal message observed |
+|---|---|
+| `POS_QR_BASE_URL` over http | *must be an https:// origin outside test and development* |
+| …pointing at loopback | *host "127.0.0.1" is not reachable from a customer's phone* |
+| …pointing at `.local` | *host "till.local" is not reachable from a customer's phone* |
+| …carrying a query string | *must not carry a query string or fragment* |
+| simulator terminal connector | *Terminal connector "sim-approve" cannot be used in production* |
+| test gateway provider | *Gateway provider "test-approve" cannot be used in production* |
+| short `POS_JWT_SECRET` | *must be at least 32 characters* |
+| truncated `POS_PAYMENT_SECRET_KEY` | *must be 64 hex characters (32 bytes)* |
+| absent `DATABASE_URL` | *Missing required environment variable: DATABASE_URL* |
+| gateway provider with no webhook secret | *POS_GATEWAY_PROVIDER is set but POS_GATEWAY_WEBHOOK_SECRET is missing* |
+
+Plus the accept path (production-shaped config **loads**), and one check that
+earns §D its place: **development really does accept the loopback QR base**, so
+the deviation documented there is demonstrated rather than asserted.
+
+**One correction, recorded not quietly fixed.** The missing-`DATABASE_URL` check
+failed on the first run — *"LOADED — guard is not armed"*. The guard is armed:
+`env.js:15` is `DATABASE_URL: required('DATABASE_URL')` and `required()` throws on
+a falsy value. **The probe was wrong.** It implemented "this variable must be
+absent" by dropping the key from the `docker exec -e` list — but `-e` can only
+*set or override* a variable, never *unset* one, and the container already carries
+its own `DATABASE_URL` from compose. So the flag's absence meant "do not override
+it", `env.js` found a perfectly good URL, and the harness read that as a missing
+guard. Fixed with `env -u DATABASE_URL` inside the container. The message
+assertion is what makes the fix trustworthy: had `env` itself failed, the probe
+would still have "refused", but with the wrong message, and the sub-check would
+have caught it.
+
+That makes **21 of 21** red checks across this whole matrix attributable to the
+assertion rather than the application.
+
+### Run it yourself
 
 ```bash
 cd /home/atc-noc/pos-stg-tables-16a22b0/verify && node 06-prod-boot-guards.mjs
 ```
 
-This one matters for production specifically, because staging runs
-`NODE_ENV=development` (see §D) and therefore never executes those guards.
+Re-runnable and side-effect-free, so it costs nothing to repeat against a future
+artifact — and it should be, since it is the only gate that speaks to production
+configuration rather than to this deployment.
 
 ## D. The one deliberate deviation from production
 
@@ -269,8 +325,12 @@ real payment — the "no live payments" constraint enforced by code, not a flag.
 `mailer.js:67` enforces the recipient allowlist outside production (in production
 it is `null`, i.e. unrestricted). `SMTP_HOST` is unset besides, so mail is off.
 
-**What it costs:** the production boot guards are never executed here. That gap is
-the reason Phase F exists and is an explicit acceptance gate on the change set.
+**What it costs:** the production boot guards are never executed on this running
+stack. That gap is why Phase F exists — and Phase F has now **closed it** (§C2),
+by loading `config/env.js` under production values inside the production image,
+without starting a server. §C2 also demonstrates the claim in this section rather
+than merely asserting it: development genuinely *does* accept the loopback QR base
+that production refuses.
 
 ## E. Verdict
 
@@ -283,21 +343,22 @@ deployed stack is healthy and correctly routed with a real JSON health response 
 **and** every functional area named in the deployment instruction has now been
 exercised against the running stack: login and role isolation, table
 transfer/split/merge, QR order → KOT, billing/payment/refund, promotions, kitchen
-screens and reports. 235 checks, 0 failed.
+screens and reports.
+
+**257 checks, 0 failed** — 235 functional (§C) + 22 production boot guards (§C2).
+Every gate I own is green.
 
 ### Production: **NO-GO** — and I am not requesting approval in this pass.
 
-The reason has changed. It is no longer "the functional matrix has not run". It is
-the four items below, none of which a passing test suite can settle:
+The reason has changed twice, and what is left is the honest remainder. It is no
+longer "the functional matrix has not run" (§C) and no longer "the boot guards
+have never executed" (§C2). It is the items below, **none of which a passing test
+suite can settle** — which is precisely why they are not green:
 
-1. **The production boot guards have never executed.** Staging runs
-   `NODE_ENV=development` (§D), which is exactly the branch that skips them.
-   `verify/06-prod-boot-guards.mjs` exists to close this and is **unrun** — one
-   pasted command (§C).
-2. **Printer paper UAT and encrypted-archive restore are unproven** (§F). Both
+1. **Printer paper UAT and encrypted-archive restore are unproven** (§F). Both
    need something this environment does not have, and neither will be claimed on
    the strength of `printJobs.test.js`.
-3. **Integration is not mine to do.** The staging artifact is
+2. **Integration is not mine to do.** The staging artifact is
    `main 728a57c + x/tables 12fa573`; `12fa573` is not yet in the expansion
    `main`. Deploying this exact artifact to production means integrating that
    commit first, plus the separate v1.0.1 → v1.1 release decision over a

@@ -36,10 +36,23 @@ const PROD = {
   COOKIE_SECURE: 'true',
 };
 
-// env.js is imported for its side effects (it throws at module scope).
+// A null override means "this variable must be ABSENT".
+//
+// CORRECTION, recorded rather than quietly fixed. The first draft implemented
+// that by deleting the key from the -e list. That does not work and produced a
+// false FAIL on the missing-DATABASE_URL guard: `docker exec -e` can only SET or
+// OVERRIDE a variable, never unset one, and the container already carries its own
+// DATABASE_URL from docker-compose. So omitting the flag just meant "do not
+// override it" — env.js found a perfectly good URL and loaded, and my harness
+// read that as "the guard is not armed".
+//
+// The guard is armed: env.js:15 is `DATABASE_URL: required('DATABASE_URL')` and
+// required() throws on a falsy value. The assertion was wrong, not the app.
+// `env -u` inside the container is what actually removes it.
 const probe = async (label, overrides) => {
   const env = { ...PROD, ...overrides };
-  for (const [k, v] of Object.entries(env)) if (v === null) delete env[k];
+  const unset = Object.keys(env).filter((k) => env[k] === null);
+  for (const k of unset) delete env[k];
   try {
     await run(
       'docker',
@@ -47,6 +60,9 @@ const probe = async (label, overrides) => {
         'exec',
         ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         'pos-stgtbl-backend',
+        // `env -u` only when something must be absent, so the common path stays
+        // exactly the command that was already proven to work.
+        ...(unset.length ? ['env', ...unset.flatMap((k) => ['-u', k])] : []),
         'node',
         '-e',
         "import('./src/config/env.js').then(()=>console.log('LOADED')).catch(e=>{console.error(e.message);process.exit(1)})",

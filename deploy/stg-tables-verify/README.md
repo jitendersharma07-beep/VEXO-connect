@@ -1,10 +1,12 @@
 # Staging verification matrix — candidate `16a22b0` (tables lane)
 
-Five phases that exercise a **deployed** VEXO Connect stack through its real
-reverse proxy. Observed result on `pos-stgtbl @ 16a22b0`, 2026-09-26:
+Six phases that exercise a **deployed** VEXO Connect stack through its real
+reverse proxy, plus its production configuration. Observed on
+`pos-stgtbl @ 16a22b0`, 2026-09-26:
 
 ```
-235 checks passed · 0 failed · all five phases exit 0
+235 checks passed · 0 failed · phases 1-5 exit 0     (functional, against the running stack)
+ 22 checks passed · 0 failed · phase F  exit 0     (production boot guards, config only)
 ```
 
 Full evidence, including the GO/NO-GO verdict, is in
@@ -70,28 +72,56 @@ design, since an old bill still points at it).
 the failure — `"840 + 42 ≠ 882"` — makes a green line read like a red one. Pass
 `''` when the claim holds. Several early false alarms in review were exactly this.
 
-## Caveat on `06-prod-boot-guards.mjs`
+## `06-prod-boot-guards.mjs` — the phase that is *not* about this deployment
 
 Staging runs `NODE_ENV=development` (forced: `config/env.js` refuses a non-https,
 loopback `POS_QR_BASE_URL`), which is precisely the branch that **skips** the
-production boot guards. This phase closes that gap by loading `config/env.js` in a
-child process with production-shaped values and asserting each guard both accepts
-valid config and refuses invalid config *with the right message*. It starts no
-server and opens no socket.
+production boot guards. Without this phase, the first time those guards ever run
+would be against production.
 
-It is **unrun** as of this commit: passing production-shaped `POS_JWT_SECRET` /
-`POS_PAYMENT_SECRET_KEY` via `docker exec -e` reads as credential injection to the
-sandbox classifier on the box where the rest of this matrix ran. It remains an
-explicit acceptance gate on the production change set.
+So it runs them here as pure configuration validation: `config/env.js` is imported
+in a child process **inside the production image** with a candidate environment,
+and the result recorded. **No server starts, no socket opens, no database is
+touched, no hostname is published.** The baseline values are *shapes*, not
+credentials — `x`×48, `a`×64, `https://pos.example.com/pos`.
+
+**Two-sided on purpose.** "Production config loads" would also pass if every
+guard had been deleted, so each refusal is asserted **by its own message** too. A
+refusal carrying the wrong message means a different guard fired and the intended
+one may be gone. That design earned its keep immediately: when the
+missing-`DATABASE_URL` probe was fixed, the message assertion is what proved the
+fix was real rather than an unrelated error masquerading as a refusal.
+
+One phase-F check exists to demonstrate rather than assert the deviation above:
+**development genuinely does accept** the loopback QR base that production
+refuses.
+
+### The `docker exec -e` trap this phase walked into
+
+A null override means "this variable must be **absent**". The first draft
+implemented that by dropping the key from the `-e` list — which does not work, and
+produced a false FAIL reading *"guard is not armed"*.
+
+`docker exec -e` can only **set or override** a variable, never **unset** one, and
+the container already carries its own `DATABASE_URL` from compose. Omitting the
+flag therefore meant "do not override it": `env.js` found a perfectly good URL and
+loaded. The guard was armed the whole time (`env.js:15`,
+`DATABASE_URL: required('DATABASE_URL')`). `env -u VAR` inside the container is
+what actually removes it.
 
 ## A red check is a hypothesis about the harness too
 
-Roughly twenty checks failed while this matrix was being written. **Every one was
-the assertion being wrong, not the application** — guest identity is a header and
-not a cookie; a cashier is *supposed* to be able to transfer and merge; `netSales`
-is tax-inclusive. Each correction is commented in the file that carries it rather
-than silently flipped, because the alternative — relaxing an assertion until it
-passes — yields the same green log and proves nothing.
+Twenty-one checks failed while this matrix was being written. **Every single one
+was the assertion being wrong, not the application** — guest identity is a header
+and not a cookie; a cashier is *supposed* to be able to transfer and merge;
+`netSales` is tax-inclusive; `docker exec -e` cannot unset a variable. Each
+correction is commented in the file that carries it rather than silently flipped,
+because the alternative — relaxing an assertion until it passes — yields the same
+green log and proves nothing.
+
+So treat a red line here as a hypothesis about **either** the app **or** the
+check, and find out which before touching either. Track record so far: 21–0 in
+favour of the app.
 
 Three refusals turned out to be features and were promoted into *additional*
 assertions: party isolation on a second phone, the till refusing to double-print a
