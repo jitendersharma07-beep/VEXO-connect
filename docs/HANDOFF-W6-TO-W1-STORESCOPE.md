@@ -239,13 +239,31 @@ confirming the per-file catalogue wipe ran.
 
 ## 4. Integration instructions
 
-1. **Merge or cherry-pick `f672c56` into the candidate before staging.** It is
-   based on `728a57c` = `github/main`, so it should apply cleanly. If another
-   lane has touched `middleware/permissions.js`, resolve in favour of the `AND`
-   form — do not reintroduce the spread.
-2. **Do not split the commit.** The middleware hunk without
-   `storeScopeResolution.test.js` leaves the regression unguarded; that file is
-   the only thing standing between a future refactor and a silent repeat.
+> **Superseded in one respect — read this first.** The tables lane fixed the
+> same defect in the same function a day earlier, in **`ef6bc79`** on `x/tables`,
+> which is already pushed and already inside candidates. The two remedies are
+> functionally identical (theirs wraps only the fragment:
+> `AND: [branchWhereForScope(scope)]` beside top-level `id`/`companyId`; mine
+> puts both inside the `AND`). **Take `ef6bc79` and drop my middleware hunk** —
+> it is earlier, published, and carries the fuller comment. Both cannot be taken:
+> they touch the same lines with different comment text, and that conflict must
+> not be resolved by keeping both comments.
+>
+> Everything below still applies to the **test files**, which do not collide with
+> theirs (`storeScopeGate.test.js`). Note also the correction to `ef6bc79`'s risk
+> assessment in `WINDOW-1-HANDOFF-IDENTITY.md` §2: `orders.js` was *not* masked
+> for assignment-narrowed principals, because `isBranchPinned` is role-based.
+
+1. **Cherry-pick `f672c56` for its two test files, discarding the
+   `permissions.js` hunk** — or copy the files across directly. Base is
+   `728a57c` = `github/main`. `orgIdentity.test.js` overlaps nothing;
+   `storeScopeResolution.test.js` covers all four scope kinds at middleware level
+   plus terminals/users API negatives, and closes the
+   `PUT /brands/:id/stores` coverage gap `ef6bc79` recorded as *not* added.
+2. **Whichever middleware fix lands, keep a regression test with it.** The hunk
+   alone leaves nothing standing between a future refactor and a silent repeat —
+   `storeScopeGate.test.js` or `storeScopeResolution.test.js` both serve; the
+   point is that one of them must be present.
 3. **Gate to re-run after integration** (fast, ~13s, needs no fixtures beyond
    its own):
    ```text

@@ -33,9 +33,21 @@ Expect a hit inside `resolveStoreInScope`. If instead you see
 `...branchWhereForScope(req.perm.scope),` spread into a flat `where`, the
 candidate is **unfixed — do not stage it**.
 
+**Do not test by SHA alone.** Two lanes fixed this independently:
+`f672c56` (Window 6, this lane) and **`ef6bc79`** (tables lane, a day earlier,
+already pushed and already inside candidates). They are functionally identical
+and only **one** will be in the candidate — most likely `ef6bc79`. An
+`--is-ancestor` check against my SHA will report `MISSING-FIX` on a candidate
+that is in fact correctly fixed. If you want a SHA check, test for either:
+
 ```text
-git merge-base --is-ancestor f672c564e5139ed76519375d186f24addbd64d36 <candidate-sha> && echo CONTAINS-FIX || echo MISSING-FIX
+git merge-base --is-ancestor ef6bc79 <candidate-sha> \
+  || git merge-base --is-ancestor f672c564e5139ed76519375d186f24addbd64d36 <candidate-sha> \
+  && echo CONTAINS-A-FIX || echo MISSING-FIX
 ```
+
+The `grep` above is the more reliable check, because it tests the code rather
+than the ancestry.
 
 ## Gate to run against the staged candidate
 
