@@ -33,7 +33,7 @@ const { hashPassword } = await import('../src/lib/crypto.js');
 // artefact that installs, not a copy of it.
 const { PrintAgentClient, newClaimToken } = await import('../../agent/src/client.js');
 const { Runner } = await import('../../agent/src/runner.js');
-const { Journal } = await import('../../agent/src/journal.js');
+const { Journal, PHASE } = await import('../../agent/src/journal.js');
 const { DEFAULTS } = await import('../../agent/src/config.js');
 const { money } = await import('../../agent/src/text.js');
 
@@ -43,6 +43,10 @@ const PW = 'test-password-1';
 // Unique per run so a crashed run cannot collide with the next one on the
 // company slug or the branch publicId, both unique columns.
 const TAG = `w6e2e${Date.now().toString(36)}`;
+// Branch.publicId is CHECK ("publicId" ~ '^VC-[A-Z]{2}-[0-9]{4,}$'), so the
+// base36 TAG fits neither half of it — it carries digits where two capitals are
+// required and letters where digits are.
+const BRANCH_PUBLIC_ID = `VC-QA-${Date.now().toString().slice(-10)}`;
 
 let http;            // the listening server the agent's fetch() talks to
 let baseUrl;
@@ -143,6 +147,19 @@ const enqueue = (body) =>
 
 const jobRow = (id) => prisma.printJob.findUnique({ where: { id } });
 
+// One enqueue fans out to EVERY active target in the branch, and each case here
+// leaves its agent enrolled and active — so by the third case `jobs[0]` is the
+// first target this file ever created, not the one the case under test owns.
+// Every case therefore has to name its own target. Two of these read as product
+// failures when they were this: a job belonging to a retired agent sits QUEUED
+// forever, which looks exactly like a lease the server forgot to sweep.
+const jobIdFor = (res, targetId) => {
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  const mine = res.body.jobs.filter((j) => j.targetId === targetId);
+  expect(mine.length, `jobs for ${targetId} in ${JSON.stringify(res.body.jobs)}`).toBe(1);
+  return mine[0].id;
+};
+
 beforeAll(async () => {
   http = app.listen(0, '127.0.0.1');
   await new Promise((r) => http.once('listening', r));
@@ -159,7 +176,7 @@ beforeAll(async () => {
     },
   });
   branch = await prisma.branch.create({
-    data: { companyId: company.id, publicId: `VC-W6-${TAG.slice(-6)}`, name: 'Till', code: 'W6' },
+    data: { companyId: company.id, publicId: BRANCH_PUBLIC_ID, name: 'Till', code: 'W6' },
   });
   const mk = (email, fullName, role) => prisma.posUser.create({
     data: { email, fullName, role, companyId: company.id, branchId: branch.id, passwordHash },
@@ -193,19 +210,27 @@ afterAll(async () => {
     await prisma.printAgent.deleteMany({ where: { companyId: company.id } });
     await prisma.kitchenItem.deleteMany({ where: { companyId: company.id } });
     await prisma.kitchenRoute.deleteMany({ where: { companyId: company.id } });
-    await prisma.kitchenStation.deleteMany({ where: { branchId: branch.id } });
-    await prisma.kitchenCursor.deleteMany({ where: { branchId: branch.id } });
+    // Guarded: a beforeAll that died between the company and the branch would
+    // otherwise throw here too, and the teardown's error is the one vitest
+    // prints last — burying the failure that actually happened.
+    if (branch) {
+      await prisma.kitchenStation.deleteMany({ where: { branchId: branch.id } });
+      await prisma.kitchenCursor.deleteMany({ where: { branchId: branch.id } });
+    }
     await prisma.orderItemModifier.deleteMany({ where: { orderItemId: { in: items.map((i) => i.id) } } });
     await prisma.orderItem.deleteMany({ where: { orderId: { in: orderIds } } });
     await prisma.kot.deleteMany({ where: { orderId: { in: orderIds } } });
     await prisma.payment.deleteMany({ where: { orderId: { in: orderIds } } });
     await prisma.order.deleteMany({ where: { companyId: company.id } });
-    await prisma.invoiceCounter.deleteMany({ where: { branchId: branch.id } });
+    if (branch) await prisma.invoiceCounter.deleteMany({ where: { branchId: branch.id } });
     await prisma.product.deleteMany({ where: { companyId: company.id } });
     await prisma.category.deleteMany({ where: { companyId: company.id } });
     await prisma.taxRate.deleteMany({ where: { companyId: company.id } });
     await prisma.posAuditLog.deleteMany({ where: { companyId: company.id } });
     await prisma.license.deleteMany({ where: { companyId: company.id } });
+    // Every login() above opened a session, and PosSession_userId_fkey is
+    // RESTRICT — so the users cannot go until their sessions do.
+    await prisma.posSession.deleteMany({ where: { user: { companyId: company.id } } });
     await prisma.posUser.deleteMany({ where: { companyId: company.id } });
     await prisma.branch.deleteMany({ where: { companyId: company.id } });
     await prisma.company.delete({ where: { id: company.id } });
@@ -238,8 +263,7 @@ describe('the shipped agent consumes authorised jobs end to end', () => {
 
       const { order } = await billedOrder();
       const queued = await enqueue({ orderId: order.id, kind: 'RECEIPT' });
-      expect(queued.status, JSON.stringify(queued.body)).toBe(201);
-      const jobId = queued.body.jobs[0].id;
+      const jobId = jobIdFor(queued, targetIds.receipt);
       expect((await jobRow(jobId)).status).toBe('QUEUED');
 
       expect(await runner.pollJobs()).toBe(1);
@@ -273,7 +297,7 @@ describe('the shipped agent consumes authorised jobs end to end', () => {
   it('prints a KOT to a station printer with no money on it', async () => {
     const sink = await printerSink();
     try {
-      const { agentId, client, runner } = await liveAgent({
+      const { agentId, targetIds, client, runner } = await liveAgent({
         name: 'Kitchen till',
         targets: {
           pass: {
@@ -286,8 +310,7 @@ describe('the shipped agent consumes authorised jobs end to end', () => {
 
       const { order, kotId } = await billedOrder();
       const queued = await enqueue({ orderId: order.id, kind: 'KOT', kotId });
-      expect(queued.status, JSON.stringify(queued.body)).toBe(201);
-      const jobId = queued.body.jobs[0].id;
+      const jobId = jobIdFor(queued, targetIds.pass);
 
       expect(await runner.pollJobs()).toBe(1);
       expect((await jobRow(jobId)).status).toBe('CONFIRMED');
@@ -305,7 +328,7 @@ describe('the shipped agent consumes authorised jobs end to end', () => {
   it('replaying a claim token hands back the same jobs and prints one copy', async () => {
     const sink = await printerSink();
     try {
-      const { client, runner } = await liveAgent({
+      const { client, runner, targetIds } = await liveAgent({
         name: 'Replay till',
         targets: {
           receipt: {
@@ -315,7 +338,7 @@ describe('the shipped agent consumes authorised jobs end to end', () => {
         },
       });
       const { order } = await billedOrder();
-      const jobId = (await enqueue({ orderId: order.id, kind: 'RECEIPT' })).body.jobs[0].id;
+      const jobId = jobIdFor(await enqueue({ orderId: order.id, kind: 'RECEIPT' }), targetIds.receipt);
 
       // The response the agent never saw.
       const token = newClaimToken();
@@ -343,7 +366,7 @@ describe('honest delivery semantics against the real queue', () => {
     // ticket may be on the roll; nothing in software can say how much.
     const sink = await printerSink('rst');
     try {
-      const { client, runner, journalPath } = await liveAgent({
+      const { client, runner, journalPath, targetIds } = await liveAgent({
         name: 'Uncertain till',
         targets: {
           receipt: {
@@ -353,7 +376,7 @@ describe('honest delivery semantics against the real queue', () => {
         },
       });
       const { order } = await billedOrder();
-      const jobId = (await enqueue({ orderId: order.id, kind: 'RECEIPT' })).body.jobs[0].id;
+      const jobId = jobIdFor(await enqueue({ orderId: order.id, kind: 'RECEIPT' }), targetIds.receipt);
 
       expect(await runner.pollJobs()).toBe(1);
       expect(runner.stats.uncertain).toBe(1);
@@ -367,10 +390,13 @@ describe('honest delivery semantics against the real queue', () => {
 
       // The journal is the local record that something was in flight, which is
       // what stops the agent re-delivering it after a restart.
+      // Through PHASE, not string literals: the on-disk values are lowercase
+      // ('writing'), and asserting the constant NAMES passed nothing while
+      // reading like it pinned the most important behaviour in the agent.
       const phases = await journalPhases(journalPath);
-      expect(phases).toContain('WRITING');
-      expect(phases).toContain('ABANDONED');
-      expect(phases).not.toContain('REPORTED');
+      expect(phases).toContain(PHASE.WRITING);
+      expect(phases).toContain(PHASE.ABANDONED);
+      expect(phases).not.toContain(PHASE.REPORTED);
 
       // Time passes. The next claim sweeps the dead lease — to UNCERTAIN, not
       // back to QUEUED — so the job is never handed out again.
@@ -393,7 +419,7 @@ describe('honest delivery semantics against the real queue', () => {
   it('a printer that refuses the connection is a clean failure the server re-queues', async () => {
     // Port 1 on loopback: nothing listens, and the refusal arrives before a byte
     // is written, so "not sent" is a fact rather than an inference.
-    const { client, runner } = await liveAgent({
+    const { client, runner, targetIds } = await liveAgent({
       name: 'Refused till',
       targets: {
         receipt: {
@@ -403,7 +429,7 @@ describe('honest delivery semantics against the real queue', () => {
       },
     });
     const { order } = await billedOrder();
-    const jobId = (await enqueue({ orderId: order.id, kind: 'RECEIPT' })).body.jobs[0].id;
+    const jobId = jobIdFor(await enqueue({ orderId: order.id, kind: 'RECEIPT' }), targetIds.receipt);
 
     expect(await runner.pollJobs()).toBe(1);
 
@@ -422,7 +448,7 @@ describe('honest delivery semantics against the real queue', () => {
     // look. What matters is that the agent's evidence is not thrown away.
     const sink = await printerSink();
     try {
-      const { client, runner } = await liveAgent({
+      const { client, runner, targetIds } = await liveAgent({
         name: 'Late till',
         targets: {
           receipt: {
@@ -432,7 +458,7 @@ describe('honest delivery semantics against the real queue', () => {
         },
       });
       const { order } = await billedOrder();
-      const jobId = (await enqueue({ orderId: order.id, kind: 'RECEIPT' })).body.jobs[0].id;
+      const jobId = jobIdFor(await enqueue({ orderId: order.id, kind: 'RECEIPT' }), targetIds.receipt);
 
       const claimed = await client.claimJobs(newClaimToken(), 3);
       expect(claimed.jobs).toHaveLength(1);
@@ -463,7 +489,7 @@ describe('honest delivery semantics against the real queue', () => {
   it('a revoked credential stops the agent claiming, without failing a job', async () => {
     const sink = await printerSink();
     try {
-      const { agentId, client, runner } = await liveAgent({
+      const { agentId, client, runner, targetIds } = await liveAgent({
         name: 'Revoked till',
         targets: {
           receipt: {
@@ -473,7 +499,7 @@ describe('honest delivery semantics against the real queue', () => {
         },
       });
       const { order } = await billedOrder();
-      const jobId = (await enqueue({ orderId: order.id, kind: 'RECEIPT' })).body.jobs[0].id;
+      const jobId = jobIdFor(await enqueue({ orderId: order.id, kind: 'RECEIPT' }), targetIds.receipt);
 
       const revoked = await request(app).post(`/api/print-agents/${agentId}/revoke`)
         .set(auth(tokens.owner)).send({});

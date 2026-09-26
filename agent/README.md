@@ -252,11 +252,15 @@ npm test
 
 The end-to-end test — the shipped client and runner against `createApp()` on a
 real port, with a real TCP printer — is `backend/tests/printAgentClient.test.js`,
-because it needs a database. It runs with the backend suite.
+because it needs a database. 7 tests; last run 2026-09-26, 7/7, exit 0, with
+`~/vexo-connect-x-evidence/printagent/w6-e2e-run.sh`, which needs no database
+password and explains why.
 
 ## Crash recovery
 
-On start, the agent reads its journal and sorts what it finds into three:
+On start, the agent reads its journal and sorts what it finds into three. The
+phase names below are the exported `PHASE` constants; **on disk the values are
+lowercase**, so grep a journal for `"writing"`, not `WRITING`.
 
 - **Bytes were in flight** (`WRITING` with no `WROTE`). Never re-delivered and
   never reported. Left to expire into `UNCERTAIN`, where a human looks at the

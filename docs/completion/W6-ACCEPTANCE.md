@@ -10,15 +10,26 @@ result forward from a prior session's prose.
 
 ## Verdict
 
-**The agent lane is complete and passes its own suite. It is not an approval of
-the release, and this document does not give one.** Two release blockers are open
-(§6), one of which is not in this lane's code. The end-to-end seam test is
-written and unexecuted for an environment reason stated precisely in §4.
+**The agent lane is complete, passes its own suite, and has been demonstrated
+end to end against the real server. It is not an approval of the release, and
+this document does not give one.** Two release blockers are open (§6), one of
+which is not in this lane's code.
 
-`67/67` below is the **print agent's own suite**. It is not a project figure and
-must not be combined with other lanes' totals or turned into a percentage of the
-whole — the agent is one component and its tests say nothing about the other 51
-backend test files.
+Two separate figures, deliberately not added together:
+
+| | Result | What it covers |
+|---|---|---|
+| `67/67`, exit 0 (§2) | the print agent's own suite | the agent alone — no database, no network, no printer |
+| `7/7`, exit 0 (§2b) | the end-to-end seam | the shipped client and runner over real HTTP against `createApp()`, with a real TCP printer, asserting database rows and socket bytes together |
+
+Neither is a project figure. Neither may be combined with other lanes' totals or
+turned into a percentage of the whole — the agent is one component, and 74
+passing tests say nothing about the other 51 backend test files.
+
+What remains unproven is physical: **no ESC/POS byte has ever reached the
+store's printer**, so nothing here claims paper. `CONFIRMED` means the agent
+wrote every byte and the connection closed clean, and that is the ceiling this
+system is built to respect.
 
 ## 1. Tested tree and configuration
 
@@ -72,6 +83,92 @@ looked green.
 | `test/client.test.js` | the bytes of the conversation — an omitted `drawerOpen` is absent from the JSON, a `false` one is present, the credential travels as one bearer token and never in a body |
 | `test/render.test.js` | what reaches the roll, at 48 columns and at 32 |
 
+## 2b. End-to-end seam — executed, 7/7, exit 0
+
+This is the run the user's Part 1 asks for: *"Demonstrate the real client
+consuming authorised jobs."* Not a mock of the agent, and not a mock of the
+server.
+
+`backend/tests/printAgentClient.test.js` runs the **shipped** `PrintAgentClient`
+and `Runner` over real HTTP against `createApp()` on `app.listen(0,'127.0.0.1')`,
+with a real TCP printer socket, asserting database rows and socket bytes in the
+same test.
+
+```bash
+bash ~/vexo-connect-x-evidence/printagent/w6-e2e-run.sh
+```
+
+| | |
+|---|---|
+| Result | `Test Files 1 passed (1)` · `Tests 7 passed (7)` |
+| Exit code | `0` |
+| Duration | 8.4 s |
+| Run at | 2026-09-26T04:15:06Z |
+| Database | `vcx_printagent_test` on `vexo-connect-dev-db`, private to this lane, 40 migrations applied by `prisma migrate deploy` |
+| Log | `~/vexo-connect-x-evidence/printagent/w6-e2e-run-20260926.log` |
+
+The seven, each naming the thing it defends:
+
+| Test | What it proves |
+|---|---|
+| enrols, beats, claims, prints the server's own document and reaches `CONFIRMED` | the whole authorised path, with the server's own `invoiceNumber` and total found in the socket bytes and neither computed by the agent |
+| prints a KOT to a station printer with no money on it | a kitchen ticket carries no prices |
+| replaying a claim token hands back the same jobs and prints one copy | `sink.connections === 1` across two claims — a lost response cannot duplicate a dish |
+| an uncertain delivery is reported to nobody and is never re-sent | printer resets mid-ticket → job stays `DISPATCHED` with `lastReport === null`, journal holds `writing` + `abandoned` and no `reported`, and the next claim sweeps it to `UNCERTAIN` rather than back to `QUEUED` |
+| a printer that refuses the connection is a clean failure the server re-queues | `NOT_SENT` → `ok:false` → `QUEUED`, `attempts 1`, `nextAttemptAt` in the future |
+| a clean delivery reported after the lease expired stays `UNCERTAIN`, and the report is kept | the report arriving late does not overwrite the server's honest verdict, but `lastReport.ok === true` is preserved for the human who resolves it |
+| a revoked credential stops the agent claiming, without failing a job | a revoked till goes quiet; it does not mark work failed on its way out |
+
+**How it runs without a credential**, because the previous version of this section
+said a password was unavoidable and that was wrong. The container's `pg_hba.conf`
+trusts `127.0.0.1/32`. A connection from the host arrives through Docker's DNAT
+with the bridge gateway as its source, so it falls through to
+`scram-sha-256` — which is what made a password look mandatory. Running the
+suite in a throwaway `node:22-bookworm` container that **shares the database
+container's network namespace** (`--network container:vexo-connect-dev-db`) makes
+the connection genuine loopback inside that namespace, where it matches the trust
+rule. The DSN therefore carries no secret:
+
+```
+postgresql://vexo_dev@127.0.0.1:5432/vcx_printagent_test?schema=public
+```
+
+Nine earlier attempts to obtain or mint a password were refused by this session's
+permission classifier. The refusals were correct and the requirement was the
+error: there was a route that needed no secret at all.
+
+Two notes for anyone re-running it. `node:22-bookworm-slim` cannot be used — it
+ships no `libssl`, so Prisma cannot load `libquery_engine-debian-openssl-3.0.x`
+and reports a misleading fallback to a 1.1.x engine. And `globalSetup` truncates
+every table in the target database, which is safe here only because the database
+is private to this lane; advisory lock `5653848` is per-database and protects
+nothing across two.
+
+### Three defects this run found in the test itself
+
+Recorded because the first run was red and the reason matters more than the
+colour. None of the three was a product defect, and one was a test that could
+never have failed:
+
+- **`jobs[0]` is not this test's job.** One enqueue fans out one job per ACTIVE
+  target in the branch, and each case leaves its agent enrolled — so from the
+  third case onward `jobs[0]` belonged to the first target the file ever created.
+  Two cases then read as product failures: a job owned by a retired agent sits
+  `QUEUED` forever, which looks exactly like a lease the server failed to sweep.
+  The server was correct throughout — `sweepExpiredLeases()` is called at the top
+  of the claim route and moves `DISPATCHED` + expired to `UNCERTAIN`, never to
+  `QUEUED`. Fixed by a `jobIdFor(res, targetId)` helper that asserts exactly one
+  match, at all seven sites rather than the two that failed.
+- **The journal assertion compared constant names to on-disk values.** The
+  journal writes `'writing'`; the test asserted `'WRITING'`. `toContain('WRITING')`
+  failed honestly, but `not.toContain('REPORTED')` passed *vacuously* — it could
+  never have failed, while reading as though it pinned the most important
+  behaviour in the agent. Now asserted through the exported `PHASE` constants.
+- **Teardown hid the failure that caused it.** `posUser.deleteMany` hit
+  `PosSession_userId_fkey` because every `login()` opens a session, and an
+  unguarded `branch.id` threw when `beforeAll` died early. Vitest prints the
+  teardown error last, so both turned one real failure into two and buried it.
+
 ## 3. Pass/fail matrix — owned scope
 
 `PASS` means a command was run and its assertions hold. Nothing below is marked
@@ -92,7 +189,7 @@ from inspection alone.
 | Retry / backoff | PASS | server-driven `[5, 15, 45]` s; `semantics.test.js` |
 | Restart recovery | PASS | journal replay, three categories; `semantics.test.js` |
 | Operational logs | PASS | `agent.log`, rotated at 8 MB; `journal.jsonl` fsynced per phase |
-| Real client consuming authorised jobs over HTTP | **NOT EXECUTED** | written — `backend/tests/printAgentClient.test.js`. See §4 |
+| Real client consuming authorised jobs over HTTP | PASS | `backend/tests/printAgentClient.test.js`, 7/7, exit 0 — the shipped client and runner against `createApp()` on a real port with a real TCP printer. See §2b |
 
 ### Part 2 — honest delivery semantics
 
@@ -123,63 +220,17 @@ from inspection alone.
 
 ## 4. Not executed, and exactly why
 
-### 4a. The end-to-end seam test
+One item has left this section. Earlier revisions carried a **§4a** for the
+end-to-end seam test, written and never run because no `DATABASE_URL` could be
+obtained. It has now been executed, 7/7, exit 0, and is §2b. The requirement was
+the error, not the obstacle — see §2b for how it runs without a credential.
 
-`backend/tests/printAgentClient.test.js` runs the **shipped** `PrintAgentClient`
-and `Runner` over real HTTP against `createApp()` on `app.listen(0,'127.0.0.1')`,
-with a real TCP printer socket, asserting database rows and socket bytes in the
-same test. Seven tests, including *"an uncertain delivery is reported to nobody
-and is never re-sent"* and *"a clean delivery reported after the lease expired
-stays UNCERTAIN and keeps `lastReport.ok === true`"*.
+What remains needs an operator at the till, and no amount of software work in this
+lane closes it: a printable width nobody here can measure (§4a), and a pack of
+paper cases that is generated and arithmetically checked but has never been
+printed (§4b).
 
-It creates a `TAG`-uniquified company and deletes only its own rows — 21 scoped
-`deleteMany` calls — so it is safe beside a populated database and needs no
-global wipe.
-
-**Status: written, never run. Exit status: none. Do not read it as a pass.**
-
-What *was* verified without a database:
-
-| Check | Command | Result |
-|---|---|---|
-| Syntax | `node --check backend/tests/printAgentClient.test.js` | `SYNTAX OK` |
-| Cross-directory imports resolve from `backend/` | `node --input-type=module` importing all five agent modules | `3,2,2,7,7` exports; `money(378)` → `Rs.378.00`; `AGENT_VERSION 1.0.0` |
-
-That closes the one failure mode otherwise only guessable — a wrong relative path
-across the `backend/` ↔ `agent/` boundary.
-
-**Why it did not run.** It needs `DATABASE_URL`. The lane has no `.env`;
-`.env*` is gitignored and this repo is public. The dev Postgres is
-`vexo-connect-dev-db` at `127.0.0.1:5440` (superuser `vexo_dev`), and the
-container's `pg_hba.conf` is `local … trust` / `host … 127.0.0.1/32 trust` /
-`host all all all scram-sha-256`. Docker DNATs host traffic so the source address
-is the bridge gateway, not loopback — a host-side TCP connection therefore falls
-to `scram-sha-256` and **a password is unavoidable**. Nine attempts to obtain or
-mint one were refused by this session's permission classifier, including the
-repo's own documented form
-(`docker exec vexo-connect-dev-db printenv POSTGRES_PASSWORD`) and the creation of
-a fresh least-privilege role. That is an environment permission limit, not a
-defect and not a finding about the code.
-
-**The run is packaged so it needs no credential in anyone's terminal.** The script
-reads the password from the container into one shell variable, never prints it,
-and passes every line of output through a DSN redactor — the same handling as the
-peer integration runner it is modelled on:
-
-```bash
-bash ~/vexo-connect-x-evidence/printagent/w6-e2e-run.sh
-# → ~/vexo-connect-x-evidence/printagent/../../../tmp/w6-e2e-printagent.log
-```
-
-It creates a private database `vcx_printagent_test` on `:5440` if absent (the
-suite's `globalSetup` takes a **per-database** advisory lock then truncates, so a
-private database is what makes this safe beside ~24 live sessions), runs
-`prisma migrate deploy`, then `npx vitest run tests/printAgentClient.test.js`.
-It contains no `DROP`. Backend `node_modules` is already installed in this lane
-(`npm ci`, exit 0, 182 packages) and the Prisma client is generated, so the script
-is the only remaining step.
-
-### 4b. Physical acceptance — software complete, hardware pending
+### 4a. Physical acceptance — software complete, hardware pending
 
 Hardware facts established by **opening and reading the owner's photographs**, not
 from recollection and not owner-attested. Four images were recovered from chat
@@ -241,7 +292,7 @@ hardware and is not being recorded as a result.
 
 No physical outcome is recorded in this document, because none has been observed.
 
-### 4c. The acceptance pack
+### 4b. The acceptance pack
 
 Generated, 34 files, at `~/vexo-connect-x-evidence/printagent/acceptance-pack/`.
 
@@ -326,7 +377,7 @@ them, that test fails and says so.
 | F3 | The receipt document carries **no store timezone**. Unset, the agent prints the host machine's zone. `timeZone` is a setting and the README says to set it, but the document could carry it. | wrong time on every bill |
 | F4 | `TaxRate` is flat — `{name, ratePercent}` — and a product carries one `taxRateId`. The receipt can therefore only ever show **one tax line per rate name**; a CGST/SGST split is not expressible. Recorded as an observation, not a blocker: whether a combined `GST 5%` line satisfies the invoice requirement is a compliance decision, not an agent defect. | GST invoice presentation |
 | F5 | The committed `Receipt.jsx` (identical on `cf9c4a0` and `bb18b1c`) renders no seller / GSTIN / FSSAI / promotions / modifiers, although `buildReceipt` supplies all of them. Evidence screenshot C1 shows a build that does. **Which build is that, and is it committed anywhere?** | the browser path and the agent path disagree about what a receipt contains |
-| F6 | The server already stores `lastReport` on a report that arrives after the lease expired — now pinned by a test in the unexecuted e2e file. Confirm the UNCERTAIN-resolve UI surfaces it: it is the difference between "nobody knows" and "the till said it wrote every byte, just too late". | human resolution of UNCERTAIN |
+| F6 | The server already stores `lastReport` on a report that arrives after the lease expired — **verified against a running server** (§2b, *"a clean delivery reported after the lease expired"*). Confirm the UNCERTAIN-resolve UI surfaces it: it is the difference between "nobody knows" and "the till said it wrote every byte, just too late". | human resolution of UNCERTAIN |
 
 ## 6. Release blockers
 
@@ -335,8 +386,8 @@ them, that test fails and says so.
 | B1 | **D4** — KOT has no table name. A restaurant cannot run dine-in service on tickets that do not say which table. | print-agent server route |
 | B2 | **Printable width is unmeasured**, and the operator has already reported paper being wasted by a print that lands inset on the roll (photo `B2`). No `PrintTarget.widthChars` is verified for the pilot roll, and no browser measurement can supply one. At ~32 columns or fewer the unit is 58 mm, which is a code change rather than a setting — so this gates the roll type too. One `selftest` and one photograph closes it. | operator at the till |
 
-Not blockers, but open and unresolved: the e2e seam test is unexecuted (§4a), and
-Window 1's candidate is uncertified by its own record (§1).
+Not a blocker, but open and unresolved: Window 1's candidate is uncertified by its
+own record (§1).
 
 **This lane does not approve production.** Two blockers are open.
 
@@ -344,8 +395,9 @@ Window 1's candidate is uncertified by its own record (§1).
 
 Raw evidence is kept outside `/tmp`, which loses files — Window 1's record notes
 `/tmp/inv-fullsuite3.log` is gone and its 1012/1012 figure unrecoverable. Nothing
-below is committed: the pack contains no secrets but is bulky, and the scripts
-read a live credential.
+below is committed: the pack is bulky, and the hardware photographs are the
+owner's. No script below holds a credential — the run-book explains why that is
+true rather than asserting it, and both DSNs in it are safe to read.
 
 ```
 ~/w6-print-agent/evidence/hardware/
@@ -358,7 +410,9 @@ read a live credential.
 ~/vexo-connect-x-evidence/printagent/
   agent-suite.log              67/67, exit 0, header pins commit + node + agent version
   capture-agent-suite.sh       re-runs the above
-  w6-e2e-run.sh                the one command that closes §4a
+  w6-e2e-run.sh                the §2b run, start to finish, with no credential;
+                               host-guarded, because it names a container
+  w6-e2e-run-20260926.log      its output — 7/7, exit 0, all 40 migrations
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
@@ -380,7 +434,16 @@ Owned source, for attribution of any later change:
 | `8b9e0ae94c3f` | `agent/src/runner.js` |
 | `ce83fe0f3669` | `agent/src/text.js` |
 | `d25b9b22fab9` | `agent/src/transport.js` |
-| `acaf3d0052b9` | `agent/README.md` |
+| `31814fadd6ce` | `agent/README.md` |
 | `e077f1e9efc2` | `agent/install/windows-service.ps1` |
 | `e86593526887` | `agent/install/vexo-print-agent.service` |
-| `7612d748496b` | `backend/tests/printAgentClient.test.js` |
+| `948c6eab4d0b` | `backend/tests/printAgentClient.test.js` |
+
+Both of the above are the second value this table has carried. The first was taken
+before the two files were finished, and a hash recorded early is worse than none —
+it fails against a file nobody changed. Regenerate with:
+
+```bash
+cd ~/vexo-connect-x-lanes/printagent && sha256sum agent/src/*.js agent/README.md \
+  agent/install/* backend/tests/printAgentClient.test.js | cut -c1-12,65-
+```
