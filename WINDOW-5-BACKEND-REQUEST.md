@@ -284,6 +284,23 @@ integration authorities would be worse than none.
 
 ## 6. W4 / inventory — two exception detectors now claim "found none"
 
+> **RESOLVED UPSTREAM — no action required. Fixed on `main` by `02ee253`**
+> ("Say nothing rather than zero when a detector's data arrived but its code
+> never did"), reached independently from the inventory side. Verified here by
+> reading the gate on `main` (`d625370`), not by re-running W4's suite — whether
+> the suite is green is W4's to certify, not W5's.
+>
+> The fix is better than either option this section proposed. Rather than
+> implementing the stubs or narrowing `needs`, all four detectors now carry
+> `implemented: false`, and `detectorState` checks it **last**
+> (`exceptions.js:479`) so a missing model still answers "Not part of this
+> deployment" and a missing provider still answers `PENDING_INTEGRATION`. Only
+> the case this section actually described — data arrived, detector never
+> written — reaches the new branch. `SETTLEMENT_MISMATCH` is not flattened.
+>
+> The finding below is kept as the record of what was measured at `77242fe`. It
+> is history, not an open request.
+
 Found while establishing W5's baseline, outside W5's scope, reported here
 because the screen that renders it is on W5's list.
 
@@ -321,6 +338,10 @@ failing kind; `OVERDUE_REQUEST` is the same defect, currently masked.
 W5 has not touched it. Whoever owns `exceptions.js` should decide whether to
 implement the two detectors or tighten `needs` to something the stub actually
 requires.
+
+**Outcome:** the owner chose a third and better option — an explicit
+`implemented` flag, evaluated after the model and integration gates. See the
+banner at the top of this section. Nothing further is asked of W4 here.
 
 ---
 
@@ -484,7 +505,7 @@ Log: `~/vcx-experience-local/evidence/baseline-77242fe.log`.
 |---|---|
 | `integrations.test.js` 100,000-row loyalty import | timeout at 900086ms against a 900000ms limit, while two sibling lanes were running. **Passes in isolation** — 119/119, the import in 770807ms. Load, not a regression. Log: `evidence/integrations-solo-PASS.log`. |
 | `invitations.test.js` weak-password | timeout at 20088ms against 20000ms. **Passes in isolation** — load, not a regression. |
-| `reportingExceptions.test.js` NEAR_EXPIRY | **Real.** Fails in isolation. §6. |
+| `reportingExceptions.test.js` NEAR_EXPIRY | **Real** at `77242fe`. Fails in isolation. §6 — since **fixed on `main` by `02ee253`**, so this failure is historical and does not apply to the current candidate. |
 
 All three classified: two are load artefacts of running three lanes at once,
 one is a real pre-existing defect that belongs to §6. Nothing in the baseline

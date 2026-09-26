@@ -275,17 +275,40 @@ captain-reach.sh}`.
 | `77242fe` | base this branch was cut from, and the source all results above were measured on |
 | `6764af3` | the delivery — 9 files, +2977 |
 | `9c8fc7e` | this section, plus §10 |
+| `0d7e997` | stopped this document naming a SHA it moves itself |
+| *(head)* | §6 marked resolved upstream; this section corrected once the branch was published and PR #5 opened |
+
+`main` has moved on since the base — it is at `d625370` at the time of writing,
+four commits past the `cf9c4a0` this branch was compared against earlier. None of
+those four touches any of the 9 files here, which is why no rebase is needed; the
+merge-ref check in §10 is what actually establishes that, and it is cheap to
+re-run when `main` moves again.
 
 Later commits on `x/experience` may sit on top; `6764af3` is the one that
-carries the tested source.
+carries the tested source. Doc-only commits after it do not change any tested
+file — the guard in §10 is what proves that, not this sentence.
 
-Branch `x/experience`, **not yet on the remote**. It does not exist on
-`github` (`git ls-remote --heads github x/experience` is empty), so publishing
-it creates a new branch and advances nothing. `main` is untouched and was never
-a push target.
+### Published, and under review
 
-The push itself is deliberately left for the owner to run — see the end of this
-document.
+Branch `x/experience` **is on the remote**, pushed as a new branch with no force.
+`main` was never a push target and no W5 commit advanced it.
+
+**PR #5** → `main`. Verified without `gh`, by reading the pull-request refs the
+remote advertises:
+
+```
+git -C ~/vexo-connect-x-lanes/experience ls-remote github 'refs/pull/5/*'
+```
+
+`refs/pull/5/head` must equal local `HEAD`. `refs/pull/5/merge` existing at all
+is the useful signal — the remote only computes a merge commit when the merge is
+conflict-free — and its parents must be `main` plus that head.
+
+**A clean merge preview is not functional acceptance.** It says the diff applies,
+nothing more. What this PR does *not* yet prove is listed in §9: a captain still
+cannot place an order, so the handheld's send path is unexercised against a
+server that permits it. Merge needs integration evidence green on the candidate,
+not a green merge box.
 
 ---
 
@@ -296,7 +319,7 @@ document.
 | §1/§2 | CAPTAIN admitted to `operate` in `orders.js` and the `tableQr.js` gate | W3 | a captain doing the job the role is named for |
 | §3 | `order.item.void` granted to two roles, reachable by neither | W3 | nothing in W5; recorded, not changed |
 | §4 | Idempotency keys on `POST /orders`, `/:id/items`, `/:id/kot` | W3 | nothing today — client reconciles instead |
-| §6 | `reportingExceptions.test.js` NEAR_EXPIRY — real, pre-existing | W4 | one baseline failure |
+| ~~§6~~ | ~~`reportingExceptions.test.js` NEAR_EXPIRY~~ — **RESOLVED** on `main` by `02ee253`, via an explicit `implemented: false` gate | W4 (closed) | nothing |
 | §7 | A paid table reads `FREE` on any floor run without guest scans | visits owner (`zen-bhabha`) | `PAID` ≠ `FREE` being visible in practice |
 | §8 | A kiosk ordering surface — ownership itself is the open question | unresolved | the entire kiosk deliverable |
 | §5 | W1 to publish `CONTROL.md` | W1 | coordination |
@@ -308,14 +331,15 @@ route-level evidence rather than edited across an ownership line.
 
 ---
 
-## 10. Publishing the branch
+## 10. Publishing, and verifying what was published
 
-The work is committed; the push is not run from here. Pushing to the shared
-remote is an owner action, and `x/experience` does not yet exist on `github`, so
-this creates a new branch:
+The push is never run from here. Pushing to the shared remote is an owner action,
+and in this environment it is also refused by the agent safety classifier —
+independently of the permissions table, so it cannot be allow-listed. The branch
+exists on `github` now; subsequent pushes update it rather than create it:
 
 ```
-git -C ~/vexo-connect-x-lanes/experience push -u github x/experience
+git -C ~/vexo-connect-x-lanes/experience push github x/experience
 ```
 
 Then verify the remote actually holds it. These two must print the same SHA —
@@ -330,5 +354,30 @@ git -C ~/vexo-connect-x-lanes/experience ls-remote --heads github x/experience
 Whatever that SHA is, `git log --oneline` must still show `6764af3` in its
 history — that is the commit these results were measured on.
 
-`main` is not a target and was not advanced. Coordination with W1 on merge
-order is still open — §5.
+### Verifying the pull request without `gh`
+
+`gh` is not installed here, and a personal access token belonging to someone else
+is not an acceptable substitute for it. The remote advertises pull-request refs,
+which is enough:
+
+```
+git -C ~/vexo-connect-x-lanes/experience ls-remote github 'refs/pull/*'
+```
+
+Refs appear the instant a PR is created, drafts included. Three checks:
+
+1. `refs/pull/5/head` equals local `HEAD`.
+2. `refs/pull/5/merge` exists — the remote computes it only for a conflict-free
+   merge. Its parents must be `main` plus that head, which is what proves the PR
+   targets `main` rather than something else.
+3. `git diff github/main refs/pull/5/merge` lists **only** the 9 owned files.
+   This is the check that matters most: it is how you would catch a co-tenant's
+   work having been swept in, which has happened in this organisation before.
+
+Before trusting a *negative* result from step 1, confirm the method works by
+finding a sibling lane's existing PR in the same listing. An empty answer and a
+broken method look identical otherwise.
+
+`main` is not a push target and was not advanced. Coordination with W1 on merge
+order is still open — §5. **Merge is gated on integration and Captain-workflow
+evidence being green on the candidate, not on the merge box being green.**
