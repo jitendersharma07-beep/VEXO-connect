@@ -21,7 +21,7 @@ measurement, and its test harness does not finish deterministically.
 | Q2 | **Does `CAPTAIN` ship untested?** It is a six-permission bundle over existing order/KOT routes — including `order.item.void`, the right to void a line on someone else's order — and `CAPTAIN` appears in **0 of the candidate's 52 test files**. Its own schema comment says *"takes orders, cannot bill"*; nothing asserts that. | Writing those tests is implementation, and this lane must not become a second implementation owner |
 | Q3 | **Does licence enforcement gate anything?** The mechanism is correct and fails closed (14/14), and by the suite's own final assertion it gates **no action** in this candidate. | Whether that is intended for v1.1 is a product decision. §7f, A3 |
 | Q4 | **Does the API container ship running as root?** No `USER` directive, `/app` is `root:root`, confirmed by `id` inside the running container — and the base image already carries an unused `node` user at uid 1000. | A one-line `chown` + `USER node`, but it is a peer file. §7g, A7 |
-| Q5 | **Which build produced evidence screenshot `C1`?** It renders seller / GSTIN / FSSAI / promotions / modifiers. The committed `Receipt.jsx` renders none of them, although `buildReceipt` supplies all of them. | The browser path and the agent path disagree about what a receipt contains, and this lane cannot tell which is the intended one. §5 F5 |
+| Q5 | **Is the browser receipt meant to omit the seller block and itemised promotions?** *Narrowed by measurement — the original question, "which build produced screenshot `C1`", now has a partial answer: **not this one**.* The frontend release image was built and its bundle contains no reference to `receipt.seller` and no occurrence of `promotions`, against nine `buildReceipt` keys present as controls. So no rebuild of `d625370` will reproduce `C1`, and either it came from an uncommitted tree or it is captioned as something it is not. The product question behind it is still yours: the server composes a GST-complete receipt and the agent prints one, while the browser prints neither. | Two renderers, one payload, different documents. Which is correct is a product decision. §7j, §5 F5 |
 
 ## 2. Release blockers
 
@@ -52,12 +52,17 @@ a candidate whose suites report a different failure each run cannot be certified
 anyone, in any lane. It is also the cheapest open item to fix.
 
 The remaining findings, in one line each: **A2** shared-database wipes delete each
-other's rows (§7e) · **A3** licence gate has nothing behind it (§7f) · **A4** the image
-runs Node `v20.20.2` while every figure in this programme came from Node 22, and
-`backend/package.json` has no `engines` field although `agent/package.json` does
-(§7g) · **A5** the frontend `.dockerignore` misses nested paths where the backend's
-does not (§7g) · **A7** the API container runs as root (Q4 above) · **A8** `EXPOSE 5000`
-against `PORT || 5010` (§7g).
+other's rows (§7f) · **A3** licence gate has nothing behind it (§7g) · **A4** both
+images run Node 20 while every figure in this programme came from Node 22, and
+neither `backend/package.json` nor `frontend/package.json` has an `engines` field
+although `agent/package.json` does (§7h) · **A5** the frontend `.dockerignore` misses
+nested paths where the backend's does not — measured, four `.md` in the context, none
+reaching the image (§7j) · **A7** the API container runs as root (Q4 above) ·
+**A8** `EXPOSE 5000` against a `5010` default — **now reconciled**, because
+`docker-compose.prod.yml` sets `PORT: 5000` and `nginx.conf` proxies there, so it is
+correct under compose and misleading only outside it (§7j) · **A10** new: a stale
+asset request returns `200` and HTML rather than `404`, because `location /assets/`
+has no `try_files`. One line in `frontend/nginx.conf` (§7j).
 
 ## 4. What this lane verified on the candidate, so it is not re-run
 
@@ -91,11 +96,22 @@ large production table* — is correct in mechanism and now has a number against
 also means the self-reported duration of any Prisma migration understates its
 write-blocking window; worth knowing before the production window is scheduled. §7d
 
-Also established, first time in this programme: **the backend release image builds
-(53.7 s, 13 layers, 162 MiB), boots, and answers `GET /health` with `200`** — which
-also proves Prisma loaded its engine and reached Postgres. It ships no `.env`, no
-`*.md` and no `_proof` asset. That is one container, one probe, an empty database and
-no frontend image: evidence, not a certification. §7g
+Also established, first time in this programme: **both release images build and
+serve.** The backend (53.7 s, 13 layers, 162 MiB) boots and answers `GET /health` with
+`200`, which also proves Prisma loaded its engine and reached Postgres. The frontend
+(19.4 s, 10 layers, 20.2 MiB) serves its bundle with `no-store` on `index.html`,
+`immutable` on hashed assets, a working SPA fallback, and a build context measured
+clean of `.env`, `node_modules`, `dist*` and `public/_proof/`. Neither ships a `.env`,
+a `*.md` or a `_proof` asset.
+
+One design decision in `nginx.conf` was tested rather than taken on trust, and it
+holds: resolving the backend through a variable is what lets the frontend container
+start at all when the backend is not yet resolvable — the same config with a literal
+upstream fails with `[emerg] host not found in upstream "backend"`. That is why
+`depends_on` can safely be start-order rather than `service_healthy`.
+
+Still two containers and two probes against an empty database, with the two never
+pointed at each other: evidence, not a certification. §7h, §7j
 
 ## 5. The print agent itself
 
@@ -132,8 +148,19 @@ owners.
   armed. The remaining step is **owner-gated**: the gpg private key is
   passphrase-protected, the proof has to happen on the owner's own machine, and the
   current destination is a host this lane is instructed not to access.
-- **The frontend image** was never built, and the backend image was exercised by one
-  health probe against an empty database.
+- **The stack.** Both release images have now been built and served — backend
+  `GET /health` → `200`, frontend serving its bundle with the right cache headers and
+  a working SPA fallback — but **they have never been pointed at each other**. No
+  compose project was brought up, so `depends_on`, both healthchecks, the
+  `prisma migrate deploy` boot command and the same-origin cookie path are unexercised.
+  The script that would close it is written (`w6-audit-stack.sh`) and needs the owner
+  to run it: this lane's tooling declined `docker compose up` against a file named
+  `docker-compose.prod.yml`, correctly, given the standing instruction to perform no
+  production operations. Worth knowing before anyone runs it by hand — **a `pos-prod`
+  project of the *previous* candidate is live on this box right now**, and
+  `docker-compose.prod.yml` carries `name: pos-prod`, so an unqualified `up` from the
+  candidate's copy would adopt or recreate those containers. The script forces its own
+  project name and port for exactly that reason.
 - **Kiosk** — see Q1. Not a coverage gap.
 
 ## 7. If you cut a newer candidate

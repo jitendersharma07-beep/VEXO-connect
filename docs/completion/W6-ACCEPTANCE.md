@@ -15,7 +15,7 @@ end to end against the real server. The independent audit of the combined
 candidate is NOT complete. This is not an approval of the release, and this
 document does not give one.** Two release blockers are open (§6), one of which is
 not in this lane's code; parts of the audit remit are unmeasured, one of them because
-the feature is not in the candidate at all (§7i, §7j).
+the feature is not in the candidate at all (§7i, §7k).
 
 Five separate figures. The first two are this lane's own work; the last three are the
 candidate's code, measured by this lane's audit:
@@ -32,7 +32,7 @@ None of the five is a project figure, and none may be combined with other lanes'
 totals or turned into a percentage of the whole. The agent is one component, and
 the last three rows are somebody else's code that this lane merely measured — a green
 result there says those suites pass, not that the release is ready. The fifth is not
-even green, and it is printed at its true exit status on purpose. The 1,065 in §7j
+even green, and it is printed at its true exit status on purpose. The 1,065 in §7k
 is the count of candidate tests this audit executed, which is a statement about
 audit coverage and nothing else.
 
@@ -44,6 +44,15 @@ and the planner switching from `Seq Scan` to `Bitmap Index Scan`. The commit's c
 quadratic cost measures as N^1.83 — right family, slightly strong — and extrapolates to
 974–1,401 s at 100,000 customers, which independently reproduces the 900 s overrun it
 was written for. §7d.
+
+**Both release images now build and serve, and neither has ever met the other.** The
+backend answers `GET /health` (§7h); the frontend serves its bundle with the cache
+headers and SPA fallback its config intends (§7j). Two images that each work alone is
+a weaker claim than a stack, and it is the only one this lane makes — the compose
+project that would settle it is written and owner-gated (§7j). The frontend build
+also answers **Q5**: nothing in the shipped bundle reads `receipt.seller`, and
+`promotions` occurs nowhere in it, so evidence screenshot `C1` was not produced by
+this candidate and no rebuild of it will reproduce that screenshot.
 
 What remains unproven is physical: **no ESC/POS byte has ever reached the
 store's printer**, so nothing here claims paper. `CONFIRMED` means the agent
@@ -259,12 +268,12 @@ and the rows below say which parts are which rather than averaging them.
 | Recovery behaviour | PASS | `accountRecovery` 33/33 and `accountRecoveryOutage` 5/5. §7b |
 | **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7g |
 | Fresh-migration and populated-migration evidence | **PASS** | 41 applied to an empty database twice (§2b at 40, §7a at 41), and now to a **populated** one: migrated to 40, loaded to 100,000 customers / 200,000 links / 64 MB, then the 41st applied on top — 41 applied, index built, all 300,000 rows survived. Prisma recorded 342 ms; a concurrent writer was blocked **6.714 s**, which is the number the migration’s own production note was missing. §7d |
-| Release images and build context | PARTIAL | the backend image **built (53.7 s), booted, and answered `GET /health` with `200`** — the first such evidence in this program. Four findings (A4, A5, A7, A8) and three things done right. No frontend image was built, and one health probe is not a release. §7h |
+| Release images and build context | PARTIAL | **both images now built.** Backend: 53.7 s, booted, `GET /health` → `200` (§7h). Frontend: 19.4 s, 20.2 MiB, serves its bundle with `no-store` on `index.html`, `immutable` on hashed assets, working SPA fallback, and a build context measured clean of `.env`, `node_modules`, `dist*` and `public/_proof/` (§7j). Five findings — A4, A5, A7, A8 and the new **A10** — and several things done right, including a design comment in `nginx.conf` that was tested and holds. Still PARTIAL, and deliberately: **the two images have never been pointed at each other.** The compose stack is written and owner-gated |
 | **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7i, A6 |
-| Defects returned to the responsible window | PASS | A1–A9 in §7c–§7i, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
+| Defects returned to the responsible window | PASS | A1–A10 in §7c–§7j, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
 | **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7i, A6 |
 | Stock-effect / billing reconciliation beyond the gateway | **PARTIAL** | 17 files run, **629/631, exit 1**. Every valuation and reconciliation assertion that executed, passed; the two failures are `beforeEach` timeouts, and a re-run failed on a *different* test with the same message. The stock code is not implicated — the harness is, and that is **A9**. A suite that cannot finish deterministically cannot certify anything, so this is not a pass. §7c |
-| Restore-from-backup evidence | **NOT VERIFIED** | no restore was performed by this lane, and none is claimed by any peer document either — Window 3’s handoff says so in those words. What *is* evidenced is that an encrypted archive ships. The step that would settle it needs the owner’s own machine and private key, and its destination is a host this lane is instructed not to access. §7j |
+| Restore-from-backup evidence | **NOT VERIFIED** | no restore was performed by this lane, and none is claimed by any peer document either — Window 3’s handoff says so in those words. What *is* evidenced is that an encrypted archive ships. The step that would settle it needs the owner’s own machine and private key, and its destination is a host this lane is instructed not to access. §7k |
 
 ## 4. Not executed, and exactly why
 
@@ -444,6 +453,12 @@ them, that test fails and says so.
 | D5 | **The KOT carries no station name**, although `targetsFor()` routes by station and has it in hand. A station printer's ticket does not name its station. | Low — the printer is the station |
 | D6 | **`type` is `order.type`** (`DINE_IN`/`TAKEAWAY`/`DELIVERY`), not a KOT type. It is never printed, so the kitchen cannot tell plate from pack. Consequently the agent's `VOID KOT` title is unreachable through the real route, since `order.type` is never `'VOID'`. | Medium — plate vs pack is a real kitchen decision |
 
+### Open — owner: the window that owns `frontend/nginx.conf`
+
+| # | Finding | Severity |
+|---|---|---|
+| A10 | **A request for an asset that no longer exists returns `200` and an HTML body.** `GET /no-such-asset.js` → `200`, 549 bytes, `Content-Type: text/html`. `location /assets/` sets cache headers but declares no `try_files`, so a miss falls through to the SPA fallback and is served `index.html`. After a redeploy, a client still holding the old `index.html` — or a warm CDN, or a crawler — requests `/assets/index-<oldhash>.js` and the module loader fails on `<` instead of on a clean 404. The author already reasoned about this exact failure in the comment above `location = /index.html`; `no-store` closes the common path and this is the uncommon one. One line: `location /assets/ { try_files $uri =404; ... }`. Measured in the built image, §7j | Low in effect, high in diagnosis cost — the symptom appears in application code, not at the proxy |
+
 ### Open — facts owed, not defects
 
 | # | Fact | Why it matters |
@@ -452,7 +467,7 @@ them, that test fails and says so.
 | F2 | `enrol` returns only `{agentId, secret}`. An installer cannot confirm **which store** the till was bound to, so a code pasted into the wrong till installs cleanly and prints another store's tickets. | binding confirmation |
 | F3 | The receipt document carries **no store timezone**. Unset, the agent prints the host machine's zone. `timeZone` is a setting and the README says to set it, but the document could carry it. | wrong time on every bill |
 | F4 | `TaxRate` is flat — `{name, ratePercent}` — and a product carries one `taxRateId`. The receipt can therefore only ever show **one tax line per rate name**; a CGST/SGST split is not expressible. Recorded as an observation, not a blocker: whether a combined `GST 5%` line satisfies the invoice requirement is a compliance decision, not an agent defect. | GST invoice presentation |
-| F5 | The committed `Receipt.jsx` (identical on `cf9c4a0` and `bb18b1c`) renders no seller / GSTIN / FSSAI / promotions / modifiers, although `buildReceipt` supplies all of them. Evidence screenshot C1 shows a build that does. **Which build is that, and is it committed anywhere?** | the browser path and the agent path disagree about what a receipt contains |
+| F5 | The committed `Receipt.jsx` (identical on `cf9c4a0` and `bb18b1c`) renders no seller / GSTIN / FSSAI / promotions, although `buildReceipt` supplies all of them. Evidence screenshot C1 shows a build that does. **ANSWERED in part, by building the frontend image (§7j):** the shipped bundle contains no reference to `receipt.seller` and none to `promotions` at all, against nine `buildReceipt` keys present as controls — so **C1 was not produced by this candidate, and no rebuild of it will reproduce C1.** What remains owed is whether the browser receipt is *meant* to omit a GST-complete seller block and itemised promotions, because the agent path prints both | the browser path and the agent path disagree about what a receipt contains, and it is now measured rather than inferred |
 | F6 | The server already stores `lastReport` on a report that arrives after the lease expired — **verified against a running server** (§2b, *"a clean delivery reported after the lease expired"*). Confirm the UNCERTAIN-resolve UI surfaces it: it is the difference between "nobody knows" and "the till said it wrote every byte, just too late". | human resolution of UNCERTAIN |
 
 ## 6. Release blockers
@@ -478,7 +493,7 @@ Not blockers of this lane's making, but open and unresolved:
   is a certification blocker: you cannot certify a candidate whose suites report a
   different failure each time they run. It is also the cheapest of the open items to
   fix, and the helper already mints a unique tenant per fixture.
-- **Part 4 is not finished** (§7j). Restore-from-backup is owner-gated and this lane
+- **Part 4 is not finished** (§7k). Restore-from-backup is owner-gated and this lane
   cannot close it; the precise dependency is recorded rather than the gap being left
   blank. **Kiosk cannot be verified because it is not in the candidate** (§7i, A6) — a
   scope answer Window 1 owes, not a test this lane can write. Licence enforcement,
@@ -711,7 +726,7 @@ exponent that is **974 s**; at pure quadratic, **1,401 s**. Both exceed 900 s, s
 independent measurement reaches the same conclusion by a different route. This is an
 extrapolation and is labelled as one — nothing here ran a delete at 100,000 customers.
 
-**And the migration against a populated table — the gap §7j named.** All 41 migrations
+**And the migration against a populated table — the gap §7k named.** All 41 migrations
 had only ever been applied to an empty database. So: a fresh database migrated to
 **40** (the state production is in today), the 41st withheld by mounting a
 40-migration directory over the read-only reference tree, then populated to the commit
@@ -838,11 +853,13 @@ hold if something were wired to it. Nothing is. Anyone reading `14 passed` as
 "module licensing is enforced" would be wrong, and the test's own author has
 already left the note saying to delete that block the day it stops being true.
 
-### 7h. A4, A5, A7, A8 — the release image, built and booted
+### 7h. A4, A5, A7, A8 — the backend release image, built and booted
 
 The recipes were the part of a release nobody had inspected, so they were read
 first. Then the backend image was **actually built and actually started**, because a
-recipe that reads correctly and an image that runs are different claims.
+recipe that reads correctly and an image that runs are different claims. The
+frontend image followed later and has its own section (§7j), which is also where A5
+and A8 stop being readings and become measurements.
 
 ```bash
 cd /home/atc-noc/w6-audit/cand-d625370/backend && docker build -t w6-audit-cand-backend:d625370 .
@@ -860,7 +877,9 @@ cd /home/atc-noc/w6-audit/cand-d625370/backend && docker build -t w6-audit-cand-
 
 That is the first end-to-end evidence in this program that the API image builds,
 starts, and serves. It is **not** a release certification: one container, one health
-probe, an empty database, and no frontend image was built (§7j).
+probe, and an empty database. The frontend image has since been built and served
+too (§7j) — still two images and two probes rather than a working stack, because
+neither was ever pointed at the other.
 
 **Good, and worth recording because both are easy to get wrong:**
 
@@ -880,9 +899,9 @@ probe, an empty database, and no frontend image was built (§7j).
 | # | Finding | Severity |
 |---|---|---|
 | A4 | **The release image runs Node 20; every test result in this program was produced on Node 22, and nothing pins either.** `backend/Dockerfile` and `frontend/Dockerfile.prod` are both `node:20-bookworm-slim`; the built image reports **`v20.20.2`**. This box's Node is `v22.23.2`, and the audit container `v22.23.3`. There is no `engines` field in `backend/package.json` and no `.nvmrc`. So the runtime that ships is one major version from the runtime every figure in every window's record was measured on, and no file in the repo would notice if they diverged further. A worked example sits in the same repository: `agent/package.json` carries `"engines": {"node": ">=20.11"}`. | Medium — a real gap between what is tested and what runs, cheap to close with `engines` |
-| A5 | **`frontend/Dockerfile.prod` is `COPY . .`**, so the whole frontend context rests on `.dockerignore`, where `*.md` matches the **context root only** — nested paths need `**/*.md`. Four documents therefore enter the build context: `docs/CASHIER-GUIDE.md`, `docs/HARDWARE-CHECKLIST.md`, `docs/PRINTER-TEST-SESSION.md`, `docs/TOUCHUI-HANDOVER.md`. **This is hygiene, not exposure** — the final stage is `nginx:1.27-alpine` and copies only `/app/dist`, so none of them reaches the shipped image. Recorded because the same root-only rule applies to `.env*`, where the consequence would not be hygiene. No nested `.env` exists today. | Low as it stands; the `.env*` case is the reason to fix it |
+| A5 | **`frontend/Dockerfile.prod` is `COPY . .`**, so the whole frontend context rests on `.dockerignore`, where `*.md` matches the **context root only** — nested paths need `**/*.md`. Four documents therefore enter the build context: `docs/CASHIER-GUIDE.md`, `docs/HARDWARE-CHECKLIST.md`, `docs/PRINTER-TEST-SESSION.md`, `docs/TOUCHUI-HANDOVER.md`. **This is hygiene, not exposure** — the final stage is `nginx:1.27-alpine` and copies only `/app/dist`, so none of them reaches the shipped image. Recorded because the same root-only rule applies to `.env*`, where the consequence would not be hygiene. No nested `.env` exists today. **Now measured rather than read (§7j): the real context holds 174 files, exactly those four `.md` among them, and `node_modules` / `dist*` / `.env*` / `public/_proof/` all zero. The served root is clean.** | Low as it stands; the `.env*` case is the reason to fix it |
 | A7 | **The API container runs as `root`.** There is no `USER` directive in `backend/Dockerfile`, so the process that serves every authenticated route, holds the database connection and decrypts gateway credentials runs as `uid=0`, and `/app` is `root:root`. Confirmed at runtime inside the running container, not inferred from the recipe. The base image already ships an unused `node` user at `uid=1000` for exactly this. Two lines — `chown` the app directory and `USER node` — close it. | **Medium-high.** It does not by itself let anyone in, but it removes the last containment step from every other defect: any RCE or path-traversal in a dependency becomes root in the container |
-| A8 | **`EXPOSE 5000`, but the app listens on `5010`.** `env.js` is `Number(process.env.PORT \|\| 5010)` and nothing under `backend/` sets `PORT=5000` anywhere. `EXPOSE` is documentation rather than enforcement, so nothing breaks today — but it is the number a reader, an orchestrator's default port mapping, or a health-check template will take, and it is wrong by ten. | Low — but it is a one-character class of bug that costs an hour at the wrong moment |
+| A8 | **`EXPOSE 5000`, but the app's own default is `5010`** — and, as first written, this finding was incomplete. `env.js` is `Number(process.env.PORT \|\| 5010)` and nothing *under `backend/`* sets `PORT=5000`. The file that does is the one directory up: `docker-compose.prod.yml` sets `PORT: 5000` on the backend service, its healthcheck probes `127.0.0.1:5000/api/health`, and `frontend/nginx.conf` proxies to `backend:5000`. **So in the deployment that ships, three files agree on 5000 and the `5010` default is never reached** (§7j). What remains is that the image is misleading on its own — run outside compose, as §7h ran it, `EXPOSE` states a port the process does not bind. | Low, and lower than first recorded. Correct under compose; misleading without it |
 
 ### 7i. A6 — Captain and Kiosk, and what "no suite carries that name" actually meant
 
@@ -917,7 +936,187 @@ route, no role, no enum value, no screen.
 |---|---|---|
 | A6 | **`CAPTAIN` appears in `0` of the candidate's 52 test files.** The role is assignable, store-pinned, labelled in the UI and carries a six-permission bundle including `order.item.void` — the right to void a line on someone else's order — and no test ever logs in as one. The bundle is also the only role that grants `order.*` without any payment permission, so *"takes orders, cannot bill"* is asserted nowhere. **Separately: the remit asks for Captain/Kiosk verification and Kiosk is not in the candidate.** That is a scope question for Window 1, not a defect — but it cannot be verified, and it must not be recorded as a pass. | Medium for the untested void permission; the Kiosk gap is a scope answer owed |
 
-### 7j. What this audit does not cover
+### 7j. The frontend release image, built for the first time
+
+§7h built the backend image. The frontend image had never been built by any lane,
+and §7k said so in those words. Part 4 names *"actual release images/build
+context"* in the plural, so one of the two named artefacts existed only as a
+recipe. An unbuilt Dockerfile is an untested one.
+
+Built from the candidate's exact bytes — `git archive d625370 frontend` into the
+audit tree, and five build files sha256-checked against `git show` **before** the
+build ran, so a context that had drifted would abort rather than produce a number.
+
+```bash
+docker build -t vcx-w6-audit-frontend:d625370 -f frontend/Dockerfile.prod \
+  --build-arg VITE_BASE_PATH=/ frontend
+```
+
+| | |
+|---|---|
+| Build | succeeded, **19.4 s, 10 layers, 20.2 MiB** — `nginx:1.27-alpine` over a `node:20-bookworm-slim` build stage |
+| Bundle | one JS chunk `index-DRCmxLRN.js` (**939,243 bytes**), one CSS `index-BDCmYbcq.css` (46,329), `index.html` 549 bytes, `favicon.svg` |
+| Boot | `running`, with **no backend and no database anywhere on its network** |
+| `GET /` | **200** |
+| Nested SPA route `/settings/users` | **200** via `try_files` — direct links and refreshes work |
+| `GET /apifoo` | **200**, *not* proxied — the `location ^~ /api/` trailing slash does exactly what its comment claims |
+| `GET /api/health`, no upstream | **502**, log line `backend could not be resolved` — the proxy is wired and resolving at request time |
+| `index.html` | `Cache-Control: no-store` |
+| `/assets/index-DRCmxLRN.js` | `max-age=31536000` **and** `public, immutable` — two `Cache-Control` headers, because `expires 1y` emits one and `add_header` appends a second. RFC 7234 comma-joins them, so this is untidy rather than wrong |
+| Served root | **no `_proof`, no `.env`, no `*.md`.** The dist that ships is clean |
+
+**`nginx.conf`'s own design comment is true, and a peer being right is a finding
+too.** It claims that resolving the upstream through a variable *"defers the lookup
+to request time; a literal upstream would pin the backend IP at startup and keep
+proxying to a dead address"*. That is falsifiable for the cost of one extra
+container, so both arms were run against the same image with no backend present:
+
+```
+ shipped config   nginx: configuration file /etc/nginx/nginx.conf test is successful
+ literal upstream nginx: [emerg] host not found in upstream "backend" in
+                         /etc/nginx/conf.d/default.conf:24        exit 1
+```
+
+So the variable is not a stylistic choice: without it the frontend container
+**cannot start at all** unless the backend is already resolvable, which would make
+`depends_on: [backend]` a start-order dependency in name and a hard one in fact —
+and the compose file's own comment explains why it deliberately is not
+`service_healthy`. The design holds together.
+
+**A5 confirmed by measurement, and it is exactly as narrow as it was recorded.**
+The build context really does contain four nested documents —
+`docs/CASHIER-GUIDE.md`, `docs/HARDWARE-CHECKLIST.md`,
+`docs/PRINTER-TEST-SESSION.md`, `docs/TOUCHUI-HANDOVER.md` — out of 174 files, and
+`node_modules`, `dist*`, `.env*` and `public/_proof/` are all **0**. None of the
+four reaches the image, because the final stage copies only `/app/dist` and Vite
+copies only `publicDir` into it. Read as hygiene, measured as hygiene.
+
+**A8 is reconciled by a file A8 did not look at.** A8 says `EXPOSE 5000` against
+`PORT || 5010` and that *"nothing under `backend/` sets `PORT=5000`"*. That is
+true and incomplete: `docker-compose.prod.yml` sets `PORT: 5000` on the backend
+service, its healthcheck probes `http://127.0.0.1:5000/api/health`, and
+`nginx.conf` proxies to `backend:5000`. So in the deployment that ships, three
+files agree on 5000 and the `5010` default is never reached. A8 therefore stands
+only for the case §7h itself created — running the image outside compose, where
+the default applies and `EXPOSE` is the number a reader would trust. Downgraded
+from *"wrong by ten"* to *"correct under compose, misleading without it"*, and
+recorded that way because the audit's job is the finding and not the scalp.
+
+**A10, new, and the first defect this lane has found in a peer's release
+configuration: a stale asset request returns `200` and an HTML body.**
+
+| | |
+|---|---|
+| `GET /no-such-asset.js` | **200**, `549` bytes, `Content-Type: text/html` |
+
+`location /assets/` sets cache headers but declares no `try_files`, so a miss falls
+through to `location /` and the SPA fallback serves `index.html`. The consequence
+is specific and familiar: after a redeploy a browser holding a cached
+`index.html` — or any bookmarked deep link — requests
+`/assets/index-<oldhash>.js`, receives `200 text/html`, and the module loader
+fails with a syntax error on `<` rather than a clean 404. `nginx.conf` already
+shows the author thought about precisely this failure, in the comment above
+`location = /index.html`: *"index.html must never be cached or a browser keeps
+loading bundles a redeploy has already removed."* The `no-store` closes the common
+path; the uncommon one — a client that already holds the old HTML, or a crawler,
+or a warm CDN — still lands on a 200. One line closes it:
+`location /assets/ { try_files $uri =404; ... }`. Owner: the window owning
+`frontend/nginx.conf`. Severity low, diagnosis cost high, because the symptom
+appears in application code and not at the proxy.
+
+**And Q5 answered: evidence screenshot `C1` was not produced by this build.**
+
+Q5 asked which build rendered a receipt showing seller, GSTIN, FSSAI, promotions
+and modifiers, when the committed `Receipt.jsx` renders none of them although
+`buildReceipt` supplies all of them. A built bundle can settle what a source read
+cannot — but only with a control, because minification renames local identifiers
+while leaving untouched the property names that have to match the server's JSON.
+So the controls were measured in the same bundle, first:
+
+| | `buildReceipt` key | in the shipped bundle |
+|---|---|---|
+| **controls** | `taxBreakup`, `invoiceNumber`, `amountDue`, `amountPaid`, `discountAmount`, `refunds`, `isDemo`, `tableName`, `modifiers` | **all present, 9 of 9** |
+| the C1 fields | `legalName`, `tradeName`, `gstin`, `fssaiLicenseNo`, `fssaiValidUpto`, `gstStateName` | present |
+| | **`seller`** | **0 — does not occur** |
+| | **`promotions`**, **`promotionVersion`** | **0 — do not occur** |
+
+Nine controls present establish that property names survive this bundle's
+minification, so a zero is an absence and not an artefact. And then the two rows
+that matter: `buildReceipt` nests every legal-identity field under `seller`, and
+the string `seller` occurs **nowhere in the shipped bundle**. The leaf names are
+present because `Organisation.jsx`, `Branches.jsx` and `inventory/Setup.jsx`
+*configure* GSTIN and FSSAI — they are admin forms, reading their own API shapes,
+not a receipt. Nothing in the bundle reads `receipt.seller`, and `promotions`
+appears in no form at all.
+
+`Receipt.jsx` is genuinely in the bundle, not tree-shaken — it is imported by
+`Sell.jsx`, `Orders.jsx` and `uat-render.jsx`, and its `taxBreakup` is one of the
+nine controls. So this is not a dead-component case. The shipped browser receipt
+renders the tax breakup and omits the seller block and the promotion lines.
+
+**Which makes Q5 a narrower question than it was.** It is no longer "which of two
+plausible builds" — it is: `C1` shows fields this candidate's frontend cannot
+render, so either it came from an uncommitted tree or the screenshot does not show
+what it is captioned as showing. Window 1 owns the answer; this lane can now say
+that **no rebuild of `d625370` will reproduce it**. And the substantive half of F5
+is unchanged and now firmer: the server composes a GST-complete receipt — seller,
+GSTIN, FSSAI, itemised promotions — and the browser prints a receipt without them,
+while the agent path prints them in full. Two renderers, one payload, different
+documents.
+
+**A third probe of this audit measured the wrong thing, and the control is what
+caught it.** The first bundle count used busybox `grep -o` on a minified file
+whose longest line is 477,979 characters; busybox emits at most one match per
+line, so it returned `GSTIN 2` where the true count is 9 — a line count printed as
+an occurrence count. A second attempt split the bundle on punctuation and matched
+whole lines with `grep -xF`, which silently under-reports any token whose
+neighbour is a character not in the split set: it reported `taxBreakup 0` for a
+key that is demonstrably there. Both are the same failure as D7 and as the argon2
+reversal in §7d — a probe that returns a number for a question it is not actually
+asking. The claims above therefore rest on plain substring presence only, which is
+the one thing the tool does reliably, and on nine positive controls rather than on
+the method being trusted. Three for three, the thing that caught it was refusing
+to accept a number without something in the same measurement that had to come back
+non-zero.
+
+**The stack itself: written, not run, and the reason is recorded rather than
+smoothed over.** Two images that each work alone is not a release. The pair is what
+carries `depends_on`, the two healthchecks, the `prisma migrate deploy` boot command
+and the same-origin cookie path, and none of those has been exercised by anyone. So
+`w6-audit-stack.sh` was written to bring the real `docker-compose.prod.yml` up under
+its own project name and ask five things: whether the container's own boot command
+takes a brand-new volume to 41 migrations; whether **both** healthchecks reach
+`healthy`, each having been written around a different missing binary (`node -e`
+because `node:20-slim` has no curl, busybox `wget` because nginx has no node);
+whether `/api/health` answers *through* nginx rather than merely returning the
+correct `502` when nothing is behind it; whether protected routes still `401`
+through the proxy; and whether `scripts/bootstrap-platform-admin.mjs` **refuses**
+when SMTP is unconfigured, which its own header says it must, asserted in its
+write-nothing preview mode with a follow-up count of the `User` table.
+
+It did not run: the session's tooling declined to execute a `docker compose up`
+against a file named `docker-compose.prod.yml`, twice. That is the correct
+conservatism — the standing instruction to this lane is *no production
+operations* — and it is **not** a false alarm about the wrong thing, because the
+hazard is real and was found while writing the guard for it: a `pos-prod` compose
+project is **already running on this box**, three healthy containers, up 15 hours,
+built 2026-09-23 from `/home/atc-noc/atc-pos` — the RC-1 tree, **not this
+candidate**. `docker-compose.prod.yml` carries `name: pos-prod`, so an unqualified
+`up` from the candidate's copy would have inherited that project name and adopted,
+recreated or stopped a peer's live containers. The script therefore forces `-p
+vcx-w6-stack`, binds only `127.0.0.1:18110`, mints throwaway credentials for its
+own volume, and records the peer's container IDs before and after so that "no peer
+was touched" is asserted at the end rather than assumed at the start.
+
+Two things follow, and they point in opposite directions. The gap stays **open** —
+this section claims two images, not a stack. And the fact that a prod-shaped stack
+of the *previous* candidate has been healthy for 15 hours is weak positive evidence
+that the compose wiring is sound in practice, offered as exactly that: it is a
+different tree, three days older, and it is not evidence about `d625370`. The
+command is in §8 for the owner to run, and it is the last mechanical item in Part 4
+that a person other than the owner could have closed.
+
+### 7k. What this audit does not cover
 
 Recorded so the gaps are not read as passes. None of the following was verified by
 this lane, and this section will not claim it:
@@ -942,10 +1141,16 @@ this lane, and this section will not claim it:
   happen on the owner’s own machine, and the current destination is `20.20.20.57`,
   which this lane is instructed not to access. So *shipped* is evidenced and
   *restorable* is not — which is a precise external dependency rather than a blank.
-- **The frontend image, and the backend image beyond one health probe.** The backend
-  image was built, started and answered `GET /health` (§7h) — but that is one
-  container against an empty database, not a release exercised through it. No
-  frontend image was built, so nothing here speaks to the bundle as served.
+- **The stack, as opposed to the two images in it.** Both release images have now
+  been built, started and probed — the backend answering `GET /health` (§7h), the
+  frontend serving its bundle with the cache headers and SPA fallback its config
+  intends (§7j). What is *not* covered is the pair working together: the backend ran
+  against an empty database, the frontend ran with no backend on its network and
+  returned the correct `502` for it, and **at no point was one pointed at the other**.
+  No compose project was brought up, so `depends_on`, the two healthchecks, the
+  `prisma migrate deploy` boot command and the same-origin cookie path are all still
+  unexercised. Two images that each work alone is a weaker claim than a stack, and it
+  is the only one this lane makes.
 - **A production migration window.** The 41 migrations against a populated database
   are no longer on this list — §7d closed that, and found the number the migration's
   own note was missing. What is still uncovered is the thing a dev box cannot supply:
@@ -1023,6 +1228,26 @@ true rather than asserting it, and both DSNs in it are safe to read.
                                blocked writes. Carries a marked CORRECTION block: the
                                script's first stall query used to_char() on an INTERVAL
                                and printed the format mask instead of a duration
+  w6-audit-frontend-image.sh   the §7j build: checksums five build files against
+                               `git show` and ABORTS if any differs, lists the real
+                               build context, builds, serves, and runs both arms of
+                               the nginx literal-vs-variable upstream test
+  w6-frontend-image-20260926.log  19.4 s, 10 layers, 20.2 MiB; 174 context files with
+                               the four nested `.md` and nothing else; the cache
+                               headers; `[emerg] host not found in upstream` from the
+                               literal arm; and the bundle presence table behind Q5
+  w6-audit-stack.sh            the compose stack — WRITTEN AND NOT RUN. The session's
+                               tooling declined `docker compose up` against a file
+                               named `docker-compose.prod.yml`, twice, which is the
+                               correct conservatism for a lane instructed to perform
+                               no production operations. Left in place for the owner
+                               because it is the last mechanical Part 4 item, and it
+                               already contains the guard that matters: a `pos-prod`
+                               project of the PREVIOUS candidate is live on this box
+                               and `docker-compose.prod.yml` carries `name: pos-prod`,
+                               so it forces `-p vcx-w6-stack`, binds 127.0.0.1:18110
+                               only, mints throwaway credentials for its own volume,
+                               and diffs the peer's container IDs before and after
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
