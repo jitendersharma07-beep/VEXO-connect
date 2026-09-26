@@ -1,0 +1,20 @@
+{
+  "name": "@vexo/print-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "VEXO Connect Store Print Agent — the till-side consumer for the print and drawer queues",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "vexo-print-agent": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js run",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

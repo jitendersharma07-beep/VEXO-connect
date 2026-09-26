@@ -1,0 +1,74 @@
+# VEXO Connect store print agent, as a systemd service.
+#
+# Install:
+#   sudo useradd --system --home-dir /var/lib/vexo-print-agent --create-home vexoprint
+#   sudo cp -r agent /opt/vexo-print-agent
+#   sudo install -m 0644 agent/install/vexo-print-agent.service /etc/systemd/system/
+#   sudo -u vexoprint /usr/bin/node /opt/vexo-print-agent/src/cli.js enrol <code> \
+#        --server https://pos.example.com --home /var/lib/vexo-print-agent
+#   sudo systemctl enable --now vexo-print-agent
+#
+# Enrol BEFORE the first start. The agent runs without a credential — it beats,
+# fails, and backs off — but a till that has been "started" and is not enrolled
+# looks healthy in systemctl and prints nothing, which is the worst of both.
+
+[Unit]
+Description=VEXO Connect store print agent
+Documentation=file:/opt/vexo-print-agent/README.md
+# Not network-online.target: the agent's whole design is that an unreachable
+# server is a normal condition it recovers from, so waiting for the network
+# would only delay the first heartbeat.
+After=network.target
+
+[Service]
+Type=simple
+User=vexoprint
+Group=vexoprint
+Environment=VEXO_AGENT_HOME=/var/lib/vexo-print-agent
+Environment=NODE_ENV=production
+WorkingDirectory=/opt/vexo-print-agent
+ExecStart=/usr/bin/node /opt/vexo-print-agent/src/cli.js run
+
+# Restart always, and slowly enough to be visible. A crash loop that restarts
+# instantly hides itself in the journal; 10 s makes it legible.
+Restart=always
+RestartSec=10
+
+# SIGTERM is the clean stop: the runner finishes the job it is writing, reports
+# it, and does not claim another. 90 s covers the slowest plausible ticket plus
+# its report. Killing it earlier is what produces an UNCERTAIN job that a human
+# then has to resolve, so the timeout is generous on purpose.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# The journal and the credential live here and nowhere else.
+ReadWritePaths=/var/lib/vexo-print-agent
+StateDirectory=vexo-print-agent
+StateDirectoryMode=0700
+
+# The agent needs a TCP socket to the server and to the printer, and a file
+# handle for a USB device node. It needs nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+
+# A USB printer on Linux is /dev/usb/lp0, owned by root:lp. Uncomment for a
+# FILE-transport target, and leave commented for TCP/9100 — a till that can open
+# device nodes it does not use is a till with a privilege nobody audited.
+# SupplementaryGroups=lp
+# DeviceAllow=/dev/usb/lp0 rw
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vexo-print-agent
+
+[Install]
+WantedBy=multi-user.target
