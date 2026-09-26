@@ -15,7 +15,7 @@ end to end against the real server. The independent audit of the combined
 candidate is NOT complete. This is not an approval of the release, and this
 document does not give one.** Two release blockers are open (§6), one of which is
 not in this lane's code; parts of the audit remit are unmeasured, one of them because
-the feature is not in the candidate at all (§7h, §7i).
+the feature is not in the candidate at all (§7i, §7j).
 
 Five separate figures. The first two are this lane's own work; the last three are the
 candidate's code, measured by this lane's audit:
@@ -32,9 +32,18 @@ None of the five is a project figure, and none may be combined with other lanes'
 totals or turned into a percentage of the whole. The agent is one component, and
 the last three rows are somebody else's code that this lane merely measured — a green
 result there says those suites pass, not that the release is ready. The fifth is not
-even green, and it is printed at its true exit status on purpose. The 1,065 in §7i
+even green, and it is printed at its true exit status on purpose. The 1,065 in §7j
 is the count of candidate tests this audit executed, which is a statement about
 audit coverage and nothing else.
+
+Those five are test-suite figures, and a suite can only tell you that code agrees with
+its own assertions. The one thing the candidate changed — `d625370`'s index — has no
+suite that can see it, so it was measured instead of counted, and **it works**:
+5.43× on identical data, faster at double the rows than the unindexed version at half,
+and the planner switching from `Seq Scan` to `Bitmap Index Scan`. The commit's claim of
+quadratic cost measures as N^1.83 — right family, slightly strong — and extrapolates to
+974–1,401 s at 100,000 customers, which independently reproduces the 900 s overrun it
+was written for. §7d.
 
 What remains unproven is physical: **no ESC/POS byte has ever reached the
 store's printer**, so nothing here claims paper. `CONFIRMED` means the agent
@@ -241,20 +250,21 @@ and the rows below say which parts are which rather than averaging them.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Verify *those exact bytes*, not a lane's working copy | PASS | `git archive d625370` into a scratch tree, three files sha256-checked against `git show`. §7 |
+| **The candidate's own change, measured** | **PASS** | three arms on a private database: doubling the data multiplied the unindexed delete by **3.55×** (exponent N^1.83), and the index made it **5.43× faster** at the same size — faster in absolute terms than the unindexed run at *half* the size. Planner confirms Bitmap Index Scan vs Seq Scan. Extrapolated to 100,000 customers, 974–1,401 s, which independently reproduces the commit message’s overrun of a 900 s budget. §7d |
 | Payments / refunds / gateway reconciliation | PASS | 153/153, exit 0 — the two suites nobody had a result for. §7a |
 | Admin / company / user workflows | PASS | 108/108 across `platformAdmin`, `foundation`, `foundationPeople`, `invitations`. §7b |
 | Tenant isolation | PASS | `authTenantIsolation` 11/11, plus the gateway suite's *"never shows one tenant the gateway traffic of another"*. §7a, §7b |
 | Table/QR | PASS | `tableQr` 74/74. §7b |
 | Customer display | PASS | `customerDisplay` 13/13. §7b |
 | Recovery behaviour | PASS | `accountRecovery` 33/33 and `accountRecoveryOutage` 5/5. §7b |
-| **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7f |
-| Fresh-migration evidence | PARTIAL | 41 migrations applied to an **empty** database, twice over (§2b at 40, §7a at 41), both logged. Never applied to a populated one — §7i |
-| Release images and build context | PARTIAL | the backend image **built (53.7 s), booted, and answered `GET /health` with `200`** — the first such evidence in this program. Four findings (A4, A5, A7, A8) and three things done right. No frontend image was built, and one health probe is not a release. §7g |
-| **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7h, A6 |
-| Defects returned to the responsible window | PASS | A1–A9 in §7c–§7h, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
-| **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7h, A6 |
+| **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7g |
+| Fresh-migration and populated-migration evidence | **PASS** | 41 applied to an empty database twice (§2b at 40, §7a at 41), and now to a **populated** one: migrated to 40, loaded to 100,000 customers / 200,000 links / 64 MB, then the 41st applied on top — 41 applied, index built, all 300,000 rows survived. Prisma recorded 342 ms; a concurrent writer was blocked **6.714 s**, which is the number the migration’s own production note was missing. §7d |
+| Release images and build context | PARTIAL | the backend image **built (53.7 s), booted, and answered `GET /health` with `200`** — the first such evidence in this program. Four findings (A4, A5, A7, A8) and three things done right. No frontend image was built, and one health probe is not a release. §7h |
+| **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7i, A6 |
+| Defects returned to the responsible window | PASS | A1–A9 in §7c–§7i, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
+| **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7i, A6 |
 | Stock-effect / billing reconciliation beyond the gateway | **PARTIAL** | 17 files run, **629/631, exit 1**. Every valuation and reconciliation assertion that executed, passed; the two failures are `beforeEach` timeouts, and a re-run failed on a *different* test with the same message. The stock code is not implicated — the harness is, and that is **A9**. A suite that cannot finish deterministically cannot certify anything, so this is not a pass. §7c |
-| Restore-from-backup evidence | **NOT VERIFIED** | no restore was performed by this lane, and none is claimed by any peer document either — Window 3’s handoff says so in those words. What *is* evidenced is that an encrypted archive ships. The step that would settle it needs the owner’s own machine and private key, and its destination is a host this lane is instructed not to access. §7i |
+| Restore-from-backup evidence | **NOT VERIFIED** | no restore was performed by this lane, and none is claimed by any peer document either — Window 3’s handoff says so in those words. What *is* evidenced is that an encrypted archive ships. The step that would settle it needs the owner’s own machine and private key, and its destination is a host this lane is instructed not to access. §7j |
 
 ## 4. Not executed, and exactly why
 
@@ -457,7 +467,9 @@ Not blockers of this lane's making, but open and unresolved:
 - **The candidate is still uncertified**, by its own record (§1) and now by
   measurement: the certification run in flight at the time of writing does not
   contain the index it exists to certify, and its tree changed 36 seconds after it
-  started (§7d, A1).
+  started (§7e, A1). This is now the more consequential for the index having been
+  measured and found to work (§7d) — the fix is good, and the run that was meant to
+  prove it says nothing about it either way. A re-run is cheap and currently owed.
 - **The candidate's own test harness cannot finish deterministically** (§7c, A9). The
   inventory family truncates all 139 tables **before every test** — 150 times per full
   run, ~2.1 s each, against a 30 s `hookTimeout`. Three runs failed on four different
@@ -466,9 +478,9 @@ Not blockers of this lane's making, but open and unresolved:
   is a certification blocker: you cannot certify a candidate whose suites report a
   different failure each time they run. It is also the cheapest of the open items to
   fix, and the helper already mints a unique tenant per fixture.
-- **Part 4 is not finished** (§7i). Restore-from-backup is owner-gated and this lane
+- **Part 4 is not finished** (§7j). Restore-from-backup is owner-gated and this lane
   cannot close it; the precise dependency is recorded rather than the gap being left
-  blank. **Kiosk cannot be verified because it is not in the candidate** (§7h, A6) — a
+  blank. **Kiosk cannot be verified because it is not in the candidate** (§7i, A6) — a
   scope answer Window 1 owes, not a test this lane can write. Licence enforcement,
   Captain, stock/billing reconciliation, the release images and the fresh-migration
   evidence are PARTIAL and say why. They are recorded as gaps, not as passes, and this
@@ -491,7 +503,7 @@ Findings are numbered **A1–A5** and each is sent to the window that owns the c
 One label collision, flagged so nobody chases the wrong artefact: the photographs in
 §4a are also lettered `A1`, `B1`, `B2`, `C1`, because that is how they are indexed in
 the hardware manifest and renaming them there would break a sha256-keyed record.
-`A1` in §7d is an audit finding; `A1` in §4a is the printer's rating plate.
+`A1` in §7e is an audit finding; `A1` in §4a is the printer's rating plate.
 
 ### 7a. The 153 money-path tests, executed for the first time
 
@@ -546,7 +558,7 @@ candidate's own suites, plus the one failure Window 5 attributed to code.
 | Area of the remit | Suite | Tests |
 |---|---|---|
 | Tenant isolation | `authTenantIsolation` | 11 |
-| Licence enforcement | `licenseModuleGate` | 14 — **but see §7f** |
+| Licence enforcement | `licenseModuleGate` | 14 — **but see §7g** |
 | Recovery behaviour | `accountRecovery`, `accountRecoveryOutage` | 33 + 5 |
 | Table/QR | `tableQr` | 74 |
 | Customer display | `customerDisplay` | 13 |
@@ -631,7 +643,7 @@ Two consequences worth separating, because they have different fixes:
 2. **On a shared database it is worse in kind, not in degree.** `TRUNCATE` takes
    `ACCESS EXCLUSIVE` on all 139 tables at once, so while one inventory test is
    setting up, *every* query of *every* other suite on *any* table waits behind it.
-   That is a stronger statement than A2 (§7e), which describes rows inherited between
+   That is a stronger statement than A2 (§7f), which describes rows inherited between
    suites. This is a lock held over the whole schema, 150 times, whether or not any
    rows exist to delete.
 
@@ -643,7 +655,106 @@ Moving the wipe to `beforeAll`, or narrowing it to the tables these suites write
 would remove roughly five minutes and the whole failure mode. This lane does not
 implement it: `tests/helpers/inventory.js` is not this lane's file.
 
-### 7d. A1 — the in-flight certification run does not contain the fix it is meant to certify
+### 7d. The fix itself, measured — does the index work, and is the migration safe on a loaded table?
+
+Everything above tests the candidate *around* `d625370`. Nothing had tested
+`d625370`'s actual change. §7a said so in its own words — a private database removes
+the pollution the index exists to survive, so a green suite "cannot distinguish
+'the index works' from 'there was nothing to scan'". Two peer certification runs were
+meant to settle it, and §7e shows the one in flight did not contain the index at all.
+
+So it was measured directly, with no test suite in the way. The claim under test is
+the commit's own: deleting `Customer` rows is quadratic in their number, because the
+referential-integrity trigger `DELETE FROM "LoyaltyProfileLink" WHERE "customerId" = $1
+AND "companyId" = $2` had no index that could serve it — both uniques lead with
+`connectionId`, and `@@index([companyId])` matches every row of a tenant.
+
+**Three arms, because one number proves nothing about scaling.** Same schema, all 41
+migrations, a database private to this benchmark, two links per customer to match the
+commit message's 100,000 customers / 200,000 rows. Timed by Postgres, not by the shell.
+Load ~14.5 with 9 foreign `vitest` processes — recorded, because all three arms ran
+under it and so the *ratio* survives a busy box where an absolute number would not.
+
+| Arm | Customers | Links | Index | `DELETE FROM "Customer"` |
+|---|---|---|---|---|
+| 1 | 6,000 | 12,000 | **dropped** | **5,679 ms** |
+| 2 | 12,000 | 24,000 | **dropped** | **20,173 ms** |
+| 3 | 12,000 | 24,000 | **present** | **3,713 ms** |
+
+**The claim holds, and is slightly overstated.** Doubling the data multiplied the cost
+by **3.55×**, an exponent of **N^1.83** — quadratic predicts 4×, linear predicts 2×. So
+"quadratic" is the right family and a little strong at this size. Recorded that way
+rather than rounded up to the commit message's word, because the audit's job is the
+measurement and not the endorsement.
+
+**The index is the fix, not a mitigation.** Arm 3 is **5.43× faster than arm 2** on
+identical data, and — the part worth pausing on — arm 3 at 12,000 customers beats arm 1
+at 6,000 by **1.53×**. The unindexed version is slower at half the work. The planner
+agrees, asked against a *populated* table on purpose: on an empty one Postgres
+correctly prefers a sequential scan either way, and an `EXPLAIN` there would read as
+the index being ignored.
+
+```
+ with the index     Delete on "LoyaltyProfileLink"
+                      ->  Bitmap Heap Scan on "LoyaltyProfileLink"
+                            ->  Bitmap Index Scan on "LoyaltyProfileLink_customerId_companyId_idx"
+                                  Index Cond: (("customerId" = …) AND ("companyId" = …))
+
+ index dropped      Delete on "LoyaltyProfileLink"
+                      ->  Seq Scan on "LoyaltyProfileLink"
+                            Filter: (("customerId" = …) AND ("companyId" = …))
+```
+
+**Extrapolated, the commit message's account of the original failure stands up.** It
+says the 100,000-customer delete overran a 900 s budget. From arm 2, at the measured
+exponent that is **974 s**; at pure quadratic, **1,401 s**. Both exceed 900 s, so an
+independent measurement reaches the same conclusion by a different route. This is an
+extrapolation and is labelled as one — nothing here ran a delete at 100,000 customers.
+
+**And the migration against a populated table — the gap §7j named.** All 41 migrations
+had only ever been applied to an empty database. So: a fresh database migrated to
+**40** (the state production is in today), the 41st withheld by mounting a
+40-migration directory over the read-only reference tree, then populated to the commit
+message's own scale, and the 41st applied on top while a writer hammered the table.
+
+| | |
+|---|---|
+| Migrated to | 40, index absent — asserted, not assumed |
+| Populated to | **100,000 customers, 200,000 links, 64 MB** |
+| The 41st applied | 41 migrations, index present, **all 300,000 rows survived** |
+| Prisma's own recorded duration | **342 ms** |
+| Index built | 4,864 kB |
+| **A concurrent writer was blocked for** | **6.714 s** — against a median inter-write gap of 0.116 s and a minimum of 0.090 s, over 546 writes |
+
+That last row is the finding, and it is the one a self-timed migration cannot give
+you: **the migration's own 342 ms understates its write-blocking window by roughly
+twentyfold**, because `CREATE INDEX` holds `SHARE` for as long as the transaction is
+open and Prisma wraps every migration in one — so the lock is held for the envelope,
+not for the statement. A stall 58× the median is not box noise.
+
+The migration file's own production note is therefore correct in mechanism, and now
+has a number against it:
+
+> *"Before this runs against a large production table, convert it to CREATE INDEX
+> CONCURRENTLY and run it outside the migration transaction, since Prisma wraps
+> migrations in one."*
+
+**What this does not prove, stated because it is the whole point.** One table, on a dev
+box, with no replication and no concurrent read traffic; 200,000 rows is not a large
+production table, and 6.7 s of blocked writes is a planned-window cost rather than an
+outage. Nothing here licenses running it unannounced against production, and the
+`CONCURRENTLY` advice stands unweakened. What has changed is that the advice now rests
+on a measurement instead of on a reasonable fear.
+
+Two reporting bugs of this audit's own, corrected in the scripts and left visible in
+the logs rather than quietly overwritten. The hook-cost probe first called
+`verifyPassword(plain, hash)` — arguments reversed — and so timed argon2's
+`catch { return false }` at 1 ms, reporting an error path as a cost; it now asserts the
+verify succeeded. And the stall report used `to_char()` on an `INTERVAL` with a numeric
+mask, which returns the mask: the `9990.000 s` in the raw log is a format string, not a
+duration. That log carries a marked correction with the query that replaced it.
+
+### 7e. A1 — the in-flight certification run does not contain the fix it is meant to certify
 
 **Owner: Window 1 and Window 5. Verified, not inferred, and time-sensitive.**
 
@@ -668,7 +779,7 @@ Two consequences, and neither is a criticism of the analysis in that document:
 The cheapest correct next attempt: `migrate deploy` first so the 41st migration
 lands, assert the index exists, and run from an extracted tree.
 
-### 7e. A2 — every suite's `beforeAll` deletes every other suite's rows
+### 7f. A2 — every suite's `beforeAll` deletes every other suite's rows
 
 **Owner: Window 1. A design observation with a measured consequence, not a bug report.**
 
@@ -699,7 +810,7 @@ inventory family the wipe is a 139-table `TRUNCATE` taken **before every test**,
 150 times per full run, ~2.1 s each, against a 30 s budget (A9, §7c). Removing
 cross-lane pollution removes one of the two causes. The other one is in the helper.
 
-### 7f. A3 — licence enforcement is a mechanism with nothing behind it
+### 7g. A3 — licence enforcement is a mechanism with nothing behind it
 
 **Owner: Window 1. Not a defect; a status that must not be reported as a pass.**
 
@@ -727,7 +838,7 @@ hold if something were wired to it. Nothing is. Anyone reading `14 passed` as
 "module licensing is enforced" would be wrong, and the test's own author has
 already left the note saying to delete that block the day it stops being true.
 
-### 7g. A4, A5, A7, A8 — the release image, built and booted
+### 7h. A4, A5, A7, A8 — the release image, built and booted
 
 The recipes were the part of a release nobody had inspected, so they were read
 first. Then the backend image was **actually built and actually started**, because a
@@ -749,7 +860,7 @@ cd /home/atc-noc/w6-audit/cand-d625370/backend && docker build -t w6-audit-cand-
 
 That is the first end-to-end evidence in this program that the API image builds,
 starts, and serves. It is **not** a release certification: one container, one health
-probe, an empty database, and no frontend image was built (§7i).
+probe, an empty database, and no frontend image was built (§7j).
 
 **Good, and worth recording because both are easy to get wrong:**
 
@@ -773,7 +884,7 @@ probe, an empty database, and no frontend image was built (§7i).
 | A7 | **The API container runs as `root`.** There is no `USER` directive in `backend/Dockerfile`, so the process that serves every authenticated route, holds the database connection and decrypts gateway credentials runs as `uid=0`, and `/app` is `root:root`. Confirmed at runtime inside the running container, not inferred from the recipe. The base image already ships an unused `node` user at `uid=1000` for exactly this. Two lines — `chown` the app directory and `USER node` — close it. | **Medium-high.** It does not by itself let anyone in, but it removes the last containment step from every other defect: any RCE or path-traversal in a dependency becomes root in the container |
 | A8 | **`EXPOSE 5000`, but the app listens on `5010`.** `env.js` is `Number(process.env.PORT \|\| 5010)` and nothing under `backend/` sets `PORT=5000` anywhere. `EXPOSE` is documentation rather than enforcement, so nothing breaks today — but it is the number a reader, an orchestrator's default port mapping, or a health-check template will take, and it is wrong by ten. | Low — but it is a one-character class of bug that costs an hour at the wrong moment |
 
-### 7h. A6 — Captain and Kiosk, and what "no suite carries that name" actually meant
+### 7i. A6 — Captain and Kiosk, and what "no suite carries that name" actually meant
 
 An earlier revision of this document recorded Captain/Kiosk as NOT VERIFIED because
 no test file carries either name. That was true and useless: it described this
@@ -806,12 +917,12 @@ route, no role, no enum value, no screen.
 |---|---|---|
 | A6 | **`CAPTAIN` appears in `0` of the candidate's 52 test files.** The role is assignable, store-pinned, labelled in the UI and carries a six-permission bundle including `order.item.void` — the right to void a line on someone else's order — and no test ever logs in as one. The bundle is also the only role that grants `order.*` without any payment permission, so *"takes orders, cannot bill"* is asserted nowhere. **Separately: the remit asks for Captain/Kiosk verification and Kiosk is not in the candidate.** That is a scope question for Window 1, not a defect — but it cannot be verified, and it must not be recorded as a pass. | Medium for the untested void permission; the Kiosk gap is a scope answer owed |
 
-### 7i. What this audit does not cover
+### 7j. What this audit does not cover
 
 Recorded so the gaps are not read as passes. None of the following was verified by
 this lane, and this section will not claim it:
 
-- **Kiosk, because there is nothing in the candidate to verify** (§7h, A6), and
+- **Kiosk, because there is nothing in the candidate to verify** (§7i, A6), and
   **Captain beyond its permission bundle**, which no test exercises.
 - **Stock effects and billing reconciliation, beyond a harness that finishes.** The
   `inventory*` and `reporting*` families have now been run — 17 files, 629 of 631,
@@ -832,15 +943,17 @@ this lane, and this section will not claim it:
   which this lane is instructed not to access. So *shipped* is evidenced and
   *restorable* is not — which is a precise external dependency rather than a blank.
 - **The frontend image, and the backend image beyond one health probe.** The backend
-  image was built, started and answered `GET /health` (§7g) — but that is one
+  image was built, started and answered `GET /health` (§7h) — but that is one
   container against an empty database, not a release exercised through it. No
   frontend image was built, so nothing here speaks to the bundle as served.
-- **The 41 migrations against a populated database.** They were applied to an empty
-  one twice — 40 at §2b, 41 at §7a, the 41st being `d625370`'s own index — and the
-  §7b batch reused §7a's database. A migration that is safe on an empty schema and slow or
-  unsafe on a loaded one is exactly the class of defect `d625370` was written for,
-  and its own migration file says it must become `CREATE INDEX CONCURRENTLY`
-  before it runs on a large production table. Unverified either way here.
+- **A production migration window.** The 41 migrations against a populated database
+  are no longer on this list — §7d closed that, and found the number the migration's
+  own note was missing. What is still uncovered is the thing a dev box cannot supply:
+  200,000 rows is not a large production table, there was no replication and no
+  concurrent read traffic, and a 6.7 s write stall measured here says nothing about
+  the same DDL against a table an order of magnitude larger. The `CREATE INDEX
+  CONCURRENTLY` advice in that migration file is still the right advice and is still
+  untested.
 
 Two peer certification runs were in flight throughout (Window 5 on
 `vcx_integration_test`, another on `vcx_cert625_test`) and this lane deliberately
@@ -896,6 +1009,20 @@ true rather than asserting it, and both DSNs in it are safe to read.
                                candidate's own `src/lib/crypto.js`. Asserts that the
                                verify succeeded — the first version had the arguments
                                reversed and timed argon2's error path at 1 ms
+  w6-audit-index-bench.sh      the §7d benchmark: three arms, so the SHAPE is measured
+                               and not one number. Header states the claim it tries to
+                               falsify, and why each arm exists
+  w6-audit-index-bench-20260926.log  5,679 / 20,173 / 3,713 ms, plus both EXPLAINs
+                               against a populated table. Load and foreign `vitest`
+                               count recorded at the top
+  w6-audit-migrate-populated.sh  the §7d migration test: migrate to 40, load 100,000
+                               customers, apply the 41st while a writer measures its
+                               own stall. Withholds the 41st by mounting a 40-migration
+                               directory OVER the reference tree, which is never modified
+  w6-audit-migrate-populated-20260926.log  342 ms by Prisma's own clock, 6.714 s of
+                               blocked writes. Carries a marked CORRECTION block: the
+                               script's first stall query used to_char() on an INTERVAL
+                               and printed the format mask instead of a duration
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
