@@ -583,3 +583,58 @@ describe('another tenant s table is indistinguishable from one that is not there
     await dropOrder(a2Order.id);
   });
 });
+
+// MUST REMAIN THE LAST describe IN THIS FILE. It calls wipe(), which is
+// unscoped and empties every table, so anything declared after it would find
+// no fixtures. afterAll() runs wipe() again on the emptied database, which is
+// harmless.
+//
+// WHY THIS EXISTS. wipe() clears UserInvitation immediately before PosUser.
+// UserInvitation.createdById and .acceptedById both reference PosUser under
+// onDelete: Restrict, so an unscoped posUser.deleteMany() throws
+// UserInvitation_createdById_fkey while any invitation still points at a user
+// being deleted. cf9c4a0 added that line to fourteen files; this file arrived
+// later, with the x/tables merge, and needed it too.
+//
+// WHY IT SEEDS ITS OWN INVITATION. The obvious way to test this is to let an
+// earlier file leave an invitation behind and watch this file's wipe() trip
+// over it. That test would be worthless. Every file that seats invitations —
+// invitations, platformAdmin, authTenantIsolation, foundation — clears them in
+// its own afterAll, so nothing is left behind, and a five-file run of this
+// suite passed identically with the fix REMOVED. A regression case that depends
+// on another file's residue therefore proves nothing about this file and
+// silently stops testing anything the moment run order changes.
+describe('the cleanup can remove a user an invitation still points at', () => {
+  it('clears the invitation first, so wipe() deletes the user instead of throwing', async () => {
+    // Both RESTRICT paths in one row: created by one user, accepted by another.
+    const invitation = await prisma.userInvitation.create({
+      data: {
+        companyId: companyA.id,
+        email: 'cleanup.probe@svc.local',
+        fullName: 'Cleanup Probe',
+        role: 'BRANCH_MANAGER',
+        tokenHash: 'tablesService-cleanup-regression-tokenhash',
+        expiresAt: new Date(Date.now() + 86400e3),
+        createdById: staff.ownerA.id,
+        acceptedById: staff.managerA1.id,
+      },
+    });
+
+    // Assert the hazard is real before asserting it is handled. Without this,
+    // a silently failed create would leave wipe() with nothing to trip over and
+    // the test would pass while testing nothing.
+    expect(invitation.createdById).toBe(staff.ownerA.id);
+    expect(invitation.acceptedById).toBe(staff.managerA1.id);
+    expect(await prisma.userInvitation.count()).toBe(1);
+    expect(await prisma.posUser.count()).toBeGreaterThan(0);
+
+    // The subject under test: this file's own cleanup, unmodified. wipe()
+    // returns undefined, so resolving to undefined is exactly "it completed";
+    // a rejection fails here with the Prisma error as the reason.
+    await expect(wipe()).resolves.toBeUndefined();
+
+    // The user is gone, which is the thing the FK was blocking.
+    expect(await prisma.posUser.count()).toBe(0);
+    expect(await prisma.userInvitation.count()).toBe(0);
+  });
+});
