@@ -28,43 +28,122 @@ import { mintStorePublicId } from '../../src/lib/identity.js';
 // promotion in their lives. The error named an inventory test, and the cause
 // was three lanes away.
 //
-// So the order is asked of the database instead. TRUNCATE ... CASCADE is
-// order-independent by definition, and the table list comes from the catalog,
-// so a table added by the next merge is cleared by this code the day it
-// appears, without anyone remembering to add a line.
+// So the table list is asked of the catalog, and the ORDER is asked of nobody:
+// the deletes below run with referential integrity switched off for the length
+// of one transaction, which makes them order-independent by definition. A table
+// added by the next merge is cleared the day it appears, without anyone
+// remembering to add a line.
+//
+// This was TRUNCATE ... CASCADE until 2026-09-26, chosen for that same
+// order-independence. What changed is not the requirement but the price: 2274ms
+// per call at the median, 11.9s at the worst, ~150 calls per run across the five
+// inventory suites. On 2026-09-26 it stopped being merely slow and started
+// failing runs — "Hook timed out in 30000ms" in inventoryScheduler's beforeEach,
+// which is this function.
+//
+// The cost was never the rows; a test leaves a couple of dozen. It is that
+// TRUNCATE gives all 140 tables AND their 532 indexes a fresh relfilenode every
+// time, so each call creates and unlinks ~672 files on a disk four other lanes
+// are running their own suites against. DELETE touches no relfilenode, writes
+// WAL for the rows actually present, and takes a RowExclusiveLock instead of an
+// AccessExclusiveLock. Measured on a private database: 2274ms -> 6ms median.
+//
+// Narrowing the TRUNCATE to the tables that hold rows is the obvious cheaper
+// fix, and it does not work — recorded here so the next reader does not spend
+// the afternoon re-deriving it. TRUNCATE refuses to leave a referencing table
+// behind, so it needs CASCADE, and the cascade closure of Company alone is 127
+// of the 139 tables. Every fixture creates a Company. Measured: 2419ms for all
+// 139 against 2404ms for the eight a fixture actually dirties.
 //
 // _prisma_migrations is excluded: it is the record of what has been applied,
-// not test data, and truncating it would make the next run believe the schema
+// not test data, and emptying it would make the next run believe the schema
 // was never migrated.
-let cachedTruncate = null;
+let cachedPlan = null;
 
-const truncateStatement = async () => {
-  if (cachedTruncate) return cachedTruncate;
+const wipePlan = async () => {
+  if (cachedPlan) return cachedPlan;
 
-  // The guard is not decoration. This helper truncates EVERY table it is
-  // pointed at, so it refuses to run anywhere but a database whose name ends
-  // in _test — the same rule the lane's test runner enforces on the URL. A
-  // misread .env that pointed this at the dev database would otherwise empty
-  // it silently and the only symptom would be a passing test suite.
+  // The guard is not decoration. This helper empties EVERY table it is pointed
+  // at, so it refuses to run anywhere but a database whose name ends in _test —
+  // the same rule the lane's test runner enforces on the URL. A misread .env
+  // that pointed this at the dev database would otherwise empty it silently and
+  // the only symptom would be a passing test suite.
   const [{ current_database: db }] = await prisma.$queryRawUnsafe('select current_database()');
   if (!/_test$/.test(db)) {
     throw new Error(`refusing to wipe "${db}": this helper only runs against a *_test database`);
   }
 
-  const rows = await prisma.$queryRawUnsafe(
-    `select tablename from pg_tables
+  // format('%I') rather than hand-written quotes: these identifiers are mixed
+  // case, and an unquoted Company is folded to lowercase by Postgres and
+  // matches nothing.
+  const tables = await prisma.$queryRawUnsafe(
+    `select format('%I.%I', schemaname, tablename) as ident,
+            quote_literal(format('%I.%I', schemaname, tablename)) as literal
+       from pg_tables
       where schemaname = 'public' and tablename <> '_prisma_migrations'`,
   );
-  if (!rows.length) throw new Error('no tables found to wipe — is this database migrated?');
-  // Quoted: these identifiers are mixed case, and an unquoted Company is folded
-  // to lowercase by Postgres and matches nothing.
-  const list = rows.map((r) => `"public"."${r.tablename}"`).join(', ');
-  cachedTruncate = `truncate table ${list} restart identity cascade`;
-  return cachedTruncate;
+  if (!tables.length) throw new Error('no tables found to wipe — is this database migrated?');
+
+  // RESTART IDENTITY used to do this as part of the TRUNCATE.
+  const sequences = await prisma.$queryRawUnsafe(
+    `select quote_literal(format('%I.%I', n.nspname, c.relname)) as literal
+       from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relkind = 'S'`,
+  );
+
+  // Whether this role may switch referential integrity off for a transaction,
+  // asked once and by doing it. session_replication_role is superuser-only on
+  // the databases this suite runs against, but PG15 allows it to be GRANTed, so
+  // is_superuser is the wrong question and the honest test is the attempt. A
+  // role that cannot falls back to the TRUNCATE, which is slow but correct.
+  let unordered = true;
+  try {
+    await prisma.$executeRawUnsafe(
+      "do $$ begin perform set_config('session_replication_role', 'replica', true); end $$",
+    );
+  } catch {
+    unordered = false;
+  }
+
+  cachedPlan = {
+    unordered,
+    // One statement, one round trip, one EXISTS per table. EXISTS stops at the
+    // first row, and reads no pages at all for a table that is already empty.
+    probe: tables
+      .map((t) => `select ${t.literal} as ident where exists (select 1 from ${t.ident})`)
+      .join(' union all '),
+    resets: sequences.map((s) => `  perform setval(${s.literal}, 1, false);`).join('\n'),
+    truncate: `truncate table ${tables.map((t) => t.ident).join(', ')} restart identity cascade`,
+  };
+  return cachedPlan;
 };
 
 export const wipeAll = async () => {
-  await prisma.$executeRawUnsafe(await truncateStatement());
+  const plan = await wipePlan();
+  if (!plan.unordered) {
+    await prisma.$executeRawUnsafe(plan.truncate);
+    return;
+  }
+
+  const dirty = await prisma.$queryRawUnsafe(plan.probe);
+  if (!dirty.length) return;
+
+  // set_config's third argument is is_local, so referential integrity comes
+  // back when this statement commits OR rolls back. A pooled connection can
+  // never be handed on with foreign keys still disabled, and a delete that
+  // throws leaves the database untouched rather than half-emptied.
+  await prisma.$executeRawUnsafe(
+    [
+      'do $$',
+      'begin',
+      "  perform set_config('session_replication_role', 'replica', true);",
+      ...dirty.map((r) => `  delete from ${r.ident};`),
+      plan.resets,
+      'end $$',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
 };
 
 export const TEST_PASSWORD = 'test-password-1';
