@@ -1,9 +1,16 @@
-# Window 1 — first-login gate: tested SHA, results, and one thing that blocks you
+# Window 1 — first-login gate: tested SHA, results, and what still blocks a staging deploy
 
 **From:** the cloud-readiness / first-login lane
 **Date:** 2026-09-26
 **Status:** code complete and pushed. **Not deployed anywhere.** Not to
 production, not to staging.
+
+> **Revised 2026-09-26, after the first version of this note.** The first version
+> claimed `tests/integrations.test.js` hangs and that **no lane could hand you a
+> green 53-file run**. Both were wrong — the file is slow, not stuck, and I had
+> killed it with my own 300s bound. It passes 119/119 in 537.7s. The withdrawal
+> and the measurements are under "Withdrawn" below. Nothing about the gate code,
+> `bad4896`, or the test results for it changed.
 
 ## The SHA to integrate
 
@@ -63,11 +70,17 @@ does not move production and must not be described as if it had.
 | Boot matrix, 11 configurations | all as specified | inline, reproduced below |
 | **Control: new tests vs. OLD code** | **9 failed / 7 passed / 14 skipped**, exit 1 | `flgate-control-oldcode.log` |
 | **Integrated, `9a43535` = lane merged onto `main` `728a57c`** | **52 files / 1566 tests passed, 0 failed, 0 skipped**, exit 0, 521s | `flgate-integrated-9a43535.log` |
+| **The 53rd file on its own, integrated @ `9a43535`** | **119 passed / 119**, 0 skipped, 0 todo, exit 0, 537.7s | `integrations-unbounded.log` |
 
-The integrated run is the whole backend suite **minus `tests/integrations.test.js`**,
-which hangs on plain `main` and is explained at the end of this note. That is an
-exclusion I am naming, not hiding. Everything else — all 52 remaining files —
-passes with the gate merged in, and `firstLoginGate.test.js` contributes its 30.
+Every log in that column lives in `/home/atc-noc/vcx-cloudready-local/` on this
+box. They are not in the repo — they are raw run output, and some carry request
+logs, so they are deliberately not committed.
+
+The 52-file run is the whole backend suite **minus `tests/integrations.test.js`**.
+I excluded that file because I thought it hung. **It does not hang — I was wrong,
+and the withdrawal is the "Withdrawn" section below.** Run to completion it is
+green, which is the row above. Everything else — all 52 remaining files — passes
+with the gate merged in, and `firstLoginGate.test.js` contributes its 30.
 
 One caution on reading that "0 skipped": the summary line genuinely reports none,
 but the run does contain a *test whose name* is `globalLimiter skipped (NODE_ENV=test
@@ -168,54 +181,101 @@ capped silently and on purpose. §D1 has been corrected in place; the file count
 there moves from five source files to six, because `.env.example` now documents
 both variables.
 
-## The thing that blocks your release workflow, and it is not mine
+## Withdrawn: the `integrations.test.js` "hang" was mine, not the file's
 
-**`backend/tests/integrations.test.js` hangs. It hangs on plain `main`.**
+An earlier version of this note told you this file hangs, that **no lane could
+hand you a green 53-file run**, and that a CI job would hang rather than fail.
+**All three were wrong.** The file is slow, not stuck, and every symptom I
+reported was an artifact of my own 300-second bound.
 
-I could not produce a clean full-suite run, and the reason is not this branch:
+Run to completion at the integrated SHA `9a43535`, 2026-09-26:
 
-| Run | Result |
+| | |
 |---|---|
-| Full suite, lane @ `bad4896` | stalls in `integrations.test.js`, no summary |
-| **`integrations.test.js` alone, plain `main` `728a57c`, no gate code present** | **`timeout` exit 124 at 300s, zero test lines** |
-| Same suite with that one file excluded, integrated @ `9a43535` | **52/52 files, 1566/1566, exit 0 in 521s** |
+| `tests/integrations.test.js` alone | **119 passed / 119**, 0 skipped, 0 todo, **exit 0** |
+| Duration | **537.7s** |
+| Of which, the 100,000-row import | **496.1s — 202 rows/s** |
+| Cleanup inside that same test | links 0.2s, customers 18.6s |
+| Log | `integrations-unbounded.log` |
 
-Byte-for-byte the same place: 107 889 bytes of log against 107 907, both ending
-on the same `POST /api/integrations/REELO/import`. Postgres is idle — no lock
-waits, one connection left `idle in transaction` — so it is a JS promise that
-never settles, not a database problem. `testTimeout: 20000` does not catch it,
-which means it is hanging outside a test body.
+### Why it takes eight minutes, and why that is by design
 
-Consequences you need to know about:
-- **No lane can hand you a green 53-file run** until this is fixed. If a report
-  claims one, it either excluded this file or never finished.
-- My integrated number below is therefore `--exclude tests/integrations.test.js`,
-  and I am labelling it rather than quietly omitting it.
-- A CI job with no overall timeout will hang rather than fail, which is the
-  worse of the two.
+Line 2661 imports 100,000 rows, and line 2746 gives the test its own budget:
 
-I have not fixed it. It is outside this lane, it is in another window's
-integration work, and a hang in a payments/loyalty import is not something to
-patch blind at the end of a session.
+```js
+it('holds 100,000 rows in one isolated run and accounts for every one of them', async () => {
+  const N = 100_000;
+  …
+}, 900_000);   // 15 minutes, overriding the suite's 20s
+```
 
-## Both staging stacks are occupied — read this before telling me to deploy to one
+`src/lib/integrations/loyaltyImport.js` applies it in 500-row transactions and,
+inside each one, loops row by row with an `await tx.customer.findUnique(...)` per
+row — about 100,000 sequential round-trips. That is deliberate: it is what lets a
+failure be attributed to a row number and a crashed run resume from its cursor.
+202 rows/s is the designed cost, not a defect.
 
-There is no free isolated staging stack to put this on:
+The repo already said so, in `backend/tests/globalSetup.js`:
+
+> "Contention is low — only this lane's own runs compete — but **the 100,000-row
+> import test alone takes ~8 min**, so waiting is real…"
+
+### Each thing I reported, and what it actually was
+
+| What I wrote | What was true |
+|---|---|
+| "`timeout` exit 124 at 300s" | The import alone needs 496s. I killed it 60% through. |
+| "**zero test lines**" | `--reporter=basic` prints the file list only at the END. The silence was my reporter flag, not a lack of progress — under `--reporter=verbose` the same run visibly completes **111 of the file's 119 tests** before reaching the slow one, inside the first ~15s. Only 7 tests sit after it. Arithmetic: 533.1s of test time minus the big test's 496.1s import and 18.8s cleanup leaves 18.2s for the other 118 tests combined. |
+| "`testTimeout: 20000` does not catch it, so it is hanging outside a test body" | The test overrides it with `900_000`. The 20s limit was never in play. |
+| "a JS promise that never settles" | Sampled live: an **`active`** connection holding a 1.1s-old transaction, and `Customer` rows climbing 17 000 → 82 000 → 99 500 while I watched. |
+| "one connection left `idle in transaction`" | A batch transaction caught between per-row round-trips. |
+| "both ending on the same `POST …/REELO/import`" | True, and it is the *expected* last line. Those three requests are the cashier-403, manager-403 and owner-200 of the test immediately before the big one; the 100k request was still in flight and therefore unlogged, because the logger writes on response finish. |
+
+### What this means for your release workflow
+
+- **A green 53-file run is achievable.** The "no lane can give you one" claim was
+  false and is withdrawn.
+- **The real hazard is the opposite of what I described.** CI will not hang — it
+  will *fail* if the per-job timeout is under about 20 minutes. Budget the full
+  backend suite at **~18–20 min** on an idle box, and more under load.
+- **The 900s budget is not generous.** At load ~7 the import used 496s of it. The
+  file's own comment records 146 rows/s at load 13.65, which projects to ~685s —
+  inside the budget, but the headroom is finite. If it ever does fail, read the
+  `[cleanup] customers` line first: tens of seconds means a busy box, hundreds
+  means `LoyaltyProfileLink_customerId_companyId_idx` has gone missing.
+- Nothing here was ever mine to fix, and there is nothing to fix.
+
+## All four staging stacks are occupied — read this before telling me to deploy to one
+
+There is no free isolated staging stack to put this on. Re-checked **13:25:51Z**,
+and it has got busier since the first version of this note, not quieter:
 
 | Stack | Image | Started | Reachable on |
 |---|---|---|---|
-| `pos-staging-*` | `114ffc9` | **2026-09-26 11:16:57Z** | `127.0.0.1:8111` |
-| `pos-stgw5-*` | — | — | `127.0.0.1:8210` |
+| `pos-staging-*` | `114ffc9` | 2026-09-26 **11:16:57Z** | `127.0.0.1:8111` |
+| `pos-stgw5-*` | `prov1-2465725` | 2026-09-26 **11:39:12Z** | `127.0.0.1:8210`, edge `:8212` |
+| `pos-stgw5-rb` | `pos-prod-backend:latest`, **`GIT_SHA=483a47f`** | 2026-09-26 **12:05:19Z** | `127.0.0.1:8211` |
+| `pos-w1rb-*` | `114ffc9` | 2026-09-26 **13:19:56Z** | `127.0.0.1:8310` |
 
-`pos-staging-*` was **started 11:16Z today**, minutes before I looked, on
-`114ffc9` — the Core RC-1 image this repo's own release note names. Another window
-is mid-verification on it right now. Deploying `bad4896` over it would destroy
-that run, and `DEPLOY-OWNER.md` does not cover staging, so there is no lock to
-claim and no owner line to read: the only signal is the container timestamp.
+Three points that matter more than the table:
+
+- `pos-staging-*` has been up two hours on `114ffc9`, the Core RC-1 image this
+  repo's own release note names. Another window is mid-verification on it.
+  Deploying `bad4896` over it would destroy that run.
+- **`pos-w1rb-*` is a complete fourth stack — postgres, backend, frontend, edge —
+  and it came up four minutes before I wrote this line.** It runs the same
+  `114ffc9` staging images. Somebody is actively rehearsing on it right now.
+- `pos-stgw5-rb` runs `GIT_SHA=483a47f`, which is **what production is actually
+  on** (see the production correction above). That is a rollback rehearsal
+  against the real production image, and it is not mine.
+
+`DEPLOY-OWNER.md` does not cover staging, so there is no lock to claim and no
+owner line to read: the only signal is the container timestamp. Ports `8111`,
+`8210`/`8211`/`8212` and `8310` are all taken.
 
 Consequently a staging deploy of this branch needs **either** Window 1's release
-workflow to schedule it, **or** a fourth stack on its own ports and its own
-database. I have not built one and have not squatted either existing stack.
+workflow to schedule it, **or** a fifth stack on its own ports and its own
+database. I have not built one and have not squatted any existing stack.
 
 ## What I did not do
 
