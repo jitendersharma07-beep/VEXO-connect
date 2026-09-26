@@ -12,6 +12,16 @@ export const env = {
   HOST: process.env.HOST || '0.0.0.0',
   APP_NAME: process.env.APP_NAME || 'VEXO Connect',
   APP_URL: process.env.APP_URL || 'http://localhost:5177',
+  // Build provenance, injected by the image build (see backend/Dockerfile). Not
+  // `required()`: a dev run has no build behind it, and refusing to boot over a
+  // missing provenance stamp would take the service down for a diagnostic.
+  //
+  // "unknown" rather than null or '' so the gap is legible downstream. A blank
+  // gitSha in a /api/version response reads as "this deployment has no such
+  // feature"; "unknown" reads as "the build did not pass one", which is the
+  // fault we are actually trying to surface.
+  GIT_SHA: process.env.GIT_SHA || 'unknown',
+  BUILD_TIME: process.env.BUILD_TIME || 'unknown',
   DATABASE_URL: required('DATABASE_URL'),
   // POS signs with its own secret; an ATC NOC / Megatel / AGR token can never
   // verify here and a POS token can never verify there.

@@ -67,6 +67,8 @@ POS_JWT_SECRET='test-secret-0123456789abcdef0123456789' npm test
 
 ```bash
 cp .env.example .env                  # fill in real values; .env is git-ignored
+export GIT_SHA=$(git rev-parse HEAD)  # stamps the images; see "Build provenance"
+export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml exec backend node prisma/seed.js
 sudo bash deploy/go-live-path.sh      # nginx route + verification
@@ -74,3 +76,34 @@ sudo bash deploy/go-live-path.sh      # nginx route + verification
 
 Seed passwords come from `POS_SEED_*_PASSWORD` env vars or are generated and
 printed once — they are never committed or stored in plain text.
+
+### Build provenance
+
+The two `export`s above are what make the built images say which commit they
+came from. Skipping them is not an error — the build succeeds and the stamp
+reads `unknown`, which is the signal that it was skipped.
+
+Read it back three ways, in increasing order of what has to be working:
+
+```bash
+# 1. The image — answers even if the container will not start.
+docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' pos-prod-backend:latest
+docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' pos-prod-frontend:latest
+
+# 2. The process — answers with the database down.
+curl -s localhost:${HTTP_PORT:-8110}/api/version
+
+# 3. The full stack, edge through to the database.
+curl -s localhost:${HTTP_PORT:-8110}/api/health
+```
+
+`/api/version` returns `{ service, version, gitSha, builtAt }` and deliberately
+does not touch the database, so it still answers during exactly the kind of
+broken deploy that makes you ask the question. `version` comes from
+`backend/package.json`, which ships inside the image; `gitSha` and `builtAt`
+come from the build args.
+
+Before this existed, identifying the live commit meant git-blob-hashing all 51
+backend source files out of the running container — and that still could not
+distinguish six commits whose source trees are byte-identical, because they
+differ only in documentation.

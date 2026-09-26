@@ -68,8 +68,14 @@ breaking. Do the slow part first so the broken window is seconds, not minutes.
    docker image tag pos-prod-frontend:latest pos-prod-frontend:rollback-pre-domain
    ```
 3. **Rebuild the frontend.** The running container is unaffected by a build.
+   Export the provenance stamp even though only one service is being rebuilt:
+   omitting it leaves the frontend labelled `unknown` while the backend still
+   carries a real SHA, and a stack that gives two different answers about which
+   commit it runs is worse than one that gives none.
    ```
    cd /home/atc-noc/atc-pos
+   export GIT_SHA=$(git rev-parse HEAD)
+   export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    docker compose -f docker-compose.prod.yml build frontend
    ```
 4. **Flip.** The script writes the new vhost, converts `/pos` to a 301, tests

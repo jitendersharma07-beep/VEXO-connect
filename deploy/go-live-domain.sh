@@ -57,7 +57,9 @@ case "$BASE_IN_IMAGE" in
   *)
     die "pos-prod-frontend:latest is NOT a root-base build — it carries: $BASE_IN_IMAGE
     Set VITE_BASE_PATH=/ in $PROJ/.env and rebuild BEFORE flipping nginx:
-      cd $PROJ && docker compose -f docker-compose.prod.yml build frontend" ;;
+      cd $PROJ && export GIT_SHA=\$(git rev-parse HEAD) \\
+        && export BUILD_TIME=\$(date -u +%Y-%m-%dT%H:%M:%SZ) \\
+        && docker compose -f docker-compose.prod.yml build frontend" ;;
 esac
 
 grep -q "CORS_ORIGIN=https://$DOMAIN" "$PROJ/.env" \

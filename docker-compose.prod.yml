@@ -27,6 +27,23 @@ x-logging: &pos-logging
     max-size: "10m"
     max-file: "5"
 
+# Build provenance, stamped into both images as OCI labels (and, for the backend,
+# env vars the process reports over /api/version). Compose cannot shell out to
+# `git rev-parse`, so the deploy must export these before `up --build` — the §3
+# block in docs/DEPLOY-PHASE2.md is the authoritative form.
+#
+# An anchor for the same reason `x-logging` is one: a service that silently
+# MISSES the block is the failure this is meant to prevent. A half-stamped stack,
+# where the backend knows its commit and the frontend does not, is worse than no
+# stamping at all, because the one answer you get looks authoritative.
+#
+# The default is the literal string "unknown", never empty. An image whose
+# revision reads "unknown" is visibly un-stamped; a blank one is indistinguishable
+# from an image built before this block existed.
+x-build-provenance: &pos-build-provenance
+  GIT_SHA: ${GIT_SHA:-unknown}
+  BUILD_TIME: ${BUILD_TIME:-unknown}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -50,6 +67,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args: *pos-build-provenance
     restart: unless-stopped
     logging: *pos-logging
     env_file:
@@ -98,6 +116,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.prod
       args:
+        <<: *pos-build-provenance
         # Vite inlines this into the bundle; moving POS from the /pos path
         # mount to a dedicated domain is a .env change + rebuild, not a code
         # edit. Default is the root-domain case.

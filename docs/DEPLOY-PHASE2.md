@@ -179,7 +179,20 @@ is a decision, not a detail.
 
 ## 3. Build + deploy
 
+The two `export`s are part of the build, not decoration. They are what stamp the
+commit into the images; run `build` without them and the stamp is the literal
+string `unknown` — for the whole life of that image, with no way to recover the
+real value afterwards.
+
+Export in the **deploy tree**, and confirm the SHA is the one you intend to ship
+before building — `git rev-parse HEAD` reads whatever that tree is checked out
+at, including a detached HEAD or a stale lane.
+
 ```sh
+export GIT_SHA=$(git rev-parse HEAD)
+export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "$GIT_SHA $BUILD_TIME"          # read it. This is the deploy you are about to ship.
+
 docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d
 docker logs pos-prod-backend-1 --tail 60
@@ -188,6 +201,29 @@ docker logs pos-prod-backend-1 --tail 60
 In the backend log expect the single phase-2 migration being applied (or `No
 pending migrations to apply.` on a re-run), then the listen line. Any other
 migration name in the log → STOP and roll back (§6).
+
+### 3.1 Prove the stamp landed
+
+Do this immediately, while you still know what you exported. A missing stamp is
+cheap to fix now with one rebuild and impossible to fix later.
+
+```sh
+for svc in backend frontend; do
+  docker inspect --format "$svc {{index .Config.Labels \"org.opencontainers.image.revision\"}}" \
+    "pos-prod-$svc:latest"
+done
+curl -s "localhost:${HTTP_PORT:-8110}/api/version"
+```
+
+Both labels and the `gitSha` field must equal the `GIT_SHA` you echoed above.
+Any of them reading `unknown` means the export did not reach the build — rebuild
+before moving on, because this is the only chance to get it right.
+
+`/api/version` does not touch the database, so it answers even when §4's health
+check does not. That is the point: it is the provenance channel that survives a
+half-broken deploy. Also note the frontend is a static bundle with no process to
+ask — `docker inspect` is its *only* channel, which is why the loop covers both
+images rather than trusting the API's answer for the whole stack.
 
 ## 4. Verify (read-only, in this order)
 

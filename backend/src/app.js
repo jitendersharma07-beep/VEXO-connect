@@ -10,6 +10,7 @@ import { globalLimiter } from './middleware/rateLimit.js';
 import { notFoundHandler, errorHandler } from './middleware/error.js';
 
 import healthRoutes from './api/routes/health.js';
+import versionRoutes from './api/routes/version.js';
 import authRoutes from './api/routes/auth.js';
 import dashboardRoutes from './api/routes/dashboard.js';
 import branchRoutes from './api/routes/branches.js';
@@ -104,6 +105,7 @@ export const createApp = () => {
     res.json({ appName: env.APP_NAME, product: 'atc-pos', vendor: 'ATC Infocom Solutions Pvt. Ltd.' });
   });
   api.use('/health', healthRoutes);
+  api.use('/version', versionRoutes);
   api.use('/auth', authRoutes);
   api.use('/dashboard', dashboardRoutes);
   api.use('/branches', branchRoutes);
