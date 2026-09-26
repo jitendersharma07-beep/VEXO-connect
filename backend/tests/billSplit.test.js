@@ -484,22 +484,22 @@ describe('splitting a bill into separate cheques', () => {
       .send({ pax: 5 });
     expect(svc.status, JSON.stringify(svc.body)).toBe(200);
 
-    const original = await orderRow(order.id);
-    const cheque = await orderRow(chequeId);
-    expect(original.pax).toBe(5);
-    expect(cheque.pax).toBeNull();
-
-    // Now the same fact in the form a covers report actually computes it. Be
-    // precise about what this adds, because given the two assertions above and a
-    // count of exactly 2, the sum is ENTAILED and would be a tautology if sold
-    // as an independent check of those two rows. It is not that. It asks a
-    // question the row-level pair cannot: that the table holds exactly the two
-    // bills I named, and that covers appear ONCE across whatever it holds. A
-    // change that left a third open bill carrying pax — a second cheque, a
-    // merge, a retry that duplicated an order — passes both lines above and
-    // fails here. The figure is the party, not the paperwork: five people who
-    // split their bill are still five people, and NINE is what the defect
-    // reported for this table.
+    // The harm first, because the harm is the reported figure and not the row.
+    // This ordering is deliberate: the row-level assertions below abort a failing
+    // run before it ever reaches an aggregate, which is why the control that
+    // restored 'desc' ordering could only ever report "expected null to be 4"
+    // and proved nothing about the sum. Asked first, the same control reports
+    // `expected 9 to be 5` — the defect stated in the units a covers report and
+    // a revenue-per-cover ratio are denominated in.
+    //
+    // Be precise about what this adds over the two row assertions below, since
+    // with a count of exactly 2 the sum is ENTAILED by them and would be a
+    // tautology if sold as an independent check of those rows. It is not that. It
+    // asks what the row pair cannot: that the table holds exactly the two bills
+    // named, and that covers appear ONCE across whatever it holds. A third open
+    // bill carrying pax — a second cheque, a merge, a retry that duplicated an
+    // order — passes both rows and fails here. The figure is the party, not the
+    // paperwork: five people who split their bill are still five people.
     const agg = await prisma.order.aggregate({
       where: { tableId: tableA1.id, status: { in: ['OPEN', 'BILLED'] } },
       _sum: { pax: true },
@@ -507,6 +507,13 @@ describe('splitting a bill into separate cheques', () => {
     });
     expect(agg._count._all).toBe(2);
     expect(agg._sum.pax).toBe(5);
+
+    // Then where the five actually sits, which is what makes the sum right for
+    // the right reason rather than by two errors cancelling.
+    const original = await orderRow(order.id);
+    const cheque = await orderRow(chequeId);
+    expect(original.pax).toBe(5);
+    expect(cheque.pax).toBeNull();
 
     // And the till is answered for the bill that owns the covers, not for
     // whichever row the write happened to touch.
