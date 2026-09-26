@@ -27,9 +27,11 @@ import { num } from '../../lib/orders.js';
 import {
   MAX_PAX,
   assertServiceEditable,
+  paxAnchorOf,
   publicService,
   resolveWaiter,
   serviceUpdateData,
+  waiterTargetsOf,
 } from '../../lib/tables/service.js';
 import { isDestinationTaken, transferParty } from '../../lib/tables/transfer.js';
 
@@ -93,6 +95,12 @@ const CURRENT_ORDER_INCLUDE = {
       waiterSetAt: true,
       waiterSetById: true,
     },
+    // Oldest first, for the same reason openBillsOf is: `take: 1` with no
+    // ordering was right only while a table could hold one open bill. After a
+    // split it returns whichever row Postgres happens to hand back, so a floor
+    // screen could read the cheque and show `pax: null` for a table of four.
+    // Oldest is the anchor — the bill that carries the party's covers.
+    orderBy: { createdAt: 'asc' },
     take: 1,
   },
 };
@@ -273,15 +281,25 @@ const loadTableInScope = async (req) => {
   return table;
 };
 
-// The bill the party is currently running. OPEN and BILLED both count as
-// "occupied" for the floor, and the difference between them is the difference
-// between editable and not — assertServiceEditable is what draws that line, so
-// both are fetched and it decides.
-const currentOrderOf = (tableId) =>
-  prisma.order.findFirst({
+// The bills the party is currently running, OLDEST FIRST. OPEN and BILLED both
+// count as "occupied" for the floor, and the difference between them is the
+// difference between editable and not — assertServiceEditable is what draws that
+// line, so both are fetched and it decides.
+//
+// This returns a LIST rather than findFirst, and the ordering is load-bearing
+// rather than decoration. Both are for the same reason: until split shipped, a
+// table could hold only ONE open order — POST /orders refuses a second
+// (orders.js:371-375) — so a findFirst here was right by construction and its
+// `orderBy` chose between nothing. Split made two bills on one table reachable
+// for the first time and silently promoted that assumption to a defect, because
+// the old `createdAt: 'desc'` resolved to the newer row: the cheque. Covers
+// written there are counted twice. paxAnchorOf and waiterTargetsOf decide which
+// bill each field actually belongs on.
+const openBillsOf = (tableId) =>
+  prisma.order.findMany({
     where: { tableId, status: { in: OPEN_STATUSES } },
     select: { id: true, status: true },
-    orderBy: { createdAt: 'desc' },
+    orderBy: { createdAt: 'asc' },
   });
 
 // `null` clears, absent leaves alone, and the two are different instructions —
@@ -302,7 +320,21 @@ router.post(
   asyncHandler(async (req, res) => {
     const table = await loadTableInScope(req);
     const data = serviceSchema.parse(req.body);
-    const order = assertServiceEditable(await currentOrderOf(table.id));
+    const bills = await openBillsOf(table.id);
+
+    // Covers go on the anchor, the server goes on every open cheque. Before
+    // split those were the same single bill, which is why one findFirst and one
+    // update used to be enough here.
+    const anchor = paxAnchorOf(bills);
+    const waiterTargets = waiterTargetsOf(bills);
+
+    // Both refusals are assertServiceEditable's own, so the messages a till
+    // shows are unchanged. Covers may only change while the bill that OWNS them
+    // is unissued; the server may change on any cheque still open, which is why
+    // the two are checked against different rows. With one bill on the table
+    // both reduce to exactly the previous single check.
+    if (data.pax !== undefined) assertServiceEditable(anchor);
+    if (data.waiterId !== undefined) assertServiceEditable(waiterTargets[0] ?? anchor);
 
     // Eligibility is proved against the table's OWN store, not the caller's.
     // A regional manager standing in outlet A2 may credit A2's captain, and may
@@ -317,21 +349,50 @@ router.post(
       });
     }
 
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: serviceUpdateData({
-        pax: data.pax,
-        waiterId: data.waiterId,
-        actorId: req.user.id,
-      }),
-      select: {
-        id: true,
-        pax: true,
-        waiterId: true,
-        waiterSetAt: true,
-        waiterSetById: true,
-        waiter: { select: { fullName: true } },
-      },
+    // One transaction because this is now up to two writes and they are one
+    // instruction: a party must never be left with its server changed on one
+    // cheque and not the other. Neither field is money and nothing here calls
+    // recomputeOrder, so no total can move.
+    const updated = await prisma.$transaction(async (tx) => {
+      if (data.waiterId !== undefined) {
+        // updateMany, because the server belongs on every open cheque. The three
+        // waiter columns move together — Order_waiter_attribution_complete
+        // refuses any other combination — and serviceUpdateData is what agrees
+        // with that constraint, so it builds this payload too.
+        await tx.order.updateMany({
+          where: { id: { in: waiterTargets.map((b) => b.id) } },
+          data: serviceUpdateData({ waiterId: data.waiterId, actorId: req.user.id }),
+        });
+      }
+      if (data.pax !== undefined) {
+        // Exactly one row, always the anchor. This is the line the defect was.
+        await tx.order.update({
+          where: { id: anchor.id },
+          data: serviceUpdateData({ pax: data.pax }),
+        });
+      }
+
+      // Read back the bill that represents the party. Covers live on the anchor
+      // and the server is now uniform across every open cheque, so one row
+      // answers for both. When the anchor is itself already issued — the
+      // original billed while a cheque stays open — the row that just changed is
+      // the first open cheque, and that is what the till is asking about.
+      // Both branches are total: pax being present proves the anchor is OPEN,
+      // and an absent pax with a non-OPEN anchor proves waiterTargets is not
+      // empty, because otherwise the check above would have refused.
+      const readbackId =
+        data.pax !== undefined || anchor.status === 'OPEN' ? anchor.id : waiterTargets[0].id;
+      return tx.order.findUnique({
+        where: { id: readbackId },
+        select: {
+          id: true,
+          pax: true,
+          waiterId: true,
+          waiterSetAt: true,
+          waiterSetById: true,
+          waiter: { select: { fullName: true } },
+        },
+      });
     });
 
     // Audited against the Order, because the order is what changed and is what a
@@ -340,15 +401,25 @@ router.post(
     await audit(req, {
       action: 'TABLE_SERVICE_SET',
       entity: 'Order',
-      entityId: order.id,
+      entityId: updated.id,
       companyId: req.companyScope.id,
       meta: {
         tableId: table.id,
         tableName: table.name,
         branchId: table.branchId,
-        ...(data.pax !== undefined ? { pax: data.pax } : {}),
+        // Which bill each field actually landed on. With one bill these are all
+        // the same id and say nothing new; with a split party they are the only
+        // way to reconstruct afterwards why covers moved on one cheque and the
+        // server on two. openBills is here so a shift report can tell a
+        // single-bill table from a split one without re-deriving it.
+        openBills: bills.length,
+        ...(data.pax !== undefined ? { pax: data.pax, paxOrderId: anchor.id } : {}),
         ...(data.waiterId !== undefined
-          ? { waiterId: data.waiterId, waiterName: waiter?.fullName ?? null }
+          ? {
+              waiterId: data.waiterId,
+              waiterName: waiter?.fullName ?? null,
+              waiterOrderIds: waiterTargets.map((b) => b.id),
+            }
           : {}),
       },
     });

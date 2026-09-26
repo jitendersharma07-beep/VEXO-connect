@@ -113,6 +113,44 @@ export const serviceUpdateData = ({ pax, waiterId, actorId, now = new Date() }) 
   return data;
 };
 
+/**
+ * Which of a table's open bills owns the party's covers.
+ *
+ * Covers are a property of the PARTY, not of a cheque — four people who split
+ * their bill are still four people. So pax must be recorded exactly ONCE across
+ * a table's open bills, because SUM(pax) is what reports covers. Writing 4 onto
+ * a second cheque reports eight people at a table of four, and splitting it 2/2
+ * would invent a fact nobody observed.
+ *
+ * The anchor is the OLDEST open bill, which is the original: splitBill.js builds
+ * cheques with `pax: null` and never touches the original's pax, so the oldest
+ * bill is also the one already carrying the covers. Oldest is the rule rather
+ * than "whichever row has pax" because it is still defined before any covers
+ * have been recorded, and because it is stable — a party that splits twice has
+ * one anchor rather than a race between two cheques.
+ *
+ * With one bill on the table — every case that can exist before a split — the
+ * anchor IS that bill, so this changes nothing on the common path.
+ *
+ * Callers must pass bills ordered oldest-first; `openBillsOf` in the route does.
+ */
+export const paxAnchorOf = (bills) => bills[0] ?? null;
+
+/**
+ * Which of a table's bills a server change has to reach: every one still OPEN.
+ *
+ * The server served the whole party and really did sell every cheque, so the
+ * attribution belongs on all of them. This is the same reasoning splitBill.js
+ * uses when it COPIES waiterId onto a new cheque, and the two must not disagree:
+ * Order carries @@index([companyId, waiterId, billedAt]) so sales-per-waiter can
+ * be asked, and that figure is only right if a waiter change after a split
+ * reaches both halves instead of landing on whichever bill a findFirst returned.
+ *
+ * BILLED bills are excluded on the same printed-paper grounds as
+ * assertServiceEditable: the server is part of an issued bill.
+ */
+export const waiterTargetsOf = (bills) => bills.filter((b) => b.status === 'OPEN');
+
 // What a floor screen shows against a table, and what a shift report reads per
 // bill. Kept next to the writer so the two cannot drift apart.
 export const publicService = (order) =>

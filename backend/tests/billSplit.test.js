@@ -446,6 +446,124 @@ describe('splitting a bill into separate cheques', () => {
     // assertion above is unchanged.
   }, 45000);
 
+  // The test above covers covers recorded BEFORE a split. The three below cover
+  // them recorded AFTER one, which is a different code path and the one that was
+  // broken. They live in this file rather than in tablesService.test.js because
+  // the defect belongs to split: POST /tables/:id/service was correct for every
+  // case that could occur until a table could hold two open bills at once.
+  // POST /orders refuses a second one, so before split the route's findFirst was
+  // right by construction and its orderBy chose between nothing.
+
+  it('records covers once after a split, on the original and not the cheque', async () => {
+    await clearTable(tableA1.id);
+    const order = await openMixedBill();
+    const lines = await lineIdsOf(order.id);
+    const res = await split(tokens.managerA1, order.id, { itemIds: [lines[1].id] });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const chequeId = res.body.split.chequeId;
+
+    const svc = await request(app)
+      .post(`/api/tables/${tableA1.id}/service`)
+      .set(auth(tokens.managerA1))
+      .send({ pax: 4 });
+    expect(svc.status, JSON.stringify(svc.body)).toBe(200);
+
+    const original = await orderRow(order.id);
+    const cheque = await orderRow(chequeId);
+    expect(original.pax).toBe(4);
+    // The old route resolved its single order with createdAt 'desc', so it
+    // reached the NEWER row — the cheque — and the party's covers were recorded
+    // against a bill that was never meant to carry them.
+    expect(cheque.pax).toBeNull();
+
+    // Now the same fact in the form a covers report actually computes it. Be
+    // precise about what this adds, because given the two assertions above and a
+    // count of exactly 2, the sum is ENTAILED and would be a tautology if sold
+    // as an independent check of those two rows. It is not that. It asks a
+    // question the row-level pair cannot: that the table holds exactly the two
+    // bills I named, and that covers appear ONCE across whatever it holds. A
+    // change that left a third open bill carrying pax — a second cheque, a
+    // merge, a retry that duplicated an order — passes both lines above and
+    // fails here. The figure is the party, not the paperwork: four people who
+    // split their bill are still four people.
+    const agg = await prisma.order.aggregate({
+      where: { tableId: tableA1.id, status: { in: ['OPEN', 'BILLED'] } },
+      _sum: { pax: true },
+      _count: { _all: true },
+    });
+    expect(agg._count._all).toBe(2);
+    expect(agg._sum.pax).toBe(4);
+
+    // And the till is answered for the bill that owns the covers, not for
+    // whichever row the write happened to touch.
+    expect(svc.body.service.orderId).toBe(order.id);
+    expect(svc.body.service.pax).toBe(4);
+  }, 45000);
+
+  it('moves the server onto every open cheque after a split', async () => {
+    await clearTable(tableA1.id);
+    const order = await openMixedBill();
+    const lines = await lineIdsOf(order.id);
+    const res = await split(tokens.managerA1, order.id, { itemIds: [lines[1].id] });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const chequeId = res.body.split.chequeId;
+
+    // A relieving server taking over a party that has already divided its bill.
+    const svc = await request(app)
+      .post(`/api/tables/${tableA1.id}/service`)
+      .set(auth(tokens.managerA1))
+      .send({ waiterId: staff.captainA1.id });
+    expect(svc.status, JSON.stringify(svc.body)).toBe(200);
+
+    // Both cheques, not whichever one a findFirst returned. This is the same
+    // rule splitBill.js already follows when it COPIES waiterId onto a new
+    // cheque, and the two must not disagree: Order carries
+    // @@index([companyId, waiterId, billedAt]) so sales-per-waiter can be asked,
+    // and that figure is only right if it sees the whole party's money.
+    const rows = await prisma.order.findMany({
+      where: { id: { in: [order.id, chequeId] } },
+      select: { id: true, waiterId: true, waiterSetAt: true, waiterSetById: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(rows.map((r) => r.id)).toEqual([order.id, chequeId]);
+    for (const r of rows) {
+      expect(r.waiterId).toBe(staff.captainA1.id);
+      // Order_waiter_attribution_complete refuses a waiterId without these two,
+      // so a row satisfying the line above cannot hold nulls here — asserted
+      // anyway because updateMany is a different path from update, and the
+      // constraint is the only thing standing between them.
+      expect(r.waiterSetById).toBe(staff.managerA1.id);
+      expect(r.waiterSetAt).toBeInstanceOf(Date);
+    }
+  }, 45000);
+
+  it('shows the covers-bearing bill on the floor list after a split', async () => {
+    await clearTable(tableA1.id);
+    const order = await openMixedBill();
+    const svc = await request(app)
+      .post(`/api/tables/${tableA1.id}/service`)
+      .set(auth(tokens.managerA1))
+      .send({ pax: 4, waiterId: staff.captainA1.id });
+    expect(svc.status, JSON.stringify(svc.body)).toBe(200);
+
+    const lines = await lineIdsOf(order.id);
+    const res = await split(tokens.managerA1, order.id, { itemIds: [lines[1].id] });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    // The floor list carries ONE order per table (`currentOrder`) and it used to
+    // take that one with no ordering at all — so after a split Postgres chose,
+    // and a screen that got handed the cheque would show a table of four with no
+    // covers against it.
+    const list = await request(app)
+      .get(`/api/tables?branchId=${branchA1.id}`)
+      .set(auth(tokens.managerA1));
+    expect(list.status, JSON.stringify(list.body)).toBe(200);
+    const row = list.body.tables.find((t) => t.id === tableA1.id);
+    expect(row.currentOrder.id).toBe(order.id);
+    expect(row.currentOrder.service.pax).toBe(4);
+    expect(row.currentOrder.service.waiterName).toBe('Meera Captain');
+  }, 45000);
+
   it('keeps both cheques on the same table, visit, store and tenant', async () => {
     await clearTable(tableA1.id);
     const order = await openMixedBill();
