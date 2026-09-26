@@ -84,21 +84,43 @@ export function ErrorNote({ message }) {
   );
 }
 
+// The overlay is the scroll container, and the flex centering lives on an
+// inner `min-h-full` wrapper rather than on the overlay itself. That
+// distinction is the whole point: centring directly on a `fixed inset-0` box
+// pushes a taller-than-viewport dialog off BOTH ends, and overflow above a
+// flex container's top edge cannot be scrolled back into view — so the header
+// and its close button simply become unreachable. Measured on the promotions
+// editor (996-1050px tall): at 1440x900 the X sat 23px above the viewport and
+// "Create draft" 50px below it; at 1366x768, 89px past each edge. The dialog
+// could neither be submitted nor dismissed. This shape keeps short modals
+// pixel-identical (min-h-full resolves to the viewport, nothing overflows, no
+// scrollbar) and lets tall ones scroll instead of clipping.
 export function Modal({ open, title, onClose, children, wide = false }) {
+  // Escape closes. The backdrop already discards on mousedown, so this adds no
+  // new way to lose input — it adds the one users reach for first.
+  useEffect(() => {
+    if (!open || !onClose) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-pos-ink/40 p-4" onMouseDown={onClose}>
-      <div
-        className={`card w-full ${wide ? 'max-w-2xl' : 'max-w-md'} p-6`}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-bold text-pos-ink">{title}</h2>
-          <button type="button" onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
-            <X className="h-5 w-5" />
-          </button>
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-pos-ink/40" onMouseDown={onClose}>
+      <div className="flex min-h-full items-center justify-center p-4">
+        <div
+          className={`card w-full ${wide ? 'max-w-2xl' : 'max-w-md'} p-6`}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-bold text-pos-ink">{title}</h2>
+            <button type="button" onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+          {children}
         </div>
-        {children}
       </div>
     </div>
   );

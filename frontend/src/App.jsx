@@ -44,6 +44,14 @@ import Integrations from './pages/Integrations.jsx';
 import CustomerDisplay from './pages/CustomerDisplay.jsx';
 import PairDisplay from './pages/PairDisplay.jsx';
 import GuestTable from './pages/GuestTable.jsx';
+// LANE operator-ui — VC-102 promotions and VC-103 kitchen display. These are
+// the KITCHEN DISPLAY screens; the inventory module's "Central kitchen"
+// (pages/inventory/Production.jsx) is a production-batch screen and is a
+// different thing entirely. Neither name may be used for the other.
+import Promotions from './pages/Promotions.jsx';
+import KitchenStation from './pages/KitchenStation.jsx';
+import KitchenExpediter from './pages/KitchenExpediter.jsx';
+import KitchenSupervisor from './pages/KitchenSupervisor.jsx';
 import NotFound from './pages/NotFound.jsx';
 // ==== LANE inventory ==== (VC-105 prerequisite, spec Part B §8)
 import InventoryOverview from './pages/inventory/Overview.jsx';
@@ -173,6 +181,58 @@ export default function App() {
                 element={
                   <RequireRoles roles={['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER']}>
                     <PairDisplay />
+                  </RequireRoles>
+                }
+              />
+              {/* VC-102 promotions. RequireAction, not RequireRoles: the server
+                  gates these routes with requireAction('promo.read'|'promo.write'
+                  |'promo.publish'), so the actions DO appear in
+                  GET /permissions/me and the client can mirror them exactly.
+                  Gating on CUSTOMER_OWNER instead would lock out COMPANY_ADMIN,
+                  who holds every action (permissions.js:251 `...ALL`), and would
+                  also hide the screen from FINANCE / REGIONAL_MANAGER /
+                  BRANCH_MANAGER, who hold promo.read and are admitted by
+                  GET /api/promotions. The screen hides its own write controls
+                  one by one, so read-only roles get a useful list, not a wall
+                  of buttons that answer 403. */}
+              <Route
+                path="promotions"
+                element={
+                  <RequireAction action="promo.read" what="promotions">
+                    <Promotions />
+                  </RequireAction>
+                }
+              />
+              {/* VC-103 kitchen display. RequireRoles, for the reason given on
+                  phone-orders above: kitchen.js gates with requireRole, so no
+                  kitchen.* action exists to read out of /permissions/me. These
+                  lists are copied from kitchen.js:26-27 and must stay equal to
+                  them — `operate` for the boards, `managerUp` for the overview.
+                  Note what that means: COMPANY_ADMIN and REGIONAL_MANAGER are
+                  NOT in either list, so the server 403s them; the nav hides the
+                  section from them rather than offering a refusal. Widening it
+                  is W3's call, not this window's. */}
+              <Route
+                path="kitchen"
+                element={
+                  <RequireRoles roles={['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER']}>
+                    <KitchenStation />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="kitchen/expediter"
+                element={
+                  <RequireRoles roles={['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER']}>
+                    <KitchenExpediter />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="kitchen/supervisor"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER']}>
+                    <KitchenSupervisor />
                   </RequireRoles>
                 }
               />
