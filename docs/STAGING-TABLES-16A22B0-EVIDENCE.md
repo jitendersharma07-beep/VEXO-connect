@@ -393,6 +393,11 @@ a production-ready release.
 | deploy pin `stg/tables-16a22b0` | `16a22b00157406eade8c5096daedda560f738eef` | **local tag only**, deliberately not pushed |
 | handover `WINDOW-1-HANDOFF-TABLES.md` | `d888cc1` on `x/integration` | **committed locally, push blocked** |
 | this evidence + the verification harness | `4db36a3` on `x/integration` | **committed locally, push blocked** |
+| pre-change/rollback record + production change set | `51ba510` on `x/integration` | **committed locally, push blocked** |
+| Phase F run + the probe fix it exposed | `248d314` on `x/integration` | **committed locally, push blocked** |
+
+Plus two small ledger commits keeping this table honest (`7a9e449` and the tip),
+since a document cannot cite the commit that introduces it.
 
 The lane branch tip is left at `12fa573` on purpose: the staging artifact is
 `16a22b0 = main 728a57c + x/tables 12fa573`, so keeping the branch frozen at
