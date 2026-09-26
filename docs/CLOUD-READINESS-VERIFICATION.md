@@ -1302,9 +1302,19 @@ never joined.
 They are joined now. `restore_from_archive.py` runs ciphertext → `gpg --decrypt`
 → `tar` → `pg_restore --exit-on-error` → row-level reconciliation against the
 manifest **read from inside the archive**, and returned **22/22 PASS** on the
-real 09-24 production bytes. All 23 models at their recorded counts, payment
-total `4467.52`, 12 migrations with 0 half-applied, 16 staff hashes usable, 42
-foreign keys, 76 indexes, 0 orphaned payments.
+real 09-24 production bytes. All 23 manifest entries at their recorded counts,
+payment total `4467.52`, 12 migrations with 0 half-applied, 16 staff hashes
+usable, 42 foreign keys, 76 indexes, 0 orphaned payments.
+
+> **"23 entries", not "23 models" — this line used to say models.** The
+> manifest's `rows` map has 23 keys and one of them is `_prisma_migrations`,
+> which is a table but not a Prisma model. The deployed schema declares exactly
+> **22** models and live production carries **23** base tables; 22 + the
+> migrations table reconciles the two, checked against both sources. The verifier
+> itself prints "models" for all 23, so this was the tool's loose noun repeated
+> uncorrected rather than a miscount — but it is the same conflation that
+> produced the "24 models" error elsewhere, so it is named here instead of
+> inherited.
 
 Three of the 22 are negative assertions, and they are why the other 19 mean
 something: a tampered archive must fail to decrypt, a truncated dump must fail

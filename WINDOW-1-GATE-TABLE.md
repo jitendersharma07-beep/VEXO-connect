@@ -31,9 +31,9 @@ verification ledger.
 | 2 | Restore of a plaintext dump into an isolated DB | **PASS** | 16/16, reconciled to its manifest |
 | 3 | Encrypted archive opens, contents match the manifest | **PASS** | Owner-run 2026-09-25. Production key, production ciphertext |
 | 4 | **Archive → decrypt → `pg_restore` → reconciled DB** | **PASS (mechanism)** / **PENDING-OWNER (production key)** | **22/22** on real production bytes inside a real `.tar.gpg`, plus a broken-on-purpose control run that failed exactly 3 rows and exited 1. The run used a *throwaway* recipient key |
-| 5 | First-login enforcement is server-side | **PASS (written + tested)** / **PENDING deploy** | Was UI-only and bypassable — confirmed by getting a 201 from `POST /api/orders` with a temporary-password session. 14/14, and 6 failures when the gate is neutered |
+| 5 | First-login enforcement is server-side | **PASS (written + tested @ `bad4896`)** / **PENDING deploy** | Was UI-only and bypassable — confirmed by getting a 201 from `POST /api/orders` with a temporary-password session. **30/30** on the gate suite and **194/194** across it plus 7 auth-adjacent suites, 0 skipped; 6 failures when the gate is neutered, and 9 of the 16 new config assertions fail against the pre-`bad4896` code. Merges clean onto `main` `728a57c`. **Not deployed.** See `WINDOW-1-FIRSTLOGIN-SHA.md` |
 | 6 | Staging publish config is coherent | **PASS (in-repo)** / **PENDING-OWNER (hostname + TLS)** | Two silent defects fixed and verified in 3 configurations including a failing control |
-| 7 | Real inbox delivery | **PENDING-OWNER** | Software is complete and race-safe. No provider credential exists on the box, so the endpoint answers 503 by design. **See §A** |
+| 7 | Real inbox delivery | **PENDING-OWNER** | Software is complete and race-safe. No provider credential exists on the box, so the endpoint answers 503 by design. **A second, independent blocker found since: `vexoconnect.com` publishes a malformed SPF record (leading space, so strict verifiers select no policy at all) that hard-fails from an IP which is not the domain's own, and a DMARC record with no `p=` tag. Needs no secret to fix, and must be fixed BEFORE the credential is spent or the test measures the wrong thing. See §A** |
 | 8 | Key custody (CR-3) | **FAIL as designed / PASS as built** — **PENDING-OWNER** | The key works. It is on the one host its own design document forbids. **Untouched by this lane on purpose. See §B** |
 | 9 | Backup destination deletion protection (CR-4) | **NOT VERIFIED** — **PENDING-OWNER** | Destination is reached with a general-purpose SSH key, so anything that can log in as the operator can also delete the off-host copies. **See §C** |
 | 10 | **Owner can recover after losing `atc-noc`** | **NO** | Follows from gate 8 and is *not* closed by gates 3 or 4. This is the honest headline |
@@ -94,6 +94,50 @@ a quietly-insecure one. Neither is a defect in the recovery code.
 Fixed in this lane already: the staging runner used to force the password-reset
 origin back to loopback, so reset links pointed at `127.0.0.1` no matter what the
 caller exported. That is gate 6 and it is done.
+
+### A second blocker, independent of the credential — and it needs no secret to fix
+
+A1–A5 are about authenticating to a provider. They are not the only thing
+standing between this gate and a PASS. **The sending domain's DNS cannot
+currently pass an external inbox check**, which A3 is specifically there to test.
+Checked against two independent resolvers (`1.1.1.1` and `8.8.8.8`), read-only:
+
+| | `vexoconnect.com` — the `MAIL_FROM` domain in `docs/ACCOUNTS-GO-LIVE.md` | `atcworkspace.com` — the current `APP_URL` domain |
+|---|---|---|
+| SPF | **`" v=spf1 ip4:103.168.211.147 -all "`** — broken, see below | `"v=spf1 +a +mx +ip4:160.19.41.196 ~all"` — valid |
+| DMARC | **`"v=DMARC1"`** — no `p=` tag, so invalid | `"v=DMARC1; p=none"` — valid, monitoring only |
+| DKIM | present, selector `default`, RSA **1024-bit** | present, selector `default`, RSA **1024-bit** |
+| MX | `mail.vexoconnect.com` | `atcworkspace.com` |
+
+Three defects, in descending order of how badly they break the test:
+
+1. **The SPF record begins with a space.** Confirmed byte-for-byte —
+   `od -c` shows `"`, `space`, `v`, `=`, `s`, `p`, `f`, `1`. RFC 7208 §4.5 selects
+   a record only if it *begins* with exactly `v=spf1`, so a strict verifier does
+   not select this one at all and the domain reads as having **no SPF policy**.
+   Lenient verifiers trim and then apply it. Both outcomes are wrong and they
+   disagree with each other, which is the worst case for diagnosing a failure.
+2. **`-all` authorises one IP, and it is not this domain's.** The only permitted
+   sender is `103.168.211.147`, while `vexoconnect.com` resolves to
+   `160.19.41.196` — and `atcworkspace.com`'s SPF is the record that authorises
+   `160.19.41.196`. The two domains disagree about which host sends their mail.
+   With a hard fail, anything sent from the wrong one is **rejected**, not
+   spam-foldered.
+3. **The DMARC record has no `p=` tag.** RFC 7489 requires it; a record without
+   one is ignored, so `vexoconnect.com` effectively publishes no DMARC at all
+   despite appearing to.
+
+**Why this matters more than its severity suggests.** If the owner spends a real
+credential on the A3 test today and sends from `no-reply@vexoconnect.com` to an
+outside inbox, the likely result is a rejection or a spam folder — and the
+obvious reading of that is "the recovery mail code is broken". It is not. The
+code is reviewed and race-safe. **Fix the DNS before spending the credential,
+or the test measures the wrong thing twice.**
+
+Two cheap notes: the 1024-bit DKIM keys are below RFC 8301's recommended 2048
+and both major receivers still accept them, so that is a nit rather than a
+blocker; and a DKIM *public* key is public by definition, which is why the
+selector is named here and nothing else about it is.
 
 ### Two accepted MEDIUM findings, recorded rather than silently fixed
 
@@ -218,9 +262,11 @@ Two pieces of software are complete, tested and **not deployed**.
 
 ### D1 — First-login enforcement (gate 5)
 
-Branch `x/firstlogin-gate`. Five files: the auth middleware, an error
-constructor, one config value with a boot-time guard, the auth routes, and a new
-module that is the single place a session is minted.
+Branch `x/firstlogin-gate`, **tested tip `bad4896`** — not `af72be9`, which this
+section originally described and which is superseded. Six files: the auth
+middleware, an error constructor, two config values with boot-time guards, the
+auth routes, `.env.example`, and a new module that is the single place a session
+is minted. SHA, results and the control run: `WINDOW-1-FIRSTLOGIN-SHA.md`.
 
 Shape of the change: the gate lives in the middleware that 29 feature routers
 already mount, so one check covers all of them; a narrow variant is mounted on
@@ -230,18 +276,32 @@ Leaving the temporary state revokes sibling sessions and re-mints the cookie, so
 a shared temporary password stops working the moment it is replaced.
 
 Deploy notes:
-- The new config value has a **boot-time guard**: zero, non-numeric, or longer
-  than a full session throws at startup rather than failing silently at
-  somebody's first login. A bad value fails the deploy loudly, which is intended.
+- **Boot-time guards, corrected in `bad4896`.** This bullet used to say that
+  zero, non-numeric *or longer than a full session* all throw at startup. That
+  was true of the **default** too, and it was a defect: a deployment setting
+  `SESSION_TTL_HOURS` below 0.5 failed to boot citing
+  `POS_TEMP_SESSION_TTL_MINUTES`, a variable absent from its own config. The
+  default is now **capped** to the full session length. An **explicitly set**
+  value that is too long, zero or non-numeric still throws, and now prints both
+  numbers — that part remains intended.
+- `SESSION_TTL_HOURS` is **also** guarded now, ahead of everything that divides
+  by it. It previously accepted a typo: `Number('abc')` is `NaN`, every
+  comparison against `NaN` is false, so the service booted clean and then
+  returned **500 on every login** — `jwt.sign` throws on `expiresIn: 'NaNh'`.
+  A bad value now fails the deploy instead of the users.
 - There is **no hot reload** on the backend. A broken import on the boot path
   takes down the whole API, so this deploys as a normal restart, not a file drop.
 - Clients need to handle one new error code by routing to the change-password
   screen instead of showing "no permission" — the user *has* the permission, they
   simply have not finished signing in.
 
-Rollback: revert the five files and restart. There is no migration, no schema
+Rollback: revert the six files and restart. There is no migration, no schema
 change and no data transformation, so rollback is a code revert only — the
-`mustChangePassword` column already existed and is untouched.
+`mustChangePassword` column already existed and is untouched. Re-verified at the
+integrated SHA: the diff contains no `prisma`, no migration and no `.sql` file,
+the column is `boolean NOT NULL default false` in live production, and **0 of
+16** production users carry the flag — so the gate is inert for every account
+that exists today.
 
 ### D2 — Staging publish configuration (gate 6)
 
