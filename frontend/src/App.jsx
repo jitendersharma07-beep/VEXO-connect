@@ -11,11 +11,17 @@ import Team from './pages/Team.jsx';
 import Licensing from './pages/Licensing.jsx';
 import AtcCompanies from './pages/AtcCompanies.jsx';
 import AtcCompanyDetail from './pages/AtcCompanyDetail.jsx';
+import AtcPlatformAdmins from './pages/AtcPlatformAdmins.jsx';
+import AcceptInvitation from './pages/AcceptInvitation.jsx';
+import ForgotPassword from './pages/ForgotPassword.jsx';
 import Sell from './pages/Sell.jsx';
 import Orders from './pages/Orders.jsx';
+import PhoneOrders from './pages/PhoneOrders.jsx';
+import PhoneOrderNew from './pages/PhoneOrderNew.jsx';
 import CatalogAdmin from './pages/CatalogAdmin.jsx';
 import TablesAdmin from './pages/TablesAdmin.jsx';
 import SalesReport from './pages/SalesReport.jsx';
+import MenuProfitability from './pages/MenuProfitability.jsx';
 import ActivityReport from './pages/ActivityReport.jsx';
 import GatewayReconciliation from './pages/GatewayReconciliation.jsx';
 import DayClose from './pages/DayClose.jsx';
@@ -52,6 +58,18 @@ export default function App() {
           <ApprovalProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
+            {/* LANE accounts — the two routes a person reaches BEFORE they have
+                an account, or when they can no longer get into the one they
+                have. Outside RequireAuth by necessity: wrapping them would
+                bounce every invited colleague to a sign-in page they cannot
+                yet pass, and every locked-out owner to the screen they are
+                locked out of.
+
+                Neither issues a session. Accepting an invitation and completing
+                a reset both end at /login, because an emailed link proves the
+                mailbox and not the person holding it. */}
+            <Route path="/invite" element={<AcceptInvitation />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
             {/* VC-101: the customer-facing screen authenticates with its own
                 pairing token, so it lives outside RequireAuth on purpose —
                 an unpaired display shows its pairing screen, never login. */}
@@ -98,6 +116,25 @@ export default function App() {
                 }
               />
               <Route path="orders" element={<Orders />} />
+              {/* VC-104: RequireRoles, not RequireAction — the phone routes
+                  are role-gated on the server (requireRole), so phone.*
+                  actions never appear in GET /permissions/me. */}
+              <Route
+                path="phone-orders"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <PhoneOrders />
+                  </RequireRoles>
+                }
+              />
+              <Route
+                path="phone-orders/new"
+                element={
+                  <RequireRoles roles={['CUSTOMER_OWNER', 'BRANCH_MANAGER']}>
+                    <PhoneOrderNew />
+                  </RequireRoles>
+                }
+              />
               {/* VC-101: staff side of display pairing — same roles the Sell
                   screen admits. */}
               <Route
@@ -129,6 +166,16 @@ export default function App() {
                 element={
                   <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
                     <SalesReport />
+                  </RequireRoles>
+                }
+              />
+              {/* VC-105. Same gate as the other reports: a CASHIER is refused
+                  by the server (403) and never reaches the route. */}
+              <Route
+                path="reports/menu-profitability"
+                element={
+                  <RequireRoles roles={['BRANCH_MANAGER', 'CUSTOMER_OWNER', 'POS_SUPER_ADMIN']}>
+                    <MenuProfitability />
                   </RequireRoles>
                 }
               />
@@ -238,6 +285,18 @@ export default function App() {
                 element={
                   <RequireAtc>
                     <AtcCompanyDetail />
+                  </RequireAtc>
+                }
+              />
+              {/* LANE accounts — RequireAtc, the same gate as the rest of the
+                  VEXO console. The server re-judges it anyway: every route
+                  under /atc refuses a tenant account, platform admins included
+                  in the refusal. */}
+              <Route
+                path="atc/platform-admins"
+                element={
+                  <RequireAtc>
+                    <AtcPlatformAdmins />
                   </RequireAtc>
                 }
               />

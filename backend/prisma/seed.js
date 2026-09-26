@@ -28,6 +28,18 @@ if (allowFixedPasswords && process.env.NODE_ENV === 'production') {
   process.exit(1);
 }
 
+// A typo here mints an operator nobody can sign in as and no API can delete,
+// so the address is checked before it reaches the database.
+const platformAdminEmail = () => {
+  const raw = process.env.POS_SEED_ADMIN_EMAIL?.trim().toLowerCase();
+  if (!raw) return 'pos.admin@atcinfocom.in';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+    console.error(`POS_SEED_ADMIN_EMAIL is not a valid email address: ${raw}`);
+    process.exit(1);
+  }
+  return raw;
+};
+
 const issued = [];
 
 const ensureUser = async ({ email, fullName, role, companyId = null, branchId = null, passwordEnv }) => {
@@ -53,9 +65,15 @@ const ensureUser = async ({ email, fullName, role, companyId = null, branchId = 
 
 const main = async () => {
   // --- ATC platform operator -------------------------------------------------
+  // This is the one account no API can mint: /api/users excludes
+  // POS_SUPER_ADMIN from its assignable roles on purpose, and nothing under
+  // /api/atc creates operators either. So the address has to be settable here,
+  // or a deployment is stuck with the built-in name and can never hold a
+  // second operator to fall back on if the first one is lost. Re-running with
+  // a different POS_SEED_ADMIN_EMAIL adds one rather than replacing it.
   await ensureUser({
-    email: 'pos.admin@atcinfocom.in',
-    fullName: 'ATC POS Platform Admin',
+    email: platformAdminEmail(),
+    fullName: process.env.POS_SEED_ADMIN_NAME?.trim() || 'ATC POS Platform Admin',
     role: 'POS_SUPER_ADMIN',
     passwordEnv: 'POS_SEED_ADMIN_PASSWORD',
   });
@@ -196,11 +214,109 @@ const main = async () => {
   }
   console.log('Demo catalog ready: 2 tax rates, 3 categories, 6 products (Cold Brew has variants), 10 tables.');
 
+  // LANE vc104-api
+  await seedPhoneOrderCentre(demo, cp, ch);
+
   console.log('\nATC POS seed complete. Credentials (record these now — not stored anywhere):');
   for (const { email, role, password } of issued) {
     console.log(`  ${role.padEnd(16)} ${email.padEnd(34)} ${password}`);
   }
   console.log('');
+};
+
+// ============================================================================
+// ==== LANE vc104-api ====
+// VC-104 phone-order centre demo data: opening hours, delivery serviceability,
+// preparation capacity and two callers with addresses.
+//
+// Shaped so the three things worth demonstrating are actually reachable:
+//   - 110001 is served by BOTH stores at different charges, so a reassignment
+//     visibly changes the delivery quote instead of being a no-op
+//   - Chandni Chowk is closed on Mondays, so CLOSED_AT_FULFILMENT has a real
+//     case rather than needing a hand-edited row
+//   - its prep capacity is deliberately small, so AT_CAPACITY is reachable
+//     without creating a dozen orders first
+//
+// Idempotent like the rest of this file: re-seeding updates nothing it does
+// not own and creates nothing twice.
+// ============================================================================
+
+const seedPhoneOrderCentre = async (company, cp, ch) => {
+  const hoursFor = async (branch, opensMinute, closesMinute, closedDays = []) => {
+    for (const dayOfWeek of [0, 1, 2, 3, 4, 5, 6]) {
+      await prisma.branchHours.upsert({
+        where: { branchId_dayOfWeek: { branchId: branch.id, dayOfWeek } },
+        update: {},
+        create: {
+          companyId: company.id,
+          branchId: branch.id,
+          dayOfWeek,
+          opensMinute,
+          closesMinute,
+          closed: closedDays.includes(dayOfWeek),
+        },
+      });
+    }
+  };
+  await hoursFor(cp, 9 * 60, 23 * 60);
+  // Closed Mondays (dayOfWeek 1).
+  await hoursFor(ch, 11 * 60, 22 * 60, [1]);
+
+  const areaFor = (branch, pincode, deliveryCharge, minOrder) =>
+    prisma.branchServiceArea.upsert({
+      where: { branchId_pincode: { branchId: branch.id, pincode } },
+      update: {},
+      create: { companyId: company.id, branchId: branch.id, pincode, deliveryCharge, minOrder },
+    });
+  await areaFor(cp, '110001', '40.00', '200.00');
+  await areaFor(cp, '110002', '50.00', '200.00');
+  // Same pincode as cp, dearer: this is the pair a reassignment demo needs.
+  await areaFor(ch, '110001', '65.00', '300.00');
+  await areaFor(ch, '122001', '45.00', '250.00');
+
+  const capacityFor = (branch, slotMinutes, maxOrdersPerSlot) =>
+    prisma.branchPrepCapacity.upsert({
+      where: { branchId_companyId: { branchId: branch.id, companyId: company.id } },
+      update: {},
+      create: { companyId: company.id, branchId: branch.id, slotMinutes, maxOrdersPerSlot },
+    });
+  await capacityFor(cp, 15, 6);
+  await capacityFor(ch, 15, 2);
+
+  const callerFor = async (name, phone, addresses) => {
+    const customer = await prisma.customer.upsert({
+      where: { companyId_phone: { companyId: company.id, phone } },
+      update: {},
+      create: { companyId: company.id, name, phone },
+    });
+    for (const a of addresses) {
+      // CustomerAddress has no natural key - a label is not unique by design,
+      // because two "Home" addresses is a real thing a caller can have. So the
+      // idempotency check is explicit rather than an upsert.
+      const existing = await prisma.customerAddress.findFirst({
+        where: { customerId: customer.id, label: a.label, line1: a.line1 },
+      });
+      if (!existing) {
+        await prisma.customerAddress.create({
+          data: { companyId: company.id, customerId: customer.id, ...a },
+        });
+      }
+    }
+    return customer;
+  };
+
+  await callerFor('Anita Rao', '+919876500011', [
+    { label: 'Home', line1: '12 Church Street', landmark: 'opposite the bakery', city: 'New Delhi', pincode: '110001', isDefault: true },
+    { label: 'Office', line1: '4th floor, Connaught Tower', city: 'New Delhi', pincode: '110002' },
+  ]);
+  await callerFor('Dev Menon', '+919876500012', [
+    { label: 'Home', line1: '88 Sector 29', city: 'Gurugram', pincode: '122001', isDefault: true },
+  ]);
+
+  console.log(
+    'Phone-order centre ready: hours for 2 stores (Chandni Chowk closed Mondays), ' +
+      '4 delivery areas (110001 served by both), prep capacity, 2 callers with 3 addresses.',
+  );
 };
 
 main()

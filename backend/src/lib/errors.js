@@ -68,6 +68,20 @@ export const licenseBlocked = (state) =>
         : 'No active VEXO Connect licence found for this account. Please contact VEXO.',
   );
 
+// Its own code, and not `licenseBlocked`, because these are different questions
+// with different answers. A blocked licence means "renew and everything returns";
+// this means "you are up to date, and this was never part of what you bought".
+// The module travels in `details` so the screen can say which one without
+// parsing the sentence.
+export const moduleNotLicensed = (module) =>
+  new AppError(
+    403,
+    'POS_MODULE_NOT_LICENSED',
+    'That area is not part of your VEXO Connect subscription. Please contact VEXO to add it.',
+    undefined,
+    { module },
+  );
+
 export const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };

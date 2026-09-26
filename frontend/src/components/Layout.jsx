@@ -16,19 +16,21 @@ import {
   Menu,
   MonitorSmartphone,
   Package,
+  PhoneCall,
   ReceiptText,
   ScrollText,
   ShieldCheck,
   ShoppingCart,
   Store,
   Tags,
+  TrendingUp,
   Users,
   X,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import api, { apiError } from '../lib/api.js';
 import { usePermissions } from '../lib/permissions.jsx';
-import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope } from '../lib/pos.js';
+import { canSeeReports, canSell, canWriteTables, clearAtcScope, fmtDate, getAtcScope, isManagerUp } from '../lib/pos.js';
 import ErrorBoundary from './ErrorBoundary.jsx';
 import { Logo } from './Logo.jsx';
 import { DemoBadge, ErrorNote, Modal, RoleBadge, StatusBadge } from './ui.jsx';
@@ -94,6 +96,9 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
             VEXO Console
           </div>
           <NavItem to="/atc/companies" icon={Building2} label="Companies" />
+          {/* LANE accounts — the accounts that own this console. Sits beside
+              Companies rather than under one, because it belongs to no tenant. */}
+          <NavItem to="/atc/platform-admins" icon={ShieldCheck} label="Administrators" />
           {atcScope ? (
             <>
               <div className="mt-4 flex items-center justify-between gap-1 px-3 pb-1">
@@ -114,6 +119,7 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               <NavItem to="/catalog" icon={Package} label="Catalog" />
               <NavItem to="/tables" icon={Armchair} label="Tables" />
               <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+              <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
               <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
               <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
               <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />
@@ -136,11 +142,18 @@ function SidebarBody({ user, isAtc, isOwner, atcScope, onExitAtcScope }) {
               </div>
               <NavItem to="/sell" icon={ShoppingCart} label="Sell" />
               <NavItem to="/orders" icon={ReceiptText} label="Orders" />
+              {/* VC-104: managers and owners only — the same role set the
+                  server's rolesFor('phone.*') admits. Cashiers get no link;
+                  the route guard and the API refuse them anyway. */}
+              {isManagerUp(user) ? (
+                <NavItem to="/phone-orders" icon={PhoneCall} label="Phone orders" />
+              ) : null}
               {canWriteTables(user) ? <NavItem to="/tables" icon={Armchair} label="Tables" /> : null}
               {isOwner ? <NavItem to="/catalog" icon={Package} label="Catalog" /> : null}
               {canSeeReports(user) ? (
                 <>
                   <NavItem to="/reports" icon={BarChart3} label="Sales report" end />
+                  <NavItem to="/reports/menu-profitability" icon={TrendingUp} label="Menu profitability" />
                   <NavItem to="/reports/activity" icon={ScrollText} label="Discounts & voids" />
                   <NavItem to="/reports/reconciliation" icon={ListChecks} label="Reconciliation" />
                   <NavItem to="/reports/day-close" icon={CalendarCheck} label="Daily closing" />

@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": "POS_BRANCH_UNAVAILABLE",
+    "message": "That store cannot take this order",
+    "details": {
+      "unavailableReasons": [
+        {
+          "code": "NOT_SERVICEABLE",
+          "message": "Does not deliver to 560001"
+        }
+      ]
+    }
+  }
+}

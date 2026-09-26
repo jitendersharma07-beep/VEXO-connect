@@ -11,7 +11,6 @@ import {
   ErrorNote,
   Modal,
   FullScreenSpinner,
-  TempPasswordReveal,
 } from '../components/ui.jsx';
 
 function IssueLicenseForm({ companyId, onDone }) {
@@ -112,7 +111,12 @@ function AddonForm({ licenseId, onDone }) {
   );
 }
 
-function OwnerForm({ companyId, onCreated }) {
+// Inviting the owner, not creating them. This form used to POST and get a
+// temporary password back, which the screen then displayed — a live credential
+// on a monitor that is routinely screen-shared during onboarding calls, and in
+// any screenshot of it. There is nothing to display now: the link goes to the
+// customer's mailbox and exists nowhere else.
+function OwnerForm({ companyId, onSent }) {
   const [form, setForm] = useState({ fullName: '', email: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -123,7 +127,7 @@ function OwnerForm({ companyId, onCreated }) {
     setBusy(true);
     try {
       const { data } = await api.post(`/atc/companies/${companyId}/owner`, form);
-      onCreated({ email: data.user.email, tempPassword: data.tempPassword });
+      onSent(data.invitation);
     } catch (err) {
       setError(apiError(err));
     } finally {
@@ -140,10 +144,13 @@ function OwnerForm({ companyId, onCreated }) {
       <div>
         <label className="label" htmlFor="o-email">Email</label>
         <input id="o-email" type="email" className="input" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} required />
+        <p className="mt-1.5 text-xs text-slate-500">
+          They will receive a sign-up link at this address and choose their own password. Nobody here ever sees it.
+        </p>
       </div>
       <ErrorNote message={error} />
       <button type="submit" className="btn-primary w-full" disabled={busy}>
-        {busy ? 'Creating…' : 'Create owner account'}
+        {busy ? 'Sending…' : 'Send owner invitation'}
       </button>
     </form>
   );
@@ -155,16 +162,34 @@ export default function AtcCompanyDetail() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [modal, setModal] = useState(null); // 'license' | 'addon' | 'owner'
-  const [credential, setCredential] = useState(null);
+  const [sentTo, setSentTo] = useState(null);
+  const [invitations, setInvitations] = useState([]);
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get(`/atc/companies/${companyId}`);
-      setData(data);
+      const [detail, invites] = await Promise.all([
+        api.get(`/atc/companies/${companyId}`),
+        api.get(`/atc/companies/${companyId}/invitations`),
+      ]);
+      setData(detail.data);
+      setInvitations(invites.data.invitations);
     } catch (err) {
       setError(apiError(err, 'Could not load the company'));
     }
   }, [companyId]);
+
+  // An invitation is a live way into the customer's account until it is used or
+  // withdrawn, so the two controls that end one sit next to it rather than
+  // somewhere an operator has to go looking.
+  const inviteAction = async (id, what) => {
+    setError('');
+    try {
+      await api.post(`/atc/invitations/${id}/${what}`);
+      await load();
+    } catch (err) {
+      setError(apiError(err));
+    }
+  };
 
   useEffect(() => {
     load();
@@ -187,7 +212,7 @@ export default function AtcCompanyDetail() {
 
   const closeModal = () => {
     setModal(null);
-    setCredential(null);
+    setSentTo(null);
     load();
   };
 
@@ -287,11 +312,14 @@ export default function AtcCompanyDetail() {
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">Users ({users.length})</h2>
             <button type="button" className="btn-primary" onClick={() => setModal('owner')}>
-              <UserPlus className="h-4 w-4" /> Create owner
+              <UserPlus className="h-4 w-4" /> Invite owner
             </button>
           </div>
           {users.length === 0 ? (
-            <p className="py-4 text-sm text-slate-400">No POS accounts yet — create the first owner.</p>
+            <p className="py-4 text-sm text-slate-400">
+              No POS accounts yet — invite the first owner. The account appears here once they open the link and choose
+              a password.
+            </p>
           ) : (
             <ul className="divide-y divide-slate-100 text-sm">
               {users.map((u) => (
@@ -309,6 +337,52 @@ export default function AtcCompanyDetail() {
             </ul>
           )}
         </div>
+
+        {invitations.length > 0 ? (
+          <div className="card p-5 lg:col-span-2">
+            <h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-500">
+              Invitations ({invitations.length})
+            </h2>
+            <ul className="divide-y divide-slate-100 text-sm">
+              {invitations.map((i) => (
+                <li key={i.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-pos-ink">{i.fullName}</div>
+                    <div className="truncate text-xs text-slate-500">
+                      {i.email}
+                      {i.status === 'PENDING' ? ` · expires ${fmtDate(i.expiresAt)}` : ''}
+                      {i.sentCount > 1 ? ` · sent ${i.sentCount}×` : ''}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <RoleBadge role={i.role} />
+                    <StatusBadge status={i.status} />
+                    {i.status === 'PENDING' ? (
+                      <>
+                        {/* Resending mints a NEW link and kills the old one, so
+                            a message forwarded by mistake stops working. */}
+                        <button type="button" className="btn-ghost text-xs" onClick={() => inviteAction(i.id, 'resend')}>
+                          Resend
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost text-xs text-red-600"
+                          onClick={() => {
+                            if (window.confirm(`Withdraw the invitation to ${i.email}? The link stops working at once.`)) {
+                              inviteAction(i.id, 'revoke');
+                            }
+                          }}
+                        >
+                          Revoke
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         <div className="card p-5 lg:col-span-2">
           <h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-500">Branches ({branches.length})</h2>
@@ -339,14 +413,20 @@ export default function AtcCompanyDetail() {
       <Modal open={modal === 'addon'} title="Additional branch licences" onClose={closeModal}>
         {currentLicense ? <AddonForm licenseId={currentLicense.id} onDone={closeModal} /> : null}
       </Modal>
-      <Modal open={modal === 'owner'} title={credential ? 'Owner created' : 'Create owner account'} onClose={closeModal}>
-        {credential ? (
+      <Modal open={modal === 'owner'} title={sentTo ? 'Invitation sent' : 'Invite the owner'} onClose={closeModal}>
+        {sentTo ? (
           <div className="space-y-4">
-            <TempPasswordReveal credential={credential} />
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+              <p className="font-semibold">A sign-up link is on its way to {sentTo.email}.</p>
+              <p className="mt-1.5 text-emerald-800">
+                It expires on {fmtDate(sentTo.expiresAt)} and can be used once. They choose their own password when they
+                open it — there is no password for you to pass on, and nothing here to write down.
+              </p>
+            </div>
             <button type="button" className="btn-primary w-full" onClick={closeModal}>Done</button>
           </div>
         ) : (
-          <OwnerForm companyId={company.id} onCreated={setCredential} />
+          <OwnerForm companyId={company.id} onSent={setSentTo} />
         )}
       </Modal>
     </div>

@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
-import { forbidden, notFound, unauthorized, asyncHandler } from '../lib/errors.js';
+import { forbidden, notFound, unauthorized, moduleNotLicensed, asyncHandler } from '../lib/errors.js';
 import { audit, auditRequired } from '../lib/audit.js';
+import { licenseHasModule } from '../lib/license.js';
 import {
   can,
   effectiveActions,
@@ -9,6 +10,7 @@ import {
   branchWhereForScope,
   branchIdWhereForScope,
   actionMeta,
+  requiredModuleFor,
   SUPPORT_GRANT_REQUIRED,
 } from '../lib/permissions.js';
 
@@ -95,6 +97,26 @@ export const requireAction = (action) =>
     if (!req.perm) throw unauthorized();
     if (!req.perm.can(action)) {
       throw forbidden('You do not have permission to perform this action');
+    }
+    // Entitlement, checked after the permission and before the route. The two
+    // are not interchangeable and the order matters: a permission says what this
+    // employee may do inside their tenant, and the licence says what the tenant
+    // bought. Only the licence can express "this customer did not buy KDS", and
+    // no role, rule or custom permission may substitute for it — which is why
+    // this is not folded into `can()`.
+    //
+    // Checked here rather than at each module's router because "refused at the
+    // permission layer" is the guarantee `License.modules` is documented to
+    // give, and one gate on the path every action already takes cannot be
+    // forgotten by the next lane that mounts a router.
+    //
+    // Fails CLOSED on a missing licence: no licence is not "all modules". The
+    // empty default on `License.modules` means core POS only, so every licence
+    // sold before that column existed keeps working and none of them silently
+    // acquires a module it never paid for.
+    const module = requiredModuleFor(action);
+    if (module && req.user.role !== 'POS_SUPER_ADMIN' && !licenseHasModule(req.license, module)) {
+      throw moduleNotLicensed(module);
     }
     if (req.user.role === 'POS_SUPER_ADMIN' && SUPPORT_GRANT_REQUIRED.includes(action)) {
       const ok = await hasSupportGrant(req.user.id, req.companyScope?.id ?? null);

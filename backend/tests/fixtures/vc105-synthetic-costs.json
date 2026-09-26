@@ -1,0 +1,85 @@
+{
+  "label": "SYNTHETIC \u2014 not real cost data. Fixture for VC-105 development only.",
+  "staleCostDays": 90,
+  "items": {
+    "SKU-COFFEE": {
+      "recipeVersion": 3,
+      "yieldPercent": 100,
+      "costStatus": "ACTUAL",
+      "costBasisAt": "2026-09-01T00:00:00.000Z",
+      "lines": [
+        {
+          "item": "Coffee powder",
+          "qtyBaseMilli": 18000,
+          "unitCostPaise": 45
+        }
+      ],
+      "modifiers": {
+        "mod-extra-shot": {
+          "item": "Extra shot",
+          "qtyBaseMilli": 9000,
+          "unitCostPaise": 45
+        }
+      }
+    },
+    "SKU-LATTE": {
+      "recipeVersion": 2,
+      "yieldPercent": 95,
+      "costStatus": "ACTUAL",
+      "costBasisAt": "2026-09-01T00:00:00.000Z",
+      "lines": [
+        {
+          "item": "Coffee powder",
+          "qtyBaseMilli": 18000,
+          "unitCostPaise": 45
+        },
+        {
+          "item": "Milk",
+          "qty": 0.15,
+          "unit": "L",
+          "factorMilli": 1000000,
+          "unitCostPaise": 6
+        }
+      ]
+    },
+    "SKU-ESTIMATED": {
+      "recipeVersion": 1,
+      "yieldPercent": 100,
+      "costStatus": "ESTIMATED",
+      "costBasisAt": "2026-09-01T00:00:00.000Z",
+      "lines": [
+        {
+          "item": "Seasonal produce (estimated)",
+          "qtyBaseMilli": 50000,
+          "unitCostPaise": 100
+        }
+      ]
+    },
+    "SKU-STALE": {
+      "recipeVersion": 1,
+      "yieldPercent": 100,
+      "costStatus": "ACTUAL",
+      "costBasisAt": "2025-01-01T00:00:00.000Z",
+      "lines": [
+        {
+          "item": "Long-ago ingredient",
+          "qtyBaseMilli": 40000,
+          "unitCostPaise": 50
+        }
+      ]
+    },
+    "SKU-LOSS": {
+      "recipeVersion": 1,
+      "yieldPercent": 100,
+      "costStatus": "ACTUAL",
+      "costBasisAt": "2026-09-01T00:00:00.000Z",
+      "lines": [
+        {
+          "item": "Imported truffle",
+          "qtyBaseMilli": 5000,
+          "unitCostPaise": 500
+        }
+      ]
+    }
+  }
+}

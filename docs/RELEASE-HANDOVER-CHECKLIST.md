@@ -15,7 +15,7 @@ code changes to verified areas; documentation only after the freeze.
 |---|---|---|
 | **RC-verified** | Proven on the lab against the merged candidate, fresh databases | Every Included row below |
 | **Deployed-verified** | Proven on production after the deployment owner deploys RC-1 | **Nothing.** Production runs v1.0.1. |
-| **Hardware-verified** | Observed on physical devices — paper out of a real printer | **Nothing.** Printer PENDING until 2026-09-24. |
+| **Hardware-verified** | Observed on physical devices — paper out of a real printer | **The printer and its driver only** (owner photos, 2026-09-25): DCode DC RP30 self-test, and a Windows test page through `POS-80C` on `USB001`. **No VEXO output on paper** — see §Physical printer. |
 
 ## The candidate
 
@@ -35,15 +35,288 @@ code changes to verified areas; documentation only after the freeze.
 | 2 | **Discount policy** — see §Discount close-out | RC-verified | ✅ **CLOSED** |
 | 3 | Core defects found this sprint: day-close cash refunds (`5f8ef01`), zero-ceiling grant (`20c6904`), and a saved day close reported as "Could not file the closing" (`114ffc9`; also live in deployed v1.0.1 since `2c3acb1`) | RC-verified; `114ffc9` found and re-checked by Window 1's browser run on an RC-1-built stack | ✅ fixed, each moved a check FAIL → PASS |
 | 4 | **VC-101 customer display** — see §VC-101 evidence | RC-verified (HTTP, lab) + browser-verified 17/17 on exercised-path-identical code (original box) | ✅ **INCLUDED, owner-accepted; browser evidence ACCEPTED by the owner** 2026-09-23 (atc-noc dev stack, not a lab run, not full RC browser acceptance); one display per counter |
-| 5 | Physical receipt / KOT print | Browser-verified only | ⏳ **PENDING** — `docs/PRINTER-UAT-RUNBOOK.md`, 2026-09-24 |
-| 6 | Off-host encrypted backup | One copy exists but is **not compliant** (Window 2's record @ `9ff94ac`) — see §Off-host backup | ⛔ **Not done** — re-send after the owner's new key; remediation stays with Window 2 and the owner |
+| 5 | Physical receipt / KOT print | Browser-verified, **plus** hardware/driver hardware-verified (owner photos 2026-09-25) | ⏳ **STILL PENDING.** Run-book row 8 (hardware + Windows driver path) is **VERIFIED**; rows 1–7 and 9–11 — VEXO's own receipt, KOT and reprint on paper — are untested. A printer that self-tests proves the unit, not our output. `docs/PRINTER-UAT-RUNBOOK.md` |
+| 6 | Off-host encrypted backup | Scheduling and restore **re-measured 2026-09-24**; decryption **owner-run 2026-09-25** — see §Off-host backup and §Close-out, which supersede the `9ff94ac` bullets | 🟨 **Partly done** — installed, running, restore mechanism proven 16/16, and decryption now **PASS**. Still open: **no dump from an encrypted archive has been restored into a database** (the drill used a different, plaintext dump — see §Close-out), destination-side deletion protection not verified, and **CR-3 key custody open**, so recovery after losing `atc-noc` is still **no** |
 | 7 | Client onboarding (menu, stores, staff) | — | ⛔ **Blocked** — client data pack not supplied (B2) |
 | 8 | Reconcile against Product Master Specification v1.1 | — | ⛔ **Blocked** — document not held by anyone (B1) |
 | 9 | RC-1 in production | — | ⏸ **Owner decision**, then the deployment owner (B3) |
+| 10 | **Cloud readiness** — public HTTPS, real platform admin, email recovery, isolation, flow, backup restore | Staging-verified on `atc-noc` against `x/cloud-readiness` @ `5550e1b` — **a different candidate from this sheet's `114ffc9`**. Superseded 2026-09-24T19:20Z; the `1c7e8e6` reading is kept in §Cloud readiness below | ⛔ **NOT READY** — 3 blockers: no approved public staging hostname; **no mail provider configured anywhere in the estate** (the recovery feature itself now passes); archive decryption unproven. See `docs/CLOUD-READINESS-VERIFICATION.md` |
 
-**Release is GO at the RC tier** for rows 1–4. Rows 5–9 do not block the
+**Release is GO at the RC tier** for rows 1–4. Rows 5–10 do not block the
 candidate; they block specific claims — printing on paper, a backup that
-survives the host, real client data, and anything on production.
+survives the host, real client data, anything on production, and reaching the
+product over the internet.
+
+Row 10 is scored against a **different tree** from the rest of this sheet and
+is not comparable to rows 1–4. It is recorded here because cloud readiness is a
+release gate the sheet otherwise has no row for, not because the two candidates
+have been reconciled — they have not.
+
+## Cloud readiness — row 10 after the accounts merge
+
+Recorded 2026-09-24T19:20Z. This **supersedes the `1c7e8e6` reading of row 10**
+on the email blocker only; the other two blockers are unchanged and the earlier
+reading stays in `docs/CLOUD-READINESS-VERIFICATION.md` because the verdict
+moved, not because it was wrong.
+
+The owner directed `x/accounts` to be merged. It was — `x/cloud-readiness` is
+now `5550e1b`: `8482de9` (everything rows above describe) merged with
+`x/accounts` @ `6ceab72`, then with its next commit `650be16`. The first merge
+did **not** go cleanly; four files conflicted and were resolved by hand. The
+second was clean.
+
+- **Email password recovery: the software half is PASS**, staging-verified.
+  Regression suite on the merged tree **785/785 in 29 files** (up from 628/22),
+  and the lane's own browser harness `deploy/accounts-journey.mjs` is **47/47,
+  0 failures** — headless Chromium against the real built bundle
+  (`index-TZS0KpMt.js`) over HTTP, reading every recovery code out of a real
+  SMTP conversation rather than fabricating one. Code delivery, code validity,
+  single-use, expiry, resend and attempt limits, session revocation, address
+  non-disclosure, and "reset alters no role, tenant, licence or MFA" all hold.
+- **Real-provider inbox delivery: still BLOCKED, and now measured rather than
+  assumed.** Every message in every run went to a loopback SMTP sink that
+  relays nothing. A read-only search across the whole estate finds **no live
+  `SMTP_HOST` / `MAIL_HOST` / `EMAIL_HOST` assignment in any real env file** —
+  every hit is a `.env.example` or a deployment document. No values were read.
+  So this is an owner input, not a code defect; the code fails **closed**
+  (`503 POS_MAIL_NOT_CONFIGURED`) rather than pretending. Closing it is
+  `docs/ACCOUNTS-GO-LIVE.md` §1, and the credentials must not be pasted into
+  chat.
+- **The merged `schema.prisma` was verified to be a union, not a pick** —
+  all 100 models and enums from both sides present, every single-side model
+  byte-identical to its origin, and for the 17 models both lanes touched no
+  semantic line dropped from either side. This is the control on the hand
+  resolutions; the 774-test run is the second.
+- **One regression this merge introduced — fixed upstream and taken.**
+  `deploy/e2e-workflow.mjs`, the till money-path harness, was blocked: it seeded
+  its staff from the temporary password `POST /api/users` used to return, and by
+  design that password no longer exists anywhere. The accounts lane fixed it
+  seven minutes later (`650be16`) by giving the harness a real local mail drop,
+  so it now seats staff through the same emailed-code path a real deployment
+  uses. That commit is merged here at **`5550e1b`**, suite re-run **785/785 in
+  29 files**. It still **cannot be run on `atc-noc`**: `deploy/e2e-isolated.sh`
+  refuses on this hostname because production POS runs here, and that guard was
+  not bypassed. Row 1's evidence did not run through that harness and is
+  unaffected.
+
+**Tier note:** this is staging-verified on `atc-noc` against a merged
+cloud-readiness tree. It is **not** RC-verified — none of it ran on the lab or
+against `114ffc9`, and the two candidates are still unreconciled.
+
+### Row 10 continued — 2026-09-25T02:15Z, at `17058b9`
+
+Suite is now **790/790 in 30 files**, up from 785/29. The extra file is a fix,
+not a feature.
+
+- **An account-existence oracle was found in the recovery route and closed
+  (`17058b9`).** `POST /auth/forgot-password` answered an unregistered address
+  `200` *before attempting any send*, but let an SMTP failure for a registered
+  address escape as a `500`. So the address non-disclosure recorded as PASS
+  above was **conditional on the mail provider being healthy** — and it broke
+  precisely during a misconfiguration or an outage, which is both the state the
+  estate is in right now and the state it will pass through when the owner
+  first configures a provider. Anyone could read account membership off the
+  status code. All delivery failures now answer identically and the operator is
+  told through the log; `ChallengeThrottled` still surfaces deliberately.
+  `accountRecoveryOutage.test.js` holds it against a real `ECONNREFUSED` rather
+  than a mock, with positive controls that the send was genuinely attempted and
+  that the registered path reached it. Reverting the fix turns 3 of its 5 tests
+  red — verified, not assumed.
+- **All three remaining blockers now have prepared, reviewed procedures** —
+  `evidence/02-public-access-changeset-PROPOSED.md`,
+  `evidence/04b-mail-provider-owner-procedure.md`,
+  `evidence/07b-recovery-owner-procedure.md`. Each is NOT APPLIED and names the
+  one owner input it needs. Two traps worth pulling up into this ledger: the
+  staging TLS cert must be a **separate** `certbot certonly` and never an
+  `--expand` of the production cert (which covers only `atcworkspace.com` and
+  `www`, no wildcard, and which production HTTPS depends on); and
+  `/home/atc-noc/atc-pos/.env` is currently mode **664**, so it must be
+  `chmod 600` *before* an `SMTP_PASSWORD` is written into it.
+- **CR-3 is more serious than "a finding".** The backup **secret** key
+  `0F05CA51AEC13029` is in the `atc-noc` keyring — on the backup host, which is
+  where `docs/BACKUP-RESTORE.md` explicitly says it must not be ("not this
+  server"). The off-host archives exist to survive losing atc-noc; whoever
+  reaches atc-noc gets both the key and, via the shipping SSH key, write access
+  to the off-host copies. Until the key is held somewhere else, "can the owner
+  recover if this box dies?" is **no**, independently of whether the decryption
+  test passes. Nothing was moved — key material is the owner's to relocate.
+- **The till harness stays NOT RUN on this host,** and no compatible host
+  exists. `deploy/e2e-isolated.sh:19` refuses on `atc-noc` because production
+  POS genuinely runs here; the only other reachable machines are vexo-lab
+  (excluded by the brief), a reassigned laptop, and the owner's workstation.
+  The guard was not bypassed and the script was not edited. Section 6's
+  money-path evidence continues to rest on its earlier run against `1c7e8e6`.
+
+**Scope note, because a green suite invites over-reading.** Everything in row 10
+is about *cloud readiness*: public reachability, real mail, recoverable
+backups, and the accounts paths around them. It is **not** evidence that
+inventory, payments, provider integrations or hardware are complete — physical
+printing in particular stays NOT TESTED until observed paper output exists, and
+payment work remains on sandbox/manual methods. Production activation stays
+subject to the established deployment approval.
+
+### Encrypted off-host recovery — BLOCKED → **PASS**, 2026-09-25T03:57:11Z
+
+The owner ran `owner-verify-backup-decrypt.sh`. It fetched
+`pos-prod-20260924T211406Z.tar.gpg` from the off-host destination, matched its
+sha256 against the shipping receipt, decrypted it with the backup key, and
+confirmed the dump inside hashes to the `dumpSha256` its manifest recorded —
+`45cc0768…2638e33d`, the same value computed from the plaintext dump on this
+host beforehand. Logged in `.owner-verify.log`; full output and analysis in
+`evidence/07b-recovery-owner-procedure.md`.
+
+**This closes the third of row 10's three blockers.** Remaining: no approved
+public staging hostname, and no mail provider configured.
+
+Worth recording about *how* it passed, because both nearly made it fail for the
+wrong reason:
+
+- The script originally named the 2026-09-23 archive and the hash from a
+  receipt the nightly run had since overwritten. It compares against that
+  receipt **before** decrypting, so it would have aborted with a hash mismatch
+  having never invoked `gpg` — reported as a recovery failure when nothing was
+  wrong with the backups. Re-pointing it to a fully corroborated archive was
+  the difference between a real answer and a bookkeeping one.
+- The run's first line was `no local copy; fetching from atc@20.20.20.57`. The
+  "prefer a local copy" branch is dead — shipping removes the archive, leaving
+  only the plaintext dump — so every run pulls over SSH. That leg had no
+  rehearsal behind it, since this session was scoped out of vexo-lab. It worked,
+  which also independently confirms the off-host copy and the shipping path are
+  real rather than just logged.
+
+Preservation, checked after the run: 24 files still in `~/atc-backups/pos-prod/`,
+secret key still in the keyring, and the `mktemp -d` removed by its `EXIT` trap,
+so no decrypted production dump was left on disk. No secret appeared in the
+output.
+
+**CR-3 is NOT resolved by this and must not be read as resolved.** The run used
+the backup key *on the backup host*. It proves the archives and the passphrase
+are sound; it says nothing about recovering after losing `atc-noc`, which is the
+scenario off-host copies exist for. While `0F05CA51AEC13029` lives only in the
+`atc-noc` keyring — where `docs/BACKUP-RESTORE.md` says it must not be — the
+answer to "can the owner recover if this box dies?" is still **no**. Two
+different claims; one is now closed and one is open.
+
+### Close-out — 2026-09-25T07:25Z, at `ef567c6`
+
+#### One clean suite result for the combined code, bound to the tree that produced it
+
+Until now this ledger carried **790 tests / 30 files at `17058b9`**. That figure
+is **historical from here on**: `backend` at `17058b9` is tree `448b5371…`, and
+the candidate's is `72217e34…`. Different tree, so the old number describes code
+that is no longer the candidate. It is not deleted — a superseded measurement
+with its scope attached is worth more than a gap.
+
+Observed, replacing it:
+
+| | |
+|---|---|
+| Result | **32 files, 815 tests, all passed** |
+| Exit status | **0** — genuine, unfiltered |
+| Duration | 254.12 s, started 2026-09-25T04:29:09Z |
+| Commit run at | `fdaccdf` |
+| `backend` tree | `72217e347a8cf3037d6f8ba693f795d9d15d05d1` |
+| `backend/src` | `631eb3135e10fc06aad1b148c530e66daf05cdff` |
+| `backend/tests` | `24e007d22b281b28763a670d211974c22b513373` |
+| Log | `/tmp/vcxcr-full-suite.log`, complete and unfiltered |
+| Database | `vcx_staging_test` on the isolated dev Postgres (:5440) |
+
+**It transfers to the published commit by content, not by assumption.**
+`git rev-parse ef567c6:backend` is the same `72217e34…`, and
+`git diff --name-only 3fbc35a..ef567c6` returns nothing outside `docs/` and
+`deploy/` — six commits, not one line of `backend/`. So the tested source and the
+published source are the same bytes; re-running would measure an identical tree a
+second time, which is why it was not re-run. Had any of those commits touched
+`backend/`, this paragraph would not exist and the suite would have been re-run.
+
+**Bound by content, not by clock.** The run logs those tree hashes *before* and
+*after* itself, both sets identical, working tree CLEAN against `HEAD` and zero
+untracked files under `backend/` at both ends. That matters specifically here:
+my earlier 790-test run overlapped a peer's edit to `backend/src/permissions.js`
+mid-run, so on this branch a timestamp is not acceptable evidence. Four other
+sessions committed to it today. This run has a provable absence of that problem
+rather than an assurance against it.
+
+No test was skipped, excluded or deselected: the summary reads `815 passed (815)`
+with no skip count, `grep` for `.skip`/`.only`/`.todo` across `backend/tests/`
+returns nothing, and `vitest.config` adds no `exclude`, `bail` or
+`passWithNoTests`. The one line in the log containing the word "skipped" is a
+*test name* — `globalLimiter skipped (NODE_ENV=test at load)` — and it passed.
+
+The two files added since the previous run were also exercised alone first:
+`tests/licenseModuleGate.test.js` (14) and `tests/authTenantIsolation.test.js`
+(11) — **25 tests, exit 0**. Both numbers are worth keeping: a solo run starts
+from a `TRUNCATE`d database, and that exact difference hid an FK collision in my
+own new test file earlier this session. Passing alone and passing in the suite
+are two claims; both are now made.
+
+One invocation note, recorded because it produced a real exit 1 that was **not**
+a test failure: vitest path filters resolve against its root, `backend/`, so
+`backend/tests/x.test.js` matches nothing and the run exits 1 with `No test files
+found`. `tests/x.test.js` is the correct form. An exit 1 meaning "your filter was
+wrong" must never be filed as a failing suite — or, worse, as a passing one.
+
+#### The five verdicts, kept apart
+
+| Claim | Verdict |
+|---|---|
+| Remote archive retrieval, decryption, dump-vs-manifest integrity | **PASS** — owner-run 2026-09-25T03:57:11Z on `pos-prod-20260924T211406Z.tar.gpg`, inner dump `45cc0768…` |
+| Actual database restore **from that archive** | **NOT VERIFIED** — see below |
+| Recovery after loss of `atc-noc` (CR-3) | **OPEN** — the only usable private key is on that host |
+| Public staging hostname | **PENDING** — the name is now known (`staging.vexoconnect.com`, owner-supplied), but it resolves NXDOMAIN and nothing has been created |
+| Mail provider | **PENDING** — the provider is now known (cPanel), but `SMTP_HOST` is unset on staging, so `mailEnabled` is false and nothing has ever been sent |
+
+The last two rows moved from "we do not know what to build" to "we know what to
+run" — preparation, not status. Both verdicts are unchanged, and a named
+hostname is not a reachable one.
+
+**The restore verdict is a correction to this ledger, not a new limitation.**
+Both this file and `evidence/07b` previously said the restore was already proven
+"against the identical dump". It was not the identical dump. The 16/16 drill
+restored `pos-prod-20260923T211456Z.dump` — `74367d90…`, 101 869 bytes, 23
+tables, taken 09-23. The archive the owner decrypted contains `45cc0768…`,
+102 726 bytes, 24 models, taken 09-24. A day apart, different bytes.
+
+Two disjoint halves are proven and the join is not: **no dump has ever been taken
+out of an encrypted archive and loaded into Postgres.** The restore *mechanism*
+is proven; the restorability of the archive that was actually decrypted is not.
+The gap is narrow and cheap to close — `restore_drill.py` aimed at the decrypted
+dump would do it — but "both halves passed, so the chain works" is an inference,
+and this row is exactly where an inference would have been filed as a result.
+Correction table in `evidence/07-backup-recovery.md`.
+
+Nothing was deleted, pruned, moved or exported to reach these verdicts: 24 files
+remain in `~/atc-backups/pos-prod/`, the secret key remains in the keyring, and
+no private key, passphrase, decrypted dump or credential is in this repository.
+
+#### Publication
+
+Pushed to the existing GitHub remote, confirmed from GitHub's own responses
+rather than from the SSH alias `github-vexo-connect`:
+
+- `ssh -T` authenticates as **`jitendersharma07-beep/VEXO-connect`** — a
+  *repository*, not a user. That key is therefore a repo-scoped deploy key and
+  cannot reach the owner's other repositories. Worth knowing before trusting it
+  with anything wider.
+- The API returns `full_name: jitendersharma07-beep/VEXO-connect`,
+  `private: false`, `visibility: public`, `fork: false`, `archived: false`,
+  default branch `sprint/client-handover-rc`.
+
+**The repository is public, and that is the operative fact for everything pushed
+here.** The outgoing diff was scanned on that basis: the only IP literal in any
+added line is loopback, `127.0.0.1` — no public address, no lab address, no
+internal address of any kind. The only added hostnames are a reserved `.test`
+name and `atcworkspace.com`, already present 75 times in the published tree
+including `README.md` and `.env.example`, so not a new disclosure.
+
+That scan caught one thing in *this* section. An earlier draft listed the
+addresses it had checked for by writing them out — which would have added the
+lab's IP to a public repository in the course of asserting no such IP was
+present, and made the sentence false about itself. A negative claim does not
+need to reproduce what it denies. Rewritten above to name the classes instead.
+
+The evidence directory stays outside this repository, which is what makes these
+documents publishable at all.
 
 ## VC-101 evidence — with provenance
 
@@ -178,12 +451,102 @@ A report by session `7565dff8`
 (`vc101-browser-evidence-atc-noc-dev/LAB-BROWSER-EVIDENCE.md` §5) calls that copy "DONE". Window 2's own record does not, and Window 2's
 record governs. Status and remediation stay with Window 2 and the owner.
 
+**Re-measured on `atc-noc` 2026-09-24 by the cloud-readiness verification.**
+This supersedes the `9ff94ac` bullets above on the points it names, and is
+measurement on this host rather than a reading of another session's record.
+Full working: `docs/CLOUD-READINESS-VERIFICATION.md` §Backup and recovery.
+
+- **Scheduling: INSTALLED, enabled, active, and succeeding** — the "prepared,
+  NOT installed" bullet is obsolete. Nightly with a randomized delay and
+  `Persistent=true`; the last run exited 0 on both steps, 21 hours before the
+  check. Nothing was reinstalled and no archive, key or revocation certificate
+  was deleted. Local retention holds 11 archives.
+- **Restore: DONE FOR REAL — 16/16.** A real production archive restored into a
+  new isolated database and reconciled against *that archive's manifest*, not
+  against live: 23/23 table counts, payment total to the paisa, migration state
+  with none half-applied, staff password hashes, foreign keys, indexes, no
+  orphaned payment. Two controls carry the weight: a truncated archive exits 1
+  and leaves **0 tables** (`--exit-on-error`, without which `pg_restore` logs
+  and exits 0), and the retained archive is byte-identical afterwards. So "not
+  done for real" no longer holds; it needed no Mac key, because restore and
+  decryption are separate questions.
+- **Key custody: half the `9ff94ac` bullet is wrong.** The private half *is* on
+  this host — that much stands, and it contradicts the shipping tool's own
+  comment that "this host cannot do it". But it is **not unprotected**: it is
+  passphrase-protected, proven without asking for the passphrase by offering an
+  empty one and having it refused. One factor where the design claims two, not
+  an open door.
+- **Decryption: still UNPROVEN, and marked BLOCKED rather than inferred.** No
+  encrypted archive exists on this host to open (the staging directory is
+  cleared after each successful ship, correctly), and the encryption mechanism
+  round-trips only under a *rehearsal* key — which proves the mechanism, not
+  that archives encrypted to the owner's key can be opened. One reviewed,
+  guarded owner-run command closes it; it is written, checked, and prints a
+  single `RESULT:` line.
+- **Off-site separation: UNCONFIRMED — confirmed still unconfirmed.** The
+  destination is the lab box, so the only off-site copy of the POS production
+  database lands on the estate's virtualization lab, one host serving as both
+  lab and disaster-recovery target. Not verified from the destination side:
+  this task was instructed not to use that host, so destination facts were read
+  from local configuration and the sender's own receipts only.
+- **Deletion protection: NOT VERIFIED, and unlikely.** The sender declines to
+  prune, but that is voluntary, not enforced. The job authenticates with the
+  operator's **general-purpose SSH key** while a dedicated key pair for exactly
+  this job sits unused beside it — so anything that can SSH as the operator can
+  delete the off-site archives. The control that would make retention
+  enforceable is a `command="…",restrict` entry at the destination, which is
+  out of scope here and is reported rather than made.
+- **"The backups are encrypted" is true only of the off-site copy.** The
+  retained local archives are plaintext dumps at mode 600 — reasonable, since
+  the working copy has to be usable, but stated so the sentence is not read
+  more broadly than it is true.
+- **Root disk: still URGENT, and now worse.** Re-read **2026-09-25T06:03Z:
+  94% of 98 GB — 5.7 GB free.** The 09-23 and 09-24 readings were both 88%
+  (12 GB free), so this is the first movement, and it is in the wrong
+  direction: **half the headroom is gone in a day.** The P1 does not merely
+  stand, it has tightened.
+  One volume backs `/`, `/tmp` and `/var/lib/docker`, and
+  `pos-prod-postgres-1` lives on it — ENOSPC there crash-loops production
+  databases. **A deploy that builds images consumes this same space**, so the
+  figure is a go/no-go input and not just an estate-hygiene note.
+  Non-destructive headroom exists if it is wanted: `docker system df` reports
+  **2.755 GB reclaimable** across images and **679 MB** across volumes.
+  Reclaiming is a deletion and therefore the owner's call, not a session's.
+
 ## Physical printer — Window 3's result
 
-Window 3 is this session (ownership map in the scope document). **No result
-yet**: the paper test is 2026-09-24 and every row of the run-book table
-reads PENDING. It moves only when paper is observed. If it fails, printing
-ships as "browser print, untested on paper", as v1.0.1 does.
+Window 3 is this session (ownership map in the scope document). **Partial
+result, 2026-09-25.** The owner supplied physical photographs; the record
+splits in two, and the split is the whole point of this section.
+
+| | Evidence | Status |
+|---|---|---|
+| **The unit and the driver path** — run-book row 8 | Owner photographs: a DCode DC RP30 **self-test print**, and a **Windows test page** through the `POS-80C` driver on `USB001` | ✅ **hardware-verified** |
+| **VEXO's own output** — run-book rows 1–7, 9–11: receipt, KOT, reprint | none | ⏳ **PENDING** |
+
+**Why this does not close the item.** A self-test is generated by the
+printer's own firmware and a Windows test page is generated by the driver —
+neither passes through VEXO. They prove the unit takes paper, the ribbon/head
+works, the USB path is live and the driver is installed correctly. They say
+nothing about *our* column alignment, our wrap at the paper width, our cut
+length, or the 9 px refund labels. Those are the failures the run-book exists
+to catch, and none of them can be seen in these two photographs.
+
+So printing still ships as "browser print, untested on paper" unless rows 1–7
+and 9–11 are observed, exactly as before — what changed is that a *failure*
+would now be attributable to our output rather than to the hardware, which is
+worth having before anyone starts debugging.
+
+**One check is seconds of work off the photograph already taken**, and it is
+the only one here with a software consequence: count the characters per line on
+the self-test. At **≤32 chars** the unit is 58 mm, not 80 mm — which is a code
+change, not a setting. Nobody has read it off the image yet.
+
+**Archival gap, stated rather than papered over.** I have **not seen the
+photographs**; they are not on disk anywhere in this estate that I can find.
+This row is recorded as **owner-attested**, not as something any session
+inspected. If they are filed into the evidence set later, this section should
+be re-read against them.
 
 ## Deployment-owner handoff
 

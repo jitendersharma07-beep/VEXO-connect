@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "POS_INVOICE_ISSUED",
+    "message": "An invoice has been issued for this order; it cannot be moved to another store"
+  }
+}
