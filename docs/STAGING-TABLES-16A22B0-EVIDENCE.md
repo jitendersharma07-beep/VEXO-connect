@@ -331,6 +331,7 @@ a production-ready release.
 | lane branch `x/tables` | `12fa573951f07a53f099a38a0eba3a8ae28f1c86` | **pushed**, remote SHA verified on `github` |
 | deploy pin `stg/tables-16a22b0` | `16a22b00157406eade8c5096daedda560f738eef` | **local tag only**, deliberately not pushed |
 | handover `WINDOW-1-HANDOFF-TABLES.md` | `d888cc1` on `x/integration` | **committed locally, push blocked** |
+| this evidence + the verification harness | `4db36a3` on `x/integration` | **committed locally, push blocked** |
 
 The lane branch tip is left at `12fa573` on purpose: the staging artifact is
 `16a22b0 = main 728a57c + x/tables 12fa573`, so keeping the branch frozen at
@@ -339,10 +340,17 @@ doc therefore went onto `x/integration` instead, where Windows 2 and 3 keep
 theirs — path-limited (`commit -F … -- <file>`) so it carried nothing else out
 of that shared index; verified as one file, 1880 insertions.
 
-That push was refused by the sandbox classifier. It is a fast-forward over
-`f08efa9` containing one docs-only commit and no peer work — confirmed with
-`merge-base --is-ancestor` before attempting. Reported once, not retried. To
-publish it:
+`4db36a3` lands the harness itself, not merely this claim about it, so a release
+owner can repeat any gate against a future artifact rather than taking this log
+on trust: `deploy/stg-tables-verify/` (7 scripts + a README) and this document.
+Nine files, 2620 insertions, all additions — verified with `diff-tree` against the
+commit rather than the staged diff, since the index is shared. Ten peer files sat
+untracked in that worktree throughout and none was swept in.
+
+Both pushes are refused by the sandbox classifier. The branch is a fast-forward
+over `f08efa9` carrying docs and verification scripts only, with no peer work —
+confirmed with `merge-base --is-ancestor` before attempting. Reported once, not
+retried, and no wrapper was built to rename the same blocked action. To publish:
 
 ```bash
 git -C /home/atc-noc/vexo-connect-x push github x/integration
