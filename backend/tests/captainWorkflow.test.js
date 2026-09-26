@@ -68,51 +68,39 @@ const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { tableStateOf, TABLE_STATE_INCLUDE } = await import('../src/lib/qr/tableState.js');
+// Dynamic like the four above, not a static `import`, so it loads AFTER the
+// POS_QR_BASE_URL line: a static import is hoisted above it, and this helper
+// pulls in src/lib/prisma.js, which is the same module graph app.js reads the
+// environment through.
+const { wipeAll } = await import('./helpers/inventory.js');
 
 const app = createApp();
 const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 
-const wipe = async () => {
-  await prisma.floorLayoutTable.deleteMany();
-  await prisma.floorLayoutObject.deleteMany();
-  await prisma.floorLayout.deleteMany();
-  await prisma.diningArea.deleteMany();
-  await prisma.floor.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.qrSubmission.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.diningVisitGuest.deleteMany();
-  await prisma.diningVisit.deleteMany();
-  await prisma.tableQrCode.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  // Before the users, not after: UserInvitation.createdById and .acceptedById are
-  // both ON DELETE RESTRICT, so a single invitation row left by a sibling file
-  // makes posUser.deleteMany() throw and takes this whole file down. `cf9c4a0`
-  // added this line to the other 14 suites; this file did not exist on main yet,
-  // so it was missed. Order-dependent, which is why it passes in isolation.
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
+// A hand-written delete list, which is what this was, cannot survive the suite.
+// It has to name every model any SIBLING file might have left behind, in
+// dependency order, and it silently rots every time another window adds a
+// table. Twice now it has taken this whole file down, and each time the file
+// still passed in isolation, which is the worst way for a test to break:
+//
+//   UserInvitation  — .createdById/.acceptedById are ON DELETE RESTRICT, so one
+//                     invitation row from a sibling made posUser.deleteMany()
+//                     throw. `cf9c4a0` added that line to 14 other suites; this
+//                     file did not exist on main yet, so it was missed.
+//   ModifierGroup   — ModifierGroup_productId_fkey, left by catalogModifiers,
+//                     made product.deleteMany() throw. MEASURED on the pinned
+//                     gate of d7108cf: the beforeAll threw at line 98 and vitest
+//                     reported "35 tests | 35 skipped" — a green-looking file
+//                     that asserted nothing. Reduced to a two-file repro
+//                     (catalogModifiers + this file) in /tmp/w3-order-repro.log.
+//
+// So: truncate every table instead of listing some of them. `wipeAll()` is the
+// helper the five inventory suites already use — one
+// `truncate <139 tables> restart identity cascade`, which has no ordering to
+// get wrong and cannot be outdated by a model added tomorrow. It costs seconds,
+// and it is called twice in this file, not per test.
+const wipe = wipeAll;
 
 const tokens = {};
 let companyA, branchA1, branchA2;
