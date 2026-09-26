@@ -11,6 +11,13 @@ production, not to staging.
 > killed it with my own 300s bound. It passes 119/119 in 537.7s. The withdrawal
 > and the measurements are under "Withdrawn" below. Nothing about the gate code,
 > `bad4896`, or the test results for it changed.
+>
+> **The 53-file run has since been measured end to end and it exits 1**, on four
+> `reportingApi.test.js` assertions that also fail on plain `main` with none of my
+> code present, and that pass on the same commit if the clock is moved back three
+> hours. It is a clock-dependent flake in the suite, proven three ways under
+> "`reportingApi.test.js` fails after 12:30 UTC" below. I am reporting the red
+> exit rather than quoting only the 52-file green.
 
 ## The SHA to integrate
 
@@ -71,6 +78,9 @@ does not move production and must not be described as if it had.
 | **Control: new tests vs. OLD code** | **9 failed / 7 passed / 14 skipped**, exit 1 | `flgate-control-oldcode.log` |
 | **Integrated, `9a43535` = lane merged onto `main` `728a57c`** | **52 files / 1566 tests passed, 0 failed, 0 skipped**, exit 0, 521s | `flgate-integrated-9a43535.log` |
 | **The 53rd file on its own, integrated @ `9a43535`** | **119 passed / 119**, 0 skipped, 0 todo, exit 0, 537.7s | `integrations-unbounded.log` |
+| **All 53 files in one run, integrated @ `9a43535`** | **1681 passed / 1685**, 52 files passed, **4 failed in `reportingApi.test.js`**, exit 1, 913.1s | `flgate-all53-9a43535.log` |
+| **Control: those 4 on plain `main` `728a57c`, no gate code** | **same 4 fail**, 32 passed, exit 1 | `control-reportingApi-main-728a57c.log` |
+| **Same file, same commit, clock moved back 3h** | **36 passed / 36**, exit 0 | `control-reportingApi-main-shift3h.log` |
 
 Every log in that column lives in `/home/atc-noc/vcx-cloudready-local/` on this
 box. They are not in the repo — they are raw run output, and some carry request
@@ -81,6 +91,12 @@ I excluded that file because I thought it hung. **It does not hang — I was wro
 and the withdrawal is the "Withdrawn" section below.** Run to completion it is
 green, which is the row above. Everything else — all 52 remaining files — passes
 with the gate merged in, and `firstLoginGate.test.js` contributes its 30.
+
+**Read the 53-file row honestly: it exited 1.** The four failures are in
+`tests/reportingApi.test.js`, they are **not mine, and they are not the gate's** —
+they are a pre-existing clock-dependent flake that this lane touches no part of.
+The proof is the section below; do not integrate on the strength of the 52-file
+row alone without reading it.
 
 One caution on reading that "0 skipped": the summary line genuinely reports none,
 but the run does contain a *test whose name* is `globalLimiter skipped (NODE_ENV=test
@@ -233,8 +249,9 @@ The repo already said so, in `backend/tests/globalSetup.js`:
 
 ### What this means for your release workflow
 
-- **A green 53-file run is achievable.** The "no lane can give you one" claim was
-  false and is withdrawn.
+- **A 53-file run completes.** The "no lane can give you one" claim was false and
+  is withdrawn. Measured at `9a43535`: **1681 passed / 1685, 52 of 53 files green,
+  913.1s, exit 1.** It is *not* green, and the one red file is the next bullet.
 - **The real hazard is the opposite of what I described.** CI will not hang — it
   will *fail* if the per-job timeout is under about 20 minutes. Budget the full
   backend suite at **~18–20 min** on an idle box, and more under load.
@@ -244,6 +261,57 @@ The repo already said so, in `backend/tests/globalSetup.js`:
   `[cleanup] customers` line first: tens of seconds means a busy box, hundreds
   means `LoyaltyProfileLink_customerId_companyId_idx` has gone missing.
 - Nothing here was ever mine to fix, and there is nothing to fix.
+
+## `reportingApi.test.js` fails after 12:30 UTC — on plain `main`, without my code
+
+The 53-file run exited 1. Four tests failed, all in `tests/reportingApi.test.js`:
+
+- `the figures reconcile > sales, collections and refunds are separately explainable` — `expected +0 to be 1`
+- `the figures reconcile > a part-paid bill appears as a due, not as a missing sale` — `[]: expected undefined to be truthy`
+- `the figures reconcile > collections split by method rather than collapsing into one figure` — `expected [] to include 'CASH'`
+- `the export is the payload > the CSV carries the same net sales as the JSON payload` — `Cannot read properties of null (reading 'paise')`
+
+Every one is a "no rows came back" assertion. **This is a pre-existing
+time-of-day flake in the suite, not a regression and not the gate's.** Three
+independent things establish that, and I ran all three rather than assert it:
+
+| Test | Result |
+|---|---|
+| Does this lane touch reporting at all? | **No.** The lane diff vs `main` is 7 files / 834 insertions: `.env.example`, `auth.js` (route), `env.js`, `errors.js`, `session.js`, `middleware/auth.js`, `firstLoginGate.test.js`. Zero reporting files, zero schema change. |
+| Do the same 4 fail with **no gate code present**? | **Yes.** `tests/reportingApi.test.js` alone at plain `main` `728a57c`: 4 failed / 32 passed, exit 1 — *the same four names, the same four assertions*. |
+| Is it the clock? | **Yes.** Same file, same commit, same database, process clock moved back 3h: **36 / 36, exit 0.** |
+
+### The mechanism
+
+`reportingApi.test.js:135` dates its fixtures at `now − 18h`:
+
+```js
+const yesterdayAfternoon = () => new Date(Date.now() - DAY + 6 * 3600e3);
+```
+
+The tests then query `preset=YESTERDAY`. The server resolves that preset in
+**`Asia/Kolkata`** (`src/lib/reporting/period.js:18`, `timezone: 'Asia/Kolkata'`),
+but this box runs **UTC**. So once UTC passes **12:30** (= 18:00 IST), `now − 18h`
+lands on *today* in IST rather than yesterday, `YESTERDAY` selects a day with no
+fixtures, and every "no rows" assertion above fires.
+
+I bracketed the cutoff by bisecting the process clock rather than trusting the
+arithmetic: at an effective **12:34 UTC** the 4 fail, at **12:28 UTC** all 36
+pass. That is the predicted 12:30 UTC boundary, measured.
+
+It is also why my earlier 52-file run was green — it hit `reportingApi` at
+~11:43 UTC, before the cutoff. The 53-file run reached it at ~13:40 UTC, after.
+
+### What you should do with it
+
+- **Do not treat this as a blocker on `bad4896`.** It reproduces without a line
+  of my code in the tree.
+- **It will bite your CI** on any job that starts after 12:30 UTC, which for an
+  IST-hours team is most of the working afternoon. Worth a separate fix by
+  whoever owns reporting: pin the suite's timezone, or date the fixture from the
+  company timezone instead of `Date.now()`.
+- I have **not** fixed it. It is outside this lane, and editing a shared test
+  file to make my own run look green is exactly the wrong move.
 
 ## All four staging stacks are occupied — read this before telling me to deploy to one
 
