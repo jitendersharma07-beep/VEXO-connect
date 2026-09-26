@@ -359,11 +359,21 @@ describe('splitting a bill into separate cheques', () => {
     expect(b.id).not.toBe(a.id);
   });
 
-  it('conserves across every way of cutting the same bill', async () => {
-    // One line moved, then two, then the middle one — the same basket split
-    // three different ways. A policy that is only right for a balanced cut
-    // fails here, and this is where per-line GST rounding gets its chance.
-    for (const pick of [[0], [1], [0, 1], [1, 2], [0, 2]]) {
+  // One line moved, then another, then three different pairs — the same basket
+  // cut five ways. A policy that is only right for a balanced cut fails here,
+  // and this is where per-line GST rounding gets its chance.
+  //
+  // FIVE SEPARATE TESTS, not one loop, and that is a fix rather than a style
+  // choice. As a single test the five cycles ran 8.0s alone but 20,005ms under
+  // full-suite load, tripping the 20s ceiling — and when vitest times a test out
+  // it abandons the test while the in-flight request keeps going, so the
+  // straggler opened a bill on the table AFTER the next test had already
+  // cleared it, and that test failed too with 'Table "S1" already has an open
+  // order'. One missing bit of headroom cost two tests. Per-cut tests each get
+  // the whole budget for a fifth of the work, and a failure names the cut.
+  it.each([[[0]], [[1]], [[0, 1]], [[1, 2]], [[0, 2]]])(
+    'conserves when the lines moved are %j',
+    async (pick) => {
       await clearTable(tableA1.id);
       const order = await openMixedBill();
       const totalBefore = paise((await orderRow(order.id)).total);
@@ -378,8 +388,8 @@ describe('splitting a bill into separate cheques', () => {
       // would satisfy the sum while being a broken split.
       expect(paise(a.total)).toBeGreaterThan(0);
       expect(paise(b.total)).toBeGreaterThan(0);
-    }
-  });
+    },
+  );
 
   it('moves the chosen lines and only the chosen lines', async () => {
     await clearTable(tableA1.id);
@@ -422,8 +432,19 @@ describe('splitting a bill into separate cheques', () => {
     // invent a fact nobody observed.
     expect(original.pax).toBe(4);
     expect(cheque.pax).toBeNull();
-    expect(paise(original.pax === null ? 0 : 1)).toBeGreaterThanOrEqual(0); // fixture sanity
-  });
+    // (An earlier revision had a third assertion here that was a tautology —
+    // paise(0 or 1) >= 0 is true whatever the code does. Removed: an assertion
+    // that cannot fail makes a suite look more rigorous than it is.)
+
+    // 45s, and this number is worth explaining because it is not the test's
+    // fault. Measured at 581ms running alone, and at 13,283ms doing identical
+    // work inside the same file minutes later — a 23x stall. The test database
+    // is private (vcx_tables_test) but it lives in a Postgres container shared
+    // with every other lane, and a private database isolates rows, not CPU:
+    // that container was at 144% and the box at load 10.5 when the 13.2s was
+    // recorded. This budget buys margin against co-tenant load. Every
+    // assertion above is unchanged.
+  }, 45000);
 
   it('keeps both cheques on the same table, visit, store and tenant', async () => {
     await clearTable(tableA1.id);
@@ -685,7 +706,13 @@ describe('the splits a bill may not have', () => {
     // The other bill is untouched too — a refusal must not half-move anything.
     expect((await lineIdsOf(other.id)).map((l) => l.id)).toEqual([theirs[0].id]);
     expect(await lineIdsOf(mine.id)).toHaveLength(3);
-  });
+    // 45s, not the global 20s. Measured at 12,535ms in a full-suite run — 63% of
+    // the default ceiling — because this is the only test that clears two tables
+    // and opens two bills. The assertions above are unchanged; this is a
+    // resource budget, not a softened check. Leaving it at 20s would have made
+    // it the next test to fail on a loaded box, which is exactly the criticism
+    // §7 of the handover makes of other lanes' tests.
+  }, 45000);
 
   it('refuses the same line listed twice', async () => {
     await clearTable(tableA1.id);
@@ -842,7 +869,9 @@ describe('who may split a bill', () => {
     // that list exists.
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(await lineIdsOf(order.id)).toHaveLength(3);
-  });
+    // 45s for the same reason as the foreign-line test above: measured at
+    // 8,065ms under full-suite load against a 20s default. Same assertions.
+  }, 45000);
 
   it('refuses a manager from another store in the same company', async () => {
     await clearTable(tableA1.id);
