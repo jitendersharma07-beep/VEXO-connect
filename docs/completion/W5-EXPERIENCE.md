@@ -245,6 +245,73 @@ Totals tie to the database. No horizontal scroll at 390px.
 change, which is outside W5's ownership. It is the one genuine external input
 this workstream is waiting on.
 
+### Prepared: what the change is, and what it does not touch
+
+Written out so that whoever is approved to make it does not have to rediscover
+it. **W5 has not made it and must not** — it is public exposure.
+
+The whole change is one environment variable:
+
+```
+POS_QR_BASE_URL=https://<approved-host>
+```
+
+**No token is reissued and no historical order is touched.** The printed URL is
+composed at print time from the base plus the stored token — `cards.js:33-34`
+reads `env.POS_QR_BASE_URL` and strips trailing slashes, and `tableQr.js:12`
+states the same property. `QrToken` rows are not derived from the origin, so
+repointing the origin changes where a scan *lands* and changes nothing about what
+a token *is*. Revocation and regeneration stay independent of it. That is the
+answer to the deliverable's "without corrupting historical orders" question for
+this particular change: the corruption risk is zero because no row is rewritten.
+
+What the change *does* invalidate is **paper**. Cards already printed carry the
+old origin and stop resolving. Reprint is a business step, not a code one, and it
+belongs in the rollout note rather than in a migration.
+
+**The boot guard will refuse a wrong value, loudly, at startup rather than at
+print time** (`env.js:300-321` — deliberately at boot, because the failure mode
+being avoided is a room full of guests who cannot order):
+
+| Rule | Line | Effect outside test/development |
+|---|---|---|
+| must parse as an absolute URL | 305 | boot fails |
+| must be `https:` | 308-310 | boot fails on `http://` |
+| host not `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, and not `*.local` | 311-317 | boot fails — *"not reachable from a customer's phone"* |
+| no query string, no fragment | 318-320 | boot fails |
+
+`NODE_ENV` of `test` or `development` relaxes the first two. The whitelist is on
+the safe environments, so an **unset** `NODE_ENV` refuses rather than allows —
+worth preserving, and worth knowing before anyone debugs a "why won't it boot".
+
+### Acceptance steps once an approved host exists
+
+In this order. Steps 1-3 need no public exposure and can be done first.
+
+1. **Rewrite the honest-limit assertion in `guest-phone-acceptance.mjs`.** It is
+   written to **fail** against a non-loopback origin, by design, so it fails
+   first and is *supposed* to. Replace the loopback assertion with its inverse:
+   the printed origin must be `https:` and must not be in the unreachable list.
+   Do this deliberately, as a reviewed edit — the header comment stating the
+   limitation must go at the same time, or the suite will pass while the file
+   still claims a handset was never used.
+2. **Re-run the four harnesses** against the new origin: `qr-evidence.sh`,
+   `browser-acceptance.mjs`, `guest-phone-acceptance.mjs`,
+   `reporting-acceptance.mjs`. All 130 checks must stay green. Expect card/PDF
+   URL assertions to move; nothing else should.
+3. **Confirm token stability across the repoint** — the check that proves the
+   "no historical corruption" claim rather than asserting it. Record
+   `id, token, tableId` for existing `QrToken` rows before the change, re-read
+   after, and require them byte-identical while the printed URL differs. If any
+   token moved, stop: the composition assumption above is wrong.
+4. **Then, and only with the approved hostname in place, a physical handset.**
+   Scan a printed card; confirm the menu loads over HTTPS with no certificate
+   warning; confirm scanning alone still writes nothing (re-read `QrSubmission`
+   and `DiningVisit` counts); complete one guest order end to end; confirm the
+   second-party join code path on a second physical device.
+5. **Only step 4 retires the gap.** Until a handset has loaded a card, §7 stays
+   open regardless of how green steps 1-3 are. A viewport is not a phone.
+
 ---
 
 ## 8. Owned source in this delivery

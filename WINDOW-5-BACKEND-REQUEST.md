@@ -40,6 +40,49 @@ one as *"Takes orders and sends them to the kitchen — handles no money."*
 Neither is true today. A captain is refused `403` by `requireRole` before any
 of that is consulted. The role is sold, granted, and inert.
 
+### Reproduction — re-run 2026-09-26T04:27:24Z against `main`-side source
+
+```
+bash ~/vcx-experience-local/captain-reach.sh
+```
+
+Requires the lane stack (api `:5561`, DB `vcx_experience` on `127.0.0.1:5440`) and
+refuses to run anywhere but `atc-noc`. Output:
+
+```
+-- reads
+  GET /api/floors                                200
+  GET /api/tables                                200
+  GET /api/table-qr/submissions                  403      <-- §2
+  GET /api/orders                                200
+
+-- the order a captain is supposed to be able to open
+  POST /api/orders                               403  {"error":{"code":"POS_FORBIDDEN",
+                                                       "message":"You do not have
+                                                       permission to perform this action"}}
+
+-- THE CONTROL: the byte-identical request as a CASHIER
+  cashier POST /api/orders                       201
+  => the request is well-formed. The captain's 403 is the ROLE, not the payload.
+  and the row exists in the DB                   1  expect 1
+  orders on the captain's scratch table          0  expect 0
+```
+
+Log: `~/vcx-experience-local/evidence/captain-403-repro-20260926T042724Z.log`.
+
+**Read the control before the 403.** Same branch, same product, same body shape,
+a cashier token instead of a captain token: `201`, and the row is in the database.
+So the refusal is the role list at `orders.js:86` and not a malformed request —
+which is the first thing a reviewer should suspect and the first thing this rules
+out. The last line then shows the 403 wrote nothing: zero `Order` rows on the
+captain's table, so this is a clean refusal and not a partial write.
+
+That control used to be unreachable. It was gated on an order id that only exists
+when the captain *succeeds*, so on every real run it silently skipped — the probe
+that distinguished "the role is refused" from "my request is wrong" never
+executed once. Fixed in the harness before this evidence was taken; a control
+that cannot fire in the case it exists for is not a control.
+
 ### The change
 
 Add one gate beside the existing ones and use it on five routes:
@@ -125,6 +168,41 @@ making it quietly. If W3 prefers to avoid it, the alternative is to add
 `'CAPTAIN'` to `operate`'s role list and accept that the gate stays
 baseline-only; W5 recommends against it, because it leaves the captain's
 authority unauditable by the tenant.
+
+### The test contract W3 inherits
+
+`backend/tests/captainWorkflow.test.js` (29/29 today) already pins both halves of
+this. It asserts **today's** behaviour where today's behaviour is wrong, so the
+fix is supposed to turn these red — a silent pass after an authorization change
+would be worse than a red test. Rewrite these three to expect success:
+
+| Line | Test | After the fix |
+|---|---|---|
+| 287 | `403 on POST /orders, with no order row created` | `201`, and the row exists |
+| 297 | `403 on adding, changing and removing a line, with the order untouched` | line edits succeed |
+| 320 | `403 on POST /kot, with no ticket cut` | one ticket, and only one |
+
+**These must stay exactly as they are. They are the billing and payment fence,
+and a fix that makes any of them go green has over-granted:**
+
+| Line | Test | Must still |
+|---|---|---|
+| 358 | `a captain cannot raise a bill, apply a discount or record a payment` | refuse all three, with the order total unmoved |
+| 376 | `a CASHIER holds order.item.void in its baseline and is still refused the route` | refuse — this is §3, and it is the test that catches a baseline-only widening |
+| 395 | `a manager pinned to Alpha One cannot touch an Alpha Two order` | refuse — store pinning survives |
+| 407 | `an ATC operator is read-only inside a tenant: 403 on every order write` | refuse — this is what a bare `requireAction` would break |
+| 330 | `but CAN read — the order, the tickets and the floor are open to the role` | stay green |
+
+Every refusal above asserts the **status and the absence of the row**, not the
+status alone. A gate that returns 403 after committing would pass a status-only
+assertion, which is why they are written that way — please keep that property when
+rewriting the first three.
+
+Line 376 is the one worth pausing on. A `CASHIER` holds `order.item.void` in its
+role baseline and is still refused the route, which is the shape of §3 and the
+reason directive 3 asks for resolved permissions rather than the baseline table.
+If a fix is validated by reading `ROLE_ACTIONS` instead of by calling the route,
+that discrepancy is invisible.
 
 ---
 
@@ -412,6 +490,23 @@ exists. Flagged because the requirement names it, not because W5 is blocked.
 guest router is W5-adjacent but `openOrJoinVisit` and the `QrSubmission` shape
 are shared with whoever owns visits and active tables (believed `zen-bhabha`).
 W5 has written no kiosk code and changed nothing.**
+
+> **ESCALATED TO W1, 2026-09-26 — this is an assignment request, not a code
+> request.** W5 cannot resolve it and neither can `zen-bhabha` alone: the
+> question spans the guest router, the visit model and the `QrSubmission` schema,
+> and the decision that comes first is a *product* one — whether a kiosk order is
+> table-free (a new `OrderType` path) or a table-bound order at a designated
+> kiosk table. Nobody owning one file can answer that.
+>
+> W1 owns program coordination and is the window §5 already asks for `CONTROL.md`
+> from; an unowned deliverable is exactly what that register is for. **W5 asks W1
+> to name an owner, not to implement anything.** Until an owner exists this stays
+> open and no kiosk ships — which is the correct outcome, not a stalled one, for
+> the reasons in "What W5 explicitly did not do" below.
+>
+> W5 will implement the kiosk **frontend** once a write path exists, and will not
+> design the write path, because doing so would make W5 the second integration
+> authority that §5 argues against.
 
 W5's brief asks for a kiosk "with real APIs" and forbids the alternative in the
 same sentence: *"Reuse order and identity services rather than creating
