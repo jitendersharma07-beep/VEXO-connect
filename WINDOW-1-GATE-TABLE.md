@@ -293,7 +293,21 @@ cleanup protects the decrypted *dump file*, not the *restored rows*. This lane's
 runs therefore left six scratch databases holding a full copy of production,
 staff password hashes included, in the dev Postgres container.
 
-They are unreferenced and loopback-only, so the exposure is local rather than
-reachable — but it does not expire on its own. The exact names, sizes and the
-drop command are in `evidence/07-backup-recovery.md` under "What these runs left
-behind". Listed as a command rather than performed, because it is a delete.
+They are unreferenced and loopback-only, so the exposure was local rather than
+reachable — but it does not expire on its own.
+
+**Closed on the owner's instruction:** all six were dropped, each in its own
+statement rather than in a loop, and every co-tenant database was confirmed
+present afterwards. Database count 100 → 94, and a re-query returns 0.
+
+**One of the same class remains, from the earlier 09-24 plaintext drill**, holding
+16 staff password hashes. It was left in place rather than swept up with the six,
+because exceeding the scope of a delete instruction is how the wrong database
+goes. Names and the drop commands are in `evidence/07-backup-recovery.md`.
+
+The durable fix is not a one-off cleanup. **Every restore drill leaves a copy of
+production behind by default** — the verifier deliberately drops nothing, so that
+it cannot destroy a database by being wrong about a name. That is the right trade,
+but it makes cleanup a step someone has to remember, and two days of drills show
+it is not being remembered. A periodic sweep for `vcx_restore%`, `vcx_rehearse%`
+and `vcx_ctlmis%` is what actually closes this.
