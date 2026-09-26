@@ -296,18 +296,56 @@ staff password hashes included, in the dev Postgres container.
 They are unreferenced and loopback-only, so the exposure was local rather than
 reachable — but it does not expire on its own.
 
-**Closed on the owner's instruction:** all six were dropped, each in its own
-statement rather than in a loop, and every co-tenant database was confirmed
-present afterwards. Database count 100 → 94, and a re-query returns 0.
+**Closed on the owner's instruction — all eight are gone.** Six from this lane's
+encrypted-archive runs, then the older 09-24 plaintext drill's pair on a follow-up
+instruction, the first of which held 16 staff password hashes with all 16
+`passwordHash` values non-null. Each was dropped in its own statement rather than
+in a loop, so each `DROP DATABASE` could be read against the intended name before
+the next one ran. Afterwards a re-query for every drill prefix returns 0 rows, and
+`atc_pos`, `atc_pos_test` and nine co-tenant lane databases were each confirmed
+still present by name.
 
-**One of the same class remains, from the earlier 09-24 plaintext drill**, holding
-16 staff password hashes. It was left in place rather than swept up with the six,
-because exceeding the scope of a delete instruction is how the wrong database
-goes. Names and the drop commands are in `evidence/07-backup-recovery.md`.
+Not by counting, though. The total had already moved 94 → 98 between the two
+rounds of drops, because co-tenant sessions create and drop test databases
+continuously. **The proof is the re-query by name; the count is a coincidence that
+happens to agree.**
 
-The durable fix is not a one-off cleanup. **Every restore drill leaves a copy of
+### The durable fix — and a warning about your own verification run
+
+A one-off cleanup does not close this. **Every restore drill leaves a copy of
 production behind by default** — the verifier deliberately drops nothing, so that
 it cannot destroy a database by being wrong about a name. That is the right trade,
 but it makes cleanup a step someone has to remember, and two days of drills show
-it is not being remembered. A periodic sweep for `vcx_restore%`, `vcx_rehearse%`
-and `vcx_ctlmis%` is what actually closes this.
+it is not being remembered.
+
+This lane first recommended sweeping `vcx_restore%`, `vcx_rehearse%` and
+`vcx_ctlmis%`. **That recommendation was wrong and is withdrawn.** It enumerated
+the labels that happened to have been used, where the names are actually built as
+`vcx_{label}_{stamp}` and `vcx_{label}neg_{stamp}` with `--label` supplied per
+wrapper. Measured against ten residue names and ten that must survive:
+
+| Sweep | Residue matched | Co-tenant DBs falsely matched |
+|---|---|---|
+| the three prefixes above | **5 / 10** | 0 |
+| `^vcx_[a-z]+_[0-9]{8}t[0-9]{6}$` | **10 / 10** | **0 / 10** |
+
+Among the five the old pattern missed are `vcx_ownerrestore%` and
+`vcx_ownerrestoreneg%` — **the databases `owner-verify-backup-restore.sh` will
+create when you run it to close the production-key gate in §B.** That run uses the
+real production key against real production bytes, which makes it the one drill
+whose residue matters most, and the sweep this lane recommended would have walked
+straight past it. So: after that run, clean up behind it.
+
+```bash
+# list first — it is a delete, and the pattern is a safeguard, not a substitute
+# for reading what it selected
+docker exec vexo-connect-dev-db psql -U vexo_dev -d postgres -c \
+  "SELECT datname, pg_size_pretty(pg_database_size(datname))
+     FROM pg_database
+    WHERE datname ~ '^vcx_[a-z]+_[0-9]{8}t[0-9]{6}$' ORDER BY datname;"
+```
+
+The shape also catches labels nobody has invented yet, and against the live
+96-database list it matches 0 while leaving the other 91 `vcx_` databases alone —
+lane and `_test` databases carry no `_YYYYMMDDtHHMMSS` stamp, and neither does
+`vcx_w6_migpop_052517`, the nearest-miss name on the box.
