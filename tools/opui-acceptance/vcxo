@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# vcxo — LOCAL runner for the x/operator-ui lane on atc-noc. Sibling of vcxe
+# (x/experience), vcxt (x/tables) and vcxa (x/accounts): same command semantics,
+# lane-private databases on the EXISTING vexo-connect-dev Postgres container
+# (vexo-connect-dev-db, loopback 127.0.0.1:5440).
+#
+# Scope of this lane: the two OPERATOR screens that have a landed backend on
+# `main` and no user interface —
+#   VC-102  promotions / campaigns  (backend/src/api/routes/promotions.js)
+#   VC-103  kitchen display, KDS    (backend/src/api/routes/kitchen.js)
+#
+# This lane builds FRONTEND ONLY. Migrations and backend contracts belong to the
+# windows that own them; `vcxo migsql` exists to PROVE the schema is untouched,
+# not to change it.
+#
+# Touches NOTHING shared:
+#   - Databases: vcx_opui, vcx_opui_test, vcx_opui_shadow only. The suite's
+#     advisory lock (tests/globalSetup.js) is scoped to a database, so a run here
+#     can neither block nor corrupt another lane's fixtures.
+#   - node_modules: REAL per-lane copies (not a symlink overlay), so
+#     `prisma generate` writes here and can never reach through a symlink into
+#     ~/vexo-connect-dev, whose 5351 stack other sessions watch.
+#   - Ports 5571 (api) / 5671 (vite): clear of every port claimed in
+#     ~/vcx-*-local/.env.
+#
+# Sends no email, starts no container, and never touches production or vexo-lab.
+set -euo pipefail
+
+if [ "$(hostname)" != "atc-noc" ]; then
+  echo "vcxo: refusing — this runner is for atc-noc only (got: $(hostname))"
+  exit 1
+fi
+
+WT=/home/atc-noc/vexo-connect-x-lanes/operator-ui
+DEV=/home/atc-noc/vexo-connect-dev
+BASE=/home/atc-noc/vcx-opui-local
+ENVF="$BASE/.env"
+SECRETF="$BASE/.jwtsecret"
+SEEDF="$BASE/.seedpasswords"
+LOGDIR="$BASE/.runlogs"
+DBC=vexo-connect-dev-db # existing dev Postgres container, loopback 5440
+
+if [ ! -d "$WT/backend" ]; then
+  echo "vcxo: worktree missing at $WT"
+  exit 1
+fi
+
+usage() {
+  echo "usage: vcxo {setup|test|accept|migsql|migrate|generate|build|lint|seed|fixtures|up|down|status|psql}"
+  exit 2
+}
+[ $# -ge 1 ] || usage
+cmd="$1"
+
+# Secrets are assembled at run time, never written into $ENVF: the dev DB
+# password stays in the dev clone's own .env (its single source of truth), the
+# lane signing secret lives in one 0600 file, and the seed logins in another.
+need_env() {
+  if [ ! -f "$ENVF" ]; then
+    echo "vcxo: $ENVF missing"
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$DEV/.env" # VEXO_DEV_DB_PASSWORD, referenced by the URLs in $ENVF
+  if [ ! -f "$SECRETF" ]; then
+    (
+      umask 077
+      openssl rand -hex 32 >"$SECRETF"
+    )
+  fi
+  POS_JWT_SECRET="$(cat "$SECRETF")"
+  if [ ! -f "$SEEDF" ]; then
+    (
+      umask 077
+      : >"$SEEDF"
+    )
+  fi
+  # Per-key, not all-or-nothing: the original form only wrote this file when it
+  # was absent, so a login added later never reached an existing file and the
+  # harness that needed it failed with an empty variable. Each key is generated
+  # once and then kept — regenerating one would orphan the hash already seeded
+  # into the database.
+  #   VCX_OPUI_AUTHZ_PASSWORD covers the four fixture principals
+  #   (COMPANY_ADMIN, REGIONAL_MANAGER, FINANCE, tenant B's owner). They exist
+  #   only to be refused, so there is nothing to keep separate between them.
+  for k in VCX_OPUI_SEED_ADMIN VCX_OPUI_SEED_OWNER VCX_OPUI_SEED_MANAGER \
+    VCX_OPUI_SEED_CASHIER VCX_OPUI_AUTHZ_PASSWORD; do
+    grep -q "^$k=" "$SEEDF" || (
+      umask 077
+      echo "$k=$(openssl rand -base64 18)" >>"$SEEDF"
+    )
+  done
+  # shellcheck disable=SC1090
+  source "$SEEDF"
+  # shellcheck disable=SC1090
+  source "$ENVF"
+  set +a
+  if [ -z "${VEXO_DEV_DB_PASSWORD:-}" ]; then
+    echo "vcxo: VEXO_DEV_DB_PASSWORD not found in $DEV/.env"
+    exit 1
+  fi
+  # The suites truncate tenant tables. A URL that is not this lane's _test
+  # database must fail the whole run rather than one file.
+  case "${TEST_DATABASE_URL:-}" in
+  *"/vcx_opui_test?"*) : ;;
+  *)
+    echo "vcxo: TEST_DATABASE_URL is not vcx_opui_test — refusing"
+    exit 1
+    ;;
+  esac
+}
+
+sql() { docker exec "$DBC" psql -U vexo_dev -d postgres -tAc "$1"; }
+
+case "$cmd" in
+setup)
+  mkdir -p "$LOGDIR"
+
+  # The lane borrows the dependency trees installed for ~/vexo-connect-dev. That
+  # is only valid while the manifests match. Assert it every time, not just the
+  # day it was designed.
+  for f in backend/package.json backend/package-lock.json \
+    frontend/package.json frontend/package-lock.json; do
+    if ! cmp -s "$WT/$f" "$DEV/$f"; then
+      echo "vcxo: $f differs between worktree and dev clone — dependency reuse is invalid, STOP"
+      exit 1
+    fi
+  done
+
+  for db in vcx_opui vcx_opui_test vcx_opui_shadow; do
+    sql "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 ||
+      docker exec "$DBC" psql -U vexo_dev -d postgres -c \
+        "CREATE DATABASE $db OWNER vexo_dev"
+  done
+
+  need_env
+  echo "vcxo: setup done (manifest check + databases + env)"
+  ;;
+
+generate)
+  need_env
+  cd "$WT/backend"
+  npx prisma generate
+  ;;
+
+test)
+  need_env
+  shift
+  cd "$WT/backend"
+  npx prisma generate >/dev/null
+  DATABASE_URL="$TEST_DATABASE_URL" npx prisma migrate deploy
+  NODE_ENV=test DATABASE_URL="$TEST_DATABASE_URL" LOG_LEVEL=silent \
+    npx vitest run "$@"
+  ;;
+
+# `prisma migrate diff` against a throwaway shadow. In THIS lane the expected
+# output is EMPTY: a non-empty diff means the frontend work has somehow reached
+# the schema, which is another window's property. Treat output as a failure.
+migsql)
+  need_env
+  cd "$WT/backend"
+  docker exec "$DBC" psql -U vexo_dev -d postgres -c \
+    "DROP DATABASE IF EXISTS vcx_opui_shadow" >&2
+  docker exec "$DBC" psql -U vexo_dev -d postgres -c \
+    "CREATE DATABASE vcx_opui_shadow OWNER vexo_dev" >&2
+  npx prisma migrate diff \
+    --from-migrations ./prisma/migrations \
+    --to-schema-datamodel ./prisma/schema.prisma \
+    --shadow-database-url "$SHADOW_DATABASE_URL" \
+    --script
+  ;;
+
+migrate)
+  need_env
+  cd "$WT/backend"
+  npx prisma migrate deploy
+  ;;
+
+seed)
+  need_env
+  cd "$WT/backend"
+  node prisma/seed.js
+  ;;
+
+build)
+  need_env
+  cd "$WT/frontend"
+  # NODE_ENV=production is not decoration, and this line is load-bearing.
+  #
+  # need_env sources the lane .env under `set -a`, and that file carries
+  # NODE_ENV=development for the backend's benefit. Exported, it reaches vite,
+  # which then resolves react/react-dom to their DEVELOPMENT builds. The
+  # artifact doubles — 983.71 kB against 2,067.50 kB at an identical 1717
+  # modules, because the same specifiers resolve to different files — and ships
+  # dev-only warning machinery. It still builds, so the gate still reads GREEN;
+  # it is simply green about the wrong artifact.
+  #
+  # frontend/Dockerfile.prod runs `npm run build` in a clean node:20 image with
+  # no NODE_ENV at all, so the unset case is what production actually gets.
+  # This gate claims to correspond to that build, so it has to match it.
+  NODE_ENV=production npx vite build --outDir /tmp/vcx-opui-build --emptyOutDir
+  ;;
+
+fixtures)
+  # RETIRED, and kept only to say so. This ran backend/tmp-fixtures-authz.mjs to
+  # provision COMPANY_ADMIN / REGIONAL_MANAGER / FINANCE and a second tenant.
+  # opui-lib.mjs now does both itself — makeExtraRoles() and makeRivalTenant()
+  # are called from sessions(), so every harness provisions what it needs at the
+  # moment it needs it and cannot run against a half-seeded database. That made
+  # the separate step not just unnecessary but a trap: a stale fixture password
+  # from an earlier run would fail logins that self-provisioning gets right.
+  #
+  # The script itself is deleted. It was untracked scratch and never part of a
+  # reviewed commit.
+  echo "vcxo: 'fixtures' is retired — opui-lib.mjs's sessions() provisions the"
+  echo "      extra roles and the rival tenant on demand. Just run 'vcxo accept'."
+  exit 0
+  ;;
+
+lint)
+  # Deliberately refuses instead of pretending. This repo has NO ESLint setup:
+  # no eslint.config.*, no .eslintrc.*, no "lint" script and no eslint
+  # dependency in frontend/package.json. `npx eslint` here silently downloads a
+  # current ESLint (10.11 when this was written) and dies on the missing config
+  # — and a runner that swallowed that would let a lane record "lint passed"
+  # having linted nothing.
+  #
+  # The real gate is frontend/Dockerfile.prod, which runs exactly `npm ci` and
+  # `npm run build`. So `vcxo build` is the check that corresponds to what CI
+  # does; an unresolved import or a syntax error fails there.
+  echo "vcxo: this repo has no ESLint configuration — nothing to lint."
+  echo "vcxo: the image build gates on 'npm run build' only; use 'vcxo build'."
+  exit 2
+  ;;
+
+up)
+  need_env
+  mkdir -p "$LOGDIR"
+  if [ -f "$LOGDIR/api.pid" ] && kill -0 "$(cat "$LOGDIR/api.pid")" 2>/dev/null; then
+    echo "api already running (pid $(cat "$LOGDIR/api.pid"))"
+  else
+    (
+      cd "$WT/backend" || exit 1
+      nohup node src/index.js >>"$LOGDIR/api.log" 2>&1 &
+      echo $! >"$LOGDIR/api.pid"
+    )
+    echo "api started on :$PORT (pid $(cat "$LOGDIR/api.pid"))"
+  fi
+  if [ -f "$LOGDIR/vite.pid" ] && kill -0 "$(cat "$LOGDIR/vite.pid")" 2>/dev/null; then
+    echo "vite already running (pid $(cat "$LOGDIR/vite.pid"))"
+  else
+    (
+      cd "$WT/frontend" || exit 1
+      nohup npx vite --host 127.0.0.1 --port "$VITE_PORT" --strictPort \
+        >>"$LOGDIR/vite.log" 2>&1 &
+      echo $! >"$LOGDIR/vite.pid"
+    )
+    echo "vite started on :$VITE_PORT (pid $(cat "$LOGDIR/vite.pid"))"
+  fi
+  ;;
+
+down)
+  for s in api vite; do
+    if [ -f "$LOGDIR/$s.pid" ]; then
+      kill "$(cat "$LOGDIR/$s.pid")" 2>/dev/null && echo "$s stopped" ||
+        echo "$s was not running"
+      rm -f "$LOGDIR/$s.pid"
+    else
+      echo "$s: no pid file"
+    fi
+  done
+  ;;
+
+status)
+  for s in api vite; do
+    if [ -f "$LOGDIR/$s.pid" ] && kill -0 "$(cat "$LOGDIR/$s.pid")" 2>/dev/null; then
+      echo "$s: running (pid $(cat "$LOGDIR/$s.pid"))"
+    else
+      echo "$s: stopped"
+    fi
+  done
+  ;;
+
+accept)
+  # Acceptance harnesses live OUTSIDE the worktree, because `vcxo setup` asserts
+  # the frontend manifests are byte-identical to the dev clone's and a test
+  # dependency committed into the lane would invalidate the dependency reuse the
+  # whole lane stands on. They need the seed logins and lane URLs in the
+  # environment; assembling that by hand on a shell line is error-prone, and
+  # need_env already does it exactly once, correctly.
+  need_env
+  shift
+  suite="${1:-all}"
+  run_promo() { node "$BASE/promotions-acceptance.mjs"; }
+  run_kds() { node "$BASE/kds-acceptance.mjs"; }
+  run_authz() { node "$BASE/authz-acceptance.mjs"; }
+  # Browser journeys. Kept out of `all` deliberately: it drives a real Chromium
+  # and takes ~40s against the other three's ~10s combined, and it is the only
+  # suite that needs the Vite dev server up rather than just the API. Run it by
+  # name, or as `accept everything` when you want the lot.
+  run_journeys() {
+    POS_E2E_PLAYWRIGHT="${POS_E2E_PLAYWRIGHT:-/home/atc-noc/.npm/_npx/f0a362733743bae2/node_modules/playwright-core}" \
+      POS_E2E_CHROMIUM="${POS_E2E_CHROMIUM:-/home/atc-noc/.cache/ms-playwright/chromium-1117/chrome-linux/chrome}" \
+      node "$BASE/journeys.mjs"
+  }
+  case "$suite" in
+  promo) run_promo ;;
+  kds) run_kds ;;
+  authz) run_authz ;;
+  journeys) run_journeys ;;
+  everything)
+    rc=0
+    for s in promo kds authz journeys; do
+      echo "===== vcxo accept $s ====="
+      "run_$s" || rc=$?
+    done
+    exit "$rc"
+    ;;
+  all)
+    rc=0
+    for s in promo kds authz; do
+      echo "===== vcxo accept $s ====="
+      "run_$s" || rc=$?
+    done
+    exit "$rc"
+    ;;
+  *)
+    echo "usage: vcxo accept {promo|kds|authz|journeys|all|everything}"
+    exit 2
+    ;;
+  esac
+  ;;
+
+psql)
+  need_env
+  docker exec -it "$DBC" psql -U vexo_dev -d vcx_opui
+  ;;
+
+*) usage ;;
+esac
