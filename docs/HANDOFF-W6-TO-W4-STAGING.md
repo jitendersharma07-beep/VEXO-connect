@@ -1,13 +1,24 @@
 # Window 6 → Window 4 — staging must carry the store-scope fix (2026-09-26)
 
-**Short version: do not stage a candidate that predates
-`f672c564e5139ed76519375d186f24addbd64d36`.**
+**Short version: the candidate must contain the `resolveStoreInScope` fix —
+which in practice means `ef6bc79` — and the gate you run against it is
+`3bc70ce` on `x/identity-tests`.**
 
-That commit fixes a live authorisation defect in shared middleware
-(`backend/src/middleware/permissions.js`). Staging an older candidate would put
-a build on a public-ish host in which a store-pinned operator can write to a
-store they do not hold. Full analysis and evidence:
-`docs/HANDOFF-W6-TO-W1-STORESCOPE.md`.
+Without the fix, staging puts a build on a public-ish host in which a
+store-pinned operator can write to a store they do not hold. Full analysis and
+evidence: `docs/HANDOFF-W6-TO-W1-STORESCOPE.md` and
+`/home/atc-noc/vexo-connect-x/WINDOW-1-HANDOFF-IDENTITY.md`.
+
+| You need | Take |
+|---|---|
+| The fix | **`ef6bc79`** (tables lane) — pushed, already inside candidates |
+| The gate that proves it | **`3bc70ce`** on **`x/identity-tests`** — test-only, based on `16a22b0` (= main `728a57c` + `x/tables` `12fa573`) |
+
+**Use `x/identity-tests`, not `x/identity-coverage`.** The older branch carries a
+middleware hunk of my own that duplicates `ef6bc79` and would conflict with it;
+`3bc70ce` is the same two test files with no source change, already verified on a
+tables-line base at **75/75, exit 0**
+(`~/vcx-w6-ident/.runlogs/rebased-final.log`).
 
 ## What the defect does, in one paragraph
 
@@ -33,34 +44,41 @@ Expect a hit inside `resolveStoreInScope`. If instead you see
 `...branchWhereForScope(req.perm.scope),` spread into a flat `where`, the
 candidate is **unfixed — do not stage it**.
 
-**Do not test by SHA alone.** Two lanes fixed this independently:
-`f672c56` (Window 6, this lane) and **`ef6bc79`** (tables lane, a day earlier,
-already pushed and already inside candidates). They are functionally identical
-and only **one** will be in the candidate — most likely `ef6bc79`. An
-`--is-ancestor` check against my SHA will report `MISSING-FIX` on a candidate
-that is in fact correctly fixed. If you want a SHA check, test for either:
+By SHA, test for `ef6bc79` — that is the fix expected to be in the candidate:
 
 ```text
-git merge-base --is-ancestor ef6bc79 <candidate-sha> \
-  || git merge-base --is-ancestor f672c564e5139ed76519375d186f24addbd64d36 <candidate-sha> \
-  && echo CONTAINS-A-FIX || echo MISSING-FIX
+git merge-base --is-ancestor ef6bc79 <candidate-sha> && echo CONTAINS-FIX || echo MISSING-FIX
 ```
 
-The `grep` above is the more reliable check, because it tests the code rather
-than the ancestry.
+**Do not test for `f672c56`.** Two lanes fixed this independently and mine is the
+one being dropped, so a candidate can be correctly fixed while that SHA is absent.
+If W1 takes mine after all, the `grep` still passes and the SHA check above would
+report a false `MISSING-FIX` — which is why the `grep` is the more reliable of the
+two. It tests the code rather than the ancestry, and both remedies produce the
+same `AND` form.
 
 ## Gate to run against the staged candidate
 
-~13 seconds, self-contained fixtures, no seed data needed:
+The two test files come from **`3bc70ce`** (`x/identity-tests`). They add no
+source code, so they can be dropped onto any candidate that has the fix:
 
 ```text
+git cherry-pick -n 3bc70ce     # or copy the two files across
 npx vitest run tests/storeScopeResolution.test.js tests/orgIdentity.test.js
 ```
 
-Expect **75 passed**. A result of **8 failed | 8 passed** in
-`storeScopeResolution.test.js` is the exact signature of the middleware hunk
-having been dropped during integration — that is the control I ran deliberately
-against reverted code, so treat those numbers as diagnostic, not mysterious.
+~10 seconds, self-contained fixtures, no seed data needed. Expect **75 passed**.
+
+**If the candidate is missing `helpers/wipe.js`**, it does not contain main
+(`09127b1`) and the files will fail to load — that is a property of the
+candidate, not of the tests. `x/tables` (`12fa573`) and `x/tables-merged`
+(`55eb62e`) are both in that state; `16a22b0` is not.
+
+A result of **8 failed | 8 passed** in `storeScopeResolution.test.js` is the
+exact signature of a candidate **without** the fix. Those are the numbers I got
+deliberately, twice — once against my own reverted hunk and once against
+`ef6bc79`'s reverted line — so treat them as diagnostic, not mysterious. It means
+**do not stage this candidate**.
 
 ## Two things to expect on staging, so they are not misread as bugs
 
@@ -77,13 +95,20 @@ against reverted code, so treat those numbers as diagnostic, not mysterious.
 
 ## Push status
 
-The branch `x/identity-coverage` is **committed locally but not pushed** — push
-to the shared remote is denied on this box. If you need the commit and W1 has
-not published it yet, the exact command is:
+`ef6bc79` — the fix you actually need in the candidate — **is already pushed**
+(`github/x/tables`, `github/x/tables-merged`,
+`github/candidate/tables-20260926-0603`), so nothing blocks you there.
+
+My gate branch is **committed locally but not pushed** — push to the shared
+remote is denied on this box. If W1 has not published it by the time you need it:
 
 ```text
-git -C /home/atc-noc/vexo-connect-x-lanes/w6-identity push -u github x/identity-coverage
+git -C /home/atc-noc/vexo-connect-x-lanes/w6-identity push -u github x/identity-tests
 ```
+
+Its base `16a22b0` is also local-only, but both of that commit's parents are
+published, so the two test files apply cleanly to any candidate you build that
+contains main plus the tables lane.
 
 Production (`pos-prod`) was not touched by this lane: no deploy, no restart, no
 ownership claim taken.
