@@ -202,9 +202,11 @@ export const auditPlatformWrite = (req) => {
 // AND, not a spread, and the distinction is the whole function. For any scope
 // narrower than the whole tenant branchWhereForScope returns `{ id: { in: [...] } }`,
 // so `{ id: String(branchId), ..., ...fragment }` DELETED the `id` being checked
-// and asked instead "is there any store in this caller's scope?" — which is yes
-// for everyone who has a store at all. findFirst then returned SOME store the
-// caller holds instead of throwing, so:
+// — later keys win — and asked instead "is there any store in this caller's
+// scope?", which is yes for everyone who has a store at all. Every store-pinned
+// role resolves to a LIST, as does any role narrowed by a UserStoreAssignment,
+// so this was precisely the set of principals the check exists to constrain.
+// findFirst then returned SOME store the caller holds instead of throwing, so:
 //
 //   - Callers that use the RESOLVED branch.id wrote into the caller's own store
 //     while reporting success for the one they were asked about: terminals.js,
@@ -228,13 +230,24 @@ export const auditPlatformWrite = (req) => {
 //
 // The tenant boundary was never affected: companyId is a different key and
 // survived the spread, so this was never a cross-tenant leak.
+//
+// Both constraints are nested inside the AND rather than left as sibling keys,
+// which is the shape that does not regress: with `id` one level down, a future
+// top-level addition — including a re-introduced spread — cannot clobber it the
+// way the original did, whatever keys a new scope kind brings.
+//
+// x/tables and x/identity-coverage found this independently and fixed it in the
+// same release; the two spellings were equivalent and this merge keeps one.
+// Covered from both sides: tests/storeScopeGate.test.js (the route gate) and
+// tests/storeScopeResolution.test.js (this resolver).
 export const resolveStoreInScope = async (req, branchId) => {
   if (!branchId) throw notFound('Store not found');
   const branch = await prisma.branch.findFirst({
     where: {
-      id: String(branchId),
-      companyId: req.companyScope.id,
-      AND: [branchWhereForScope(req.perm.scope)],
+      AND: [
+        { id: String(branchId), companyId: req.companyScope.id },
+        branchWhereForScope(req.perm.scope),
+      ],
     },
   });
   if (!branch) throw notFound('Store not found');
