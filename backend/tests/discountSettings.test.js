@@ -17,52 +17,10 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 
 const app = createApp();
-
-const wipe = async () => {
-  // Shared test database: another suite's kitchen/print rows RESTRICT the
-  // station delete inside this wipe's Branch cascade.
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.kitchenCursor.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  // RESTRICT foreign keys: policies go before the rows they point at.
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
@@ -101,7 +59,7 @@ const getScreen = async (token) => {
 const effectiveFor = (screen, userId) => screen.effective.find((e) => e.userId === userId);
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
   const inADay = new Date(Date.now() + 86400e3);
 
@@ -163,7 +121,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 

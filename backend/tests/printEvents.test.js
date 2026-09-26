@@ -13,42 +13,10 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 
 const app = createApp();
-
-const wipe = async () => {
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'test-password-1';
 let company, companyB, branch, branchB, coffee;
@@ -86,7 +54,7 @@ const auditRows = (orderId, actions = ['ORDER_PRINT_REQUESTED', 'RECEIPT_REPRINT
   });
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
   const mkCompany = (name, slug) =>
     prisma.company.create({

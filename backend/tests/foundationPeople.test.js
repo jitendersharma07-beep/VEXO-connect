@@ -4,12 +4,6 @@
 //
 // Runs ONLY against a database whose name ends in _test — the guard below
 // refuses anything else, because the suite truncates every table.
-//
-// This file is the first to create rows in the foundation-lane tables
-// (regions, assignments, rules, grants). Their foreign keys are RESTRICT, and
-// the older test files' wipes do not know these tables exist — so this file
-// wipes them itself on the way in AND on the way out, leaving the shared test
-// database exactly as the next file expects to find it.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
@@ -38,6 +32,7 @@ process.env.APP_URL = 'https://portal.vexoconnect.test/pos';
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 
 // The code is read out of the message the sink actually received — never
@@ -73,56 +68,6 @@ const setPasswordByEmailedCode = async (email, password) => {
 
 const app = createApp();
 
-const wipe = async () => {
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  // Foundation-lane tables. Every FK is RESTRICT, so these go before the
-  // users, branches and companies they point at.
-  await prisma.supportAccessGrant.deleteMany();
-  await prisma.permissionRule.deleteMany();
-  await prisma.userStoreAssignment.deleteMany();
-  await prisma.device.deleteMany();
-  await prisma.terminal.deleteMany();
-  await prisma.branchBrand.deleteMany();
-  await prisma.brand.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.emailOutbox.deleteMany();
-  await prisma.authChallenge.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  // GST points at LegalEntity (RESTRICT), both point at Company; and a nested
-  // region cannot outlive its parent's delete, so children go first.
-  await prisma.gstRegistration.deleteMany();
-  await prisma.legalEntity.deleteMany();
-  await prisma.region.deleteMany({ where: { parentId: { not: null } } });
-  await prisma.region.deleteMany();
-  await prisma.company.deleteMany();
-};
-
 const PW = 'people-password-1';
 let companyX, companyY, companyZ, branchX1, branchX2, branchY1, regionX, regionY;
 let ownerX, adminX, cashierX1, cashierZ, atcAdmin;
@@ -139,7 +84,7 @@ const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const atcAuth = (companyId) => ({ ...auth(tokens.atc), 'x-pos-company': companyId });
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
 
   companyX = await prisma.company.create({
@@ -185,9 +130,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Leave the shared test database empty: the older files' wipes do not cover
-  // this lane's tables, and their RESTRICT keys would fail on our leftovers.
-  await wipe();
+  await wipeAll();
   await sink.close();
   await prisma.$disconnect();
 });

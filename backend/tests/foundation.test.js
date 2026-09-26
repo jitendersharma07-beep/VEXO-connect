@@ -29,6 +29,7 @@ process.env.APP_URL = 'https://portal.vexoconnect.test/pos';
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { env } = await import('../src/config/env.js');
 
@@ -47,60 +48,6 @@ const inviteTokenFor = (to) => {
   return token;
 };
 
-const wipe = async () => {
-  // Shared test database: another suite's kitchen/print rows RESTRICT the
-  // station delete inside this wipe's Branch cascade.
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.kitchenCursor.deleteMany();
-  // Before PosUser and Branch, which it references. This file never creates a
-  // DayClose, but it shares one test database with the files that do, and a
-  // wipe that only clears its own tables leaves the other file's rows holding
-  // a foreign key — so the failure lands here, in a suite that has nothing to
-  // do with cash counts.
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  // Before Order: PaymentIntent references it ON DELETE RESTRICT, so an
-  // order delete fails outright once any intent exists.
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  // Promotion tables before Order/Product/Category/Branch/Company — all four
-  // point at them with RESTRICT foreign keys.
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  // Before the three tables it points at. DiscountPolicy's foreign keys are
-  // RESTRICT on purpose — a policy must not survive, or silently widen,
-  // because its branch or user went away — so it has to go first here.
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
-
 const PW = 'test-password-1';
 let atcAdmin, companyA, companyB, companyC, branchA1, branchA2, branchB1;
 const tokens = {};
@@ -116,7 +63,7 @@ const login = async (email) => {
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
 
   companyA = await prisma.company.create({

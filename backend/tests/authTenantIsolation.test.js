@@ -48,6 +48,7 @@ process.env.APP_URL = 'https://portal.vexoconnect.test/pos';
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { createInvitation } = await import('../src/lib/invitations.js');
 
@@ -61,54 +62,6 @@ const A = 'owner.a@isolation.test';
 const B = 'owner.b@isolation.test';
 
 let companyA, companyB, ownerA, ownerB;
-
-// Same dependency order as the sibling accounts suites: every foreign key is
-// RESTRICT, so children go before the users, branches and companies they name.
-const wipe = async () => {
-  await prisma.emailOutbox.deleteMany();
-  await prisma.authChallenge.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.supportAccessGrant.deleteMany();
-  await prisma.permissionRule.deleteMany();
-  await prisma.userStoreAssignment.deleteMany();
-  await prisma.device.deleteMany();
-  await prisma.terminal.deleteMany();
-  await prisma.branchBrand.deleteMany();
-  await prisma.brand.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.gstRegistration.deleteMany();
-  await prisma.legalEntity.deleteMany();
-  await prisma.region.deleteMany({ where: { parentId: { not: null } } });
-  await prisma.region.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 // Read out of the message the sink actually received, never from the database:
 // a code the verifier accepts but the mailbox never saw would prove nothing
@@ -147,7 +100,7 @@ const authorizationFor = async (email) => {
 };
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const future = new Date(Date.now() + 86400e3);
 
   companyA = await prisma.company.create({
@@ -192,7 +145,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await wipe();
+  await wipeAll();
   await sink.close();
   await prisma.$disconnect();
 });

@@ -18,6 +18,7 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 // The capacity reservation, called directly by the concurrency test. Two
 // requests over HTTP do not overlap inside it (measured), so the lock it takes
@@ -30,60 +31,6 @@ const { reserveSlot } = await import('../src/api/routes/phoneOrders.js');
 const { lockSlot, slotBoundsFor, anchorOf } = await import('../src/lib/phoneOrders.js');
 
 const app = createApp();
-
-// This lane's tables go first: they reference Order, PosUser, Branch and
-// Company, all of which the shared wipe below deletes. The referential actions
-// are Cascade/SetNull precisely so a leftover row here cannot fail a peer
-// suite's teardown — this wipe is the belt to that design's braces.
-const wipe = async () => {
-  await prisma.phoneOrderEvent.deleteMany();
-  await prisma.phoneOrder.deleteMany();
-  await prisma.customerAddress.deleteMany();
-  await prisma.customer.deleteMany();
-  await prisma.branchServiceArea.deleteMany();
-  await prisma.branchHours.deleteMany();
-  await prisma.branchPrepCapacity.deleteMany();
-
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  // Tables that did not exist when this lane was branched. VC-102 promotions
-  // and modifiers, and the kitchen lane's print queue, all hang off the rows
-  // below them here, and every FK is RESTRICT — so they go first or the
-  // orderItem/kot/branch deletes fail. printJob points at Kot via sourceKotId,
-  // which is why the print block precedes the kot delete rather than following
-  // it.
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'Str0ng-Passw0rd!';
 const tokens = {};
@@ -154,7 +101,7 @@ const withCapacity = async (branchId, maxOrdersPerSlot, fn) => {
 };
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
   const future = new Date(Date.now() + 86400e3);
 
@@ -229,9 +176,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Leave nothing behind: this suite's rows would otherwise sit in a shared
-  // test DB across a full run.
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 

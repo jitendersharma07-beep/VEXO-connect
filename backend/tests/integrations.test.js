@@ -38,6 +38,7 @@ delete process.env.POS_INTEGRATION_WORKER_INTERVAL_MS;
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { overrideAdapter, clearAdapterOverrides } = await import('../src/lib/integrations/adapters/index.js');
 const { testAggregator, testLoyalty, testAccounting, testControl } =
@@ -59,72 +60,6 @@ const { fingerprint, runReport } = await import('../src/lib/integrations/loyalty
 const { applyState } = await import('../src/lib/integrations/aggregatorOrders.js');
 
 const app = createApp();
-
-// All twelve of this lane's tables, children before their parents. Traced from
-// the schema's FK actions rather than guessed: LoyaltyOperation → Customer and
-// AggregatorOrder → IntegrationOutlet are Restrict, so the order is load-bearing.
-// Separate from wipe() because afterAll needs this half on its own — see there.
-const wipeLane = async () => {
-  await prisma.loyaltyImportException.deleteMany();
-  await prisma.loyaltyImportRun.deleteMany();
-  await prisma.loyaltyOperation.deleteMany();
-  await prisma.loyaltyProfileLink.deleteMany();
-  await prisma.accountingPosting.deleteMany();
-  await prisma.accountingLedgerMap.deleteMany();
-  await prisma.integrationDiscrepancy.deleteMany();
-  await prisma.aggregatorOrder.deleteMany();
-  await prisma.integrationJob.deleteMany();
-  await prisma.integrationEvent.deleteMany();
-  await prisma.integrationOutlet.deleteMany();
-  await prisma.integrationConnection.deleteMany();
-};
-
-const wipe = async () => {
-  await wipeLane();
-  await prisma.phoneOrderEvent.deleteMany();
-  await prisma.phoneOrder.deleteMany();
-  await prisma.customerAddress.deleteMany();
-  await prisma.customer.deleteMany();
-  // Shared test database: the rest is the gateway suite's ordered list, for the
-  // same reason it gives — another suite's rows RESTRICT this one's deletes.
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.kitchenCursor.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
@@ -304,7 +239,7 @@ const stateChange = (externalOrderId, state, overrides = {}) => ({
 });
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
 
   // The doubles stand in for the three operable providers. resolveAdapter()
   // consults these before adapterFor(), and overrideAdapter() throws outside
@@ -367,16 +302,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   clearAdapterOverrides();
-  // Every other suite here wipes only the tables IT knows about, in beforeAll,
-  // and leaves its rows behind. That works only while no suite owns tables the
-  // others have never heard of. This one owns twelve, and their FKs into Branch
-  // and Customer are Restrict — so leaving them behind turns the next file's
-  // `customer.deleteMany()` into a foreign-key error. This file is the largest,
-  // so vitest's sequencer runs it first and the residue hits nearly everything
-  // after it: the full suite failed 17 of 23 files exactly this way before this
-  // hook existed. Clearing the lane's own rows on the way out restores the
-  // invariant the other files depend on, without editing any of them.
-  await wipeLane();
+  // Ordinary cleanup now. It was once this lane's twelve tables by hand, because
+  // their residue failed 17 of 23 files; wipeAll() makes that structural.
+  await wipeAll();
   await prisma.$disconnect();
 });
 
@@ -2771,11 +2699,11 @@ describe('historical loyalty import', () => {
     console.log(`[import] ${N} rows in ${seconds.toFixed(1)}s (${Math.round(N / seconds)} rows/s)`);
 
     // Cleared here, after every assertion, because 200,000 leftover rows are the
-    // NEXT run's problem: wipe() deletes them one table at a time in beforeAll,
+    // NEXT run's problem: wipeAll() deletes them table by table in beforeAll,
     // and at this volume that alone exceeded the 30s hook timeout and failed a
     // suite that had nothing to do with imports. Links first — the FK to Customer
     // is Cascade, so clearing the children up front leaves the trigger below
-    // nothing to find, which is also why wipe() orders them this way.
+    // nothing to find.
     const linksStarted = Date.now();
     await prisma.loyaltyProfileLink.deleteMany({ where: { connectionId: connId, externalCustomerId: { startsWith: 'P-' } } });
     const linkSeconds = (Date.now() - linksStarted) / 1000;

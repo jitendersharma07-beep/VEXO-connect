@@ -16,62 +16,10 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 
 const app = createApp();
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
-
-const wipe = async () => {
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.kitchenCursor.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  // Integration wipe-UNION, 2026-09-25. This file came from the kitchen lane,
-  // whose schema carried no promotions or modifiers, so its wipe has no
-  // statement for them. On the shared test database that is not optional:
-  // OrderItemModifier_orderItemId_fkey is RESTRICT, so a single residue row
-  // left by promotions or catalogModifiers makes the orderItem delete below
-  // throw inside beforeAll and takes every test in this file with it.
-  //
-  // It has not fired here yet only because vitest orders files by size
-  // descending and this one lands late in the run, behind the files that
-  // clean up after themselves. That is placement luck, not a contract — the
-  // same gap already fired in printJobs.test.js once two new tests grew that
-  // file and moved it up behind promotions. Completed here for the same
-  // reason: the wipe must not depend on where the file sorts.
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'test-password-1';
 let company, branch, coffeeId, dosaId, teaId;
@@ -116,7 +64,7 @@ const walkTo = async (id, target) => {
 };
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
   company = await prisma.company.create({
     data: {
@@ -170,9 +118,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Leave nothing behind: kitchen/print rows RESTRICT station deletion, so a
-  // later file's branch wipe would fail on this file's leftovers.
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 
@@ -324,8 +270,9 @@ describe('derived readiness + overview', () => {
 
 const wipeOrdersOnly = async () => {
   await prisma.kitchenItem.deleteMany();
-  // Same RESTRICT foreign key as in wipe() above: OrderItemModifier must go
-  // before the order lines it points at, or this helper throws mid-file.
+  // Hand-ordered on purpose: this clears orders MID-file and leaves the rest of
+  // the fixture standing, so it cannot use wipeAll(). OrderItemModifier's FK to
+  // OrderItem is RESTRICT, so it goes before the lines it points at.
   await prisma.orderItemModifier.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.kot.deleteMany();

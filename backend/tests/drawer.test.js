@@ -26,60 +26,12 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { COMMAND_TTL_SEC, DRAWER_CLAIM_TEXT } = await import('../src/lib/peripherals/drawer.js');
 
 const app = createApp();
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
-
-const wipe = async () => {
-  // Shared test database, and files run one after another: whatever an earlier
-  // suite left behind RESTRICTs a delete in here. This is the order the
-  // established suites use, plus this lane's device-command and merchant-account
-  // tables. Measured — without orderItemModifier the whole file aborts on a
-  // foreign key from rows it never created itself.
-  await prisma.deviceCommand.deleteMany();
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.kitchenCursor.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.paymentProviderAccount.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.device.deleteMany();
-  await prisma.terminal.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'test-password-1';
 
@@ -248,13 +200,13 @@ const freshCommand = async (shop, token) => {
 };
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   await buildShop(A, { slug: 'drawer-a', name: 'Drawer Cafe A', publicId: 'VC-DR-0001', code: 'DA' });
   await buildShop(B, { slug: 'drawer-b', name: 'Drawer Cafe B', publicId: 'VC-DR-0002', code: 'DB' });
 });
 
 afterAll(async () => {
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 

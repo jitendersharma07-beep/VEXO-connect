@@ -13,64 +13,12 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { ORDER_INCLUDE } = await import('../src/lib/orders.js');
 
 const app = createApp();
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
-
-const wipe = async () => {
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.kitchenCursor.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  // Integration wipe-UNION, 2026-09-25. This file came from the kitchen lane,
-  // whose schema had no promotions or modifiers, so its wipe had no statement
-  // for them. On the shared test database that is not optional:
-  // OrderItemModifier_orderItemId_fkey is RESTRICT, so one residue row from
-  // catalogModifiers or promotions makes the orderItem delete below throw in
-  // beforeAll and takes all 26 tests in this file with it.
-  //
-  // It was latent rather than absent before. Vitest orders files by size
-  // descending; this file sat at position 14 behind discountSettings, and
-  // nothing ahead of it left modifier rows. The two new tests grew the file,
-  // which moved it to position 8 directly behind promotions, and the same
-  // unchanged wipe then threw. File size is not a contract, so the wipe is
-  // completed here rather than left to depend on where the file lands.
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'test-password-1';
 let company, branch, burgerId, saladId;
@@ -108,7 +56,7 @@ const report = (jobId, body) =>
   request(app).post(`/api/print-agents/jobs/${jobId}/report`).set(agentAuth()).send(body);
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
   company = await prisma.company.create({
     data: {
@@ -157,9 +105,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Leave nothing behind: PrintTarget.stationId RESTRICTs station deletion,
-  // so a later file's branch wipe would fail on this file's leftovers.
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 

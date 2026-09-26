@@ -41,57 +41,11 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { istParts, slotBoundsFor } = await import('../src/lib/phoneOrders.js');
 
 const app = createApp();
-
-// Same order and same reasoning as phoneOrders.test.js's wipe: this lane's
-// tables reference Order, PosUser, Branch and Company, and every FK added since
-// this lane branched is RESTRICT, so the children go first.
-const wipe = async () => {
-  await prisma.phoneOrderEvent.deleteMany();
-  await prisma.phoneOrder.deleteMany();
-  await prisma.customerAddress.deleteMany();
-  await prisma.customer.deleteMany();
-  await prisma.branchServiceArea.deleteMany();
-  await prisma.branchHours.deleteMany();
-  await prisma.branchPrepCapacity.deleteMany();
-
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.printJob.deleteMany();
-  await prisma.printTarget.deleteMany();
-  await prisma.printAgent.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const PW = 'Str0ng-Passw0rd!';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
@@ -203,7 +157,7 @@ const reassign = (id, branchId) =>
     .send({ branchId, reason: 'hours coverage' });
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
 
   company = await prisma.company.create({
@@ -271,7 +225,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 

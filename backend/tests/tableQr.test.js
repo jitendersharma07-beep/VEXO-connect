@@ -28,6 +28,7 @@ process.env.POS_QR_BASE_URL = BASE;
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
 const { decodePng } = await import('./fixtures/qrDecoder.js');
 const { parsePdf, textsOf, gridsOf } = await import('./fixtures/pdfProbe.js');
@@ -38,58 +39,6 @@ const app = createApp();
 const PW = 'test-password-1';
 const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const guestHdr = (t) => ({ 'X-Guest-Token': t });
-
-const wipeFloorplan = async () => {
-  await prisma.floorLayoutTable.deleteMany();
-  await prisma.floorLayoutObject.deleteMany();
-  await prisma.floorLayout.deleteMany();
-  await prisma.diningArea.deleteMany();
-  await prisma.floor.deleteMany();
-};
-
-const wipe = async () => {
-  await wipeFloorplan();
-  await prisma.kitchenItem.deleteMany();
-  await prisma.kitchenRoute.deleteMany();
-  await prisma.kitchenStation.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  // Every QR foreign key is ON DELETE RESTRICT, deliberately: an order placed on
-  // a card keeps pointing at the card, the visit and the submission that produced
-  // it, which is the §7 promise to preserve history. So the teardown runs in
-  // dependency order, and the two references between Order and QrSubmission point
-  // opposite ways — a line names its submission, a submission names its order —
-  // which is why these four deletes are interleaved with the order deletes rather
-  // than grouped.
-  await prisma.qrSubmission.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.diningVisitGuest.deleteMany();
-  await prisma.diningVisit.deleteMany();
-  await prisma.tableQrCode.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.userInvitation.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 const tokens = {};
 let companyA, companyB, branchA1, branchA2, branchB1;
@@ -144,7 +93,7 @@ const seedMenu = async (companyId, label) => {
 };
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
 
   companyA = await prisma.company.create({
@@ -237,7 +186,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await wipe();
+  await wipeAll();
   await prisma.$disconnect();
 });
 

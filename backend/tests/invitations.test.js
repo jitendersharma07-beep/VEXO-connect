@@ -27,6 +27,7 @@ process.env.APP_URL = 'https://portal.vexoconnect.test/pos';
 
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
+const { wipeAll } = await import('./helpers/wipe.js');
 const { hashPassword, hashSecret } = await import('../src/lib/crypto.js');
 const { createInvitation, acceptInvitation } = await import('../src/lib/invitations.js');
 
@@ -38,52 +39,6 @@ const NEW_PW = 'chosen-by-me-99';
 let companyA, companyB, companySuspended;
 let storeA1, storeA2, storeB1, regionA;
 let ownerA, adminA, managerA, cashierA, ownerB, ownerSuspended;
-
-const wipe = async () => {
-  await prisma.userInvitation.deleteMany();
-  await prisma.emailOutbox.deleteMany();
-  await prisma.authChallenge.deleteMany();
-  await prisma.dayClose.deleteMany();
-  await prisma.refund.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.gatewayWebhookEvent.deleteMany();
-  await prisma.paymentIntent.deleteMany();
-  await prisma.promotionRedemption.deleteMany();
-  await prisma.promotionStore.deleteMany();
-  await prisma.promotionItemRule.deleteMany();
-  await prisma.promotion.deleteMany();
-  await prisma.orderItemModifier.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.kot.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.invoiceCounter.deleteMany();
-  await prisma.modifierOption.deleteMany();
-  await prisma.modifierGroup.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.taxRate.deleteMany();
-  await prisma.diningTable.deleteMany();
-  await prisma.posAuditLog.deleteMany();
-  await prisma.posSession.deleteMany();
-  await prisma.licenseAddon.deleteMany();
-  await prisma.license.deleteMany();
-  await prisma.discountPolicy.deleteMany();
-  await prisma.supportAccessGrant.deleteMany();
-  await prisma.permissionRule.deleteMany();
-  await prisma.userStoreAssignment.deleteMany();
-  await prisma.device.deleteMany();
-  await prisma.terminal.deleteMany();
-  await prisma.branchBrand.deleteMany();
-  await prisma.brand.deleteMany();
-  await prisma.posUser.deleteMany();
-  await prisma.branch.deleteMany();
-  await prisma.gstRegistration.deleteMany();
-  await prisma.legalEntity.deleteMany();
-  await prisma.region.deleteMany({ where: { parentId: { not: null } } });
-  await prisma.region.deleteMany();
-  await prisma.company.deleteMany();
-};
 
 // The decoded text/plain body of the last message to an address.
 const bodyOfLastMail = (to) => {
@@ -132,7 +87,7 @@ const clearCooldown = (id) =>
 let ownerAToken;
 
 beforeAll(async () => {
-  await wipe();
+  await wipeAll();
   const passwordHash = await hashPassword(PW);
   const future = new Date(Date.now() + 86400e3);
 
@@ -211,9 +166,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  // Leave the shared test database empty: the older files' wipes do not cover
-  // this lane's tables, and their RESTRICT keys would fail on our leftovers.
-  await wipe();
+  await wipeAll();
   await sink.close();
   await prisma.$disconnect();
 });
