@@ -5661,6 +5661,21 @@ model LoyaltyProfileLink {
   @@unique([connectionId, customerId])
   @@index([connectionId, normalizedPhone])
   @@index([companyId])
+  // Covers the `customer` cascade above, and exists for that reason alone.
+  //
+  // Deleting a Customer makes Postgres run the referential-integrity trigger
+  // `DELETE FROM "LoyaltyProfileLink" WHERE "customerId" = $1 AND "companyId" = $2`.
+  // None of the four indexes above can serve it: both uniques lead with
+  // `connectionId`, and `@@index([companyId])` matches every row of a single
+  // tenant, so the trigger degrades to a full child scan PER DELETED PARENT.
+  // At 100,000 customers that is quadratic — it overran a 900s budget in
+  // integrations.test.js, left 200,000 rows behind, and then failed the next
+  // files when their 30s `beforeAll` wipe inherited them.
+  //
+  // Leading on `customerId` is what makes it usable: that is the selective
+  // column in the trigger's predicate, and `companyId` second keeps the lookup
+  // index-only.
+  @@index([customerId, companyId])
 }
 
 enum LoyaltyOpKind {

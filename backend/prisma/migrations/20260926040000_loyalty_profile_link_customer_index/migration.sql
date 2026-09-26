@@ -1,0 +1,30 @@
+-- Index the child side of the Customer -> LoyaltyProfileLink cascade.
+--
+-- WHAT IT FIXES. `LoyaltyProfileLink.customer` is a composite FK
+-- ([customerId, companyId] -> Customer[id, companyId]) declared onDelete:
+-- Cascade. Deleting a Customer therefore makes Postgres run the
+-- referential-integrity trigger
+--
+--     DELETE FROM "LoyaltyProfileLink" WHERE "customerId" = $1 AND "companyId" = $2
+--
+-- and until now no index could serve it. Both uniques on the table lead with
+-- "connectionId", and "LoyaltyProfileLink_companyId_idx" matches every row
+-- belonging to a tenant, so the trigger degraded to a full child scan for each
+-- deleted parent. That is quadratic in the number of customers removed: it
+-- overran the 900s budget of the 100,000-row case in integrations.test.js, left
+-- ~200,000 rows behind, and then failed unrelated files whose 30s `beforeAll`
+-- wipe inherited them.
+--
+-- Leading on "customerId" is the point — it is the selective column in the
+-- trigger's predicate. "companyId" second keeps the lookup index-only.
+--
+-- PRODUCTION NOTE. This is a plain CREATE INDEX, consistent with every other
+-- migration in this repo, and it takes a SHARE lock: reads continue, writes to
+-- LoyaltyProfileLink block for the duration. That is acceptable while the table
+-- is small. Before this runs against a large production table, convert it to
+-- CREATE INDEX CONCURRENTLY and run it outside the migration transaction, since
+-- Prisma wraps migrations in one and CONCURRENTLY cannot run inside a
+-- transaction. Production migrations need the owner's explicit approval anyway.
+
+-- CreateIndex
+CREATE INDEX "LoyaltyProfileLink_customerId_companyId_idx" ON "LoyaltyProfileLink"("customerId", "companyId");
