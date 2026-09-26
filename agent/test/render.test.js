@@ -31,8 +31,12 @@ const render = (doc, opts) => (
     ? renderReceipt(doc, opts) : renderKot(doc, opts)
 );
 
-test('no line runs off the paper, at 48 columns or 32', () => {
-  for (const w of [48, 32]) {
+// 42 is here because it is a width the real printer may actually be: 72 mm printable
+// is 576 dots at 203 dpi or 512 at 180 dpi, and a Font A character is 12 dots wide.
+// 32 stays as a narrow boundary case for the wrapping itself, not as a paper size —
+// no supported roll is 32 columns.
+test('no line runs off the paper, at 48, 42 or 32 columns', () => {
+  for (const w of [48, 42, 32]) {
     for (const [name, doc] of Object.entries(ALL)) {
       for (const line of linesOf(render(doc, { widthChars: w }))) {
         assert.ok(

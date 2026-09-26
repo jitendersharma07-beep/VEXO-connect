@@ -14,8 +14,8 @@ result forward from a prior session's prose.
 end to end against the real server. The independent audit of the combined
 candidate is NOT complete. This is not an approval of the release, and this
 document does not give one.** Two release blockers are open (§6), one of which is
-not in this lane's code; three areas of the audit remit are NOT VERIFIED and three
-more only PARTIAL (§7g).
+not in this lane's code; parts of the audit remit are unmeasured, one of them because
+the feature is not in the candidate at all (§7g, §7h).
 
 Four separate figures. The first two are this lane's own work; the last two are the
 candidate's code, measured by this lane's audit:
@@ -30,7 +30,7 @@ candidate's code, measured by this lane's audit:
 None of the four is a project figure, and none may be combined with other lanes'
 totals or turned into a percentage of the whole. The agent is one component, and
 the last two rows are somebody else's code that this lane merely measured — a green
-result there says those suites pass, not that the release is ready. The 434 in §7g
+result there says those suites pass, not that the release is ready. The 434 in §7h
 is the count of candidate tests this audit executed, which is a statement about
 audit coverage and nothing else.
 
@@ -84,12 +84,17 @@ No database, no network, no printer. Zero skips — there is no conditional skip
 any of the four files, so the count is the whole suite and not a subset that
 looked green.
 
+Re-run at lane `HEAD` after the 42-column change below: still `67/67`, exit 0, zero
+skipped. The wall time was 32 s rather than the logged 8.1 s, on a box carrying two
+peer certification runs — which is worth stating as a measured fact about the box,
+not the suite.
+
 | File | What it defends |
 |---|---|
 | `test/delivery.test.js` | the three outcomes against a fake printer that closes cleanly, holds the connection open, resets mid-stream, accepts a prefix then closes, or reads nothing |
 | `test/semantics.test.js` | the runner's judgements: agent stopping, expired leases, duplicate jobs in one claim, a report that throws, crash recovery from the journal |
 | `test/client.test.js` | the bytes of the conversation — an omitted `drawerOpen` is absent from the JSON, a `false` one is present, the credential travels as one bearer token and never in a body |
-| `test/render.test.js` | what reaches the roll, at 48 columns and at 32 |
+| `test/render.test.js` | what reaches the roll, at **48, 42 and 32** columns. 42 was added after D7: it is the second width the real print head may be (512 dots ÷ 12), and the over-run check had been covering only 48 and 32. Same 67 tests — one existing case widened its loop, so no figure moved |
 
 ## 2b. End-to-end seam — executed, 7/7, exit 0
 
@@ -241,12 +246,13 @@ and the rows below say which parts are which rather than averaging them.
 | Customer display | PASS | `customerDisplay` 13/13. §7b |
 | Recovery behaviour | PASS | `accountRecovery` 33/33 and `accountRecoveryOutage` 5/5. §7b |
 | **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7e |
-| Fresh-migration evidence | PARTIAL | 41 migrations applied to an **empty** database, twice over (§2b at 40, §7a at 41), both logged. Never applied to a populated one — §7g |
-| Release images and build context | PARTIAL | the recipes audited statically, two findings (A4, A5) and three things done right. **No image was built.** §7f |
-| Defects returned to the responsible window | PASS | A1–A5 in §7c–§7f, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
-| Captain / Kiosk | **NOT VERIFIED** | no suite in the candidate carries either name. §7g |
-| Stock-effect / billing reconciliation beyond the gateway | **NOT VERIFIED** | §7g |
-| Restore-from-backup evidence | **NOT VERIFIED** | §7g |
+| Fresh-migration evidence | PARTIAL | 41 migrations applied to an **empty** database, twice over (§2b at 40, §7a at 41), both logged. Never applied to a populated one — §7h |
+| Release images and build context | PARTIAL | the backend image **built (53.7 s), booted, and answered `GET /health` with `200`** — the first such evidence in this program. Four findings (A4, A5, A7, A8) and three things done right. No frontend image was built, and one health probe is not a release. §7f |
+| **Captain** | **PARTIAL** | Captain is a role, not a feature: a six-permission bundle, no route or screen. The bundle exists and is store-pinned; **`CAPTAIN` appears in 0 of the candidate's 52 test files**, including its `order.item.void` grant. §7g, A6 |
+| Defects returned to the responsible window | PASS | A1–A8 in §7c–§7g, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
+| **Kiosk** | **NOT VERIFIABLE** | not a coverage gap — Kiosk is **absent from the candidate**. Two incidental prose matches in the whole commit, no route, role, enum value or screen. A scope answer is owed by Window 1; this lane cannot record a pass. §7g, A6 |
+| Stock-effect / billing reconciliation beyond the gateway | **NOT VERIFIED** | §7h |
+| Restore-from-backup evidence | **NOT VERIFIED** | nothing at all was produced here. §7h |
 
 ## 4. Not executed, and exactly why
 
@@ -450,10 +456,11 @@ Not blockers of this lane's making, but open and unresolved:
   measurement: the certification run in flight at the time of writing does not
   contain the index it exists to certify, and its tree changed 36 seconds after it
   started (§7c, A1).
-- **Three areas of Part 4 are NOT VERIFIED** — Captain/Kiosk, stock-effect and
-  billing reconciliation beyond the gateway, and restore-from-backup evidence — with
-  three more PARTIAL, including licence enforcement and the release images (§7g).
-  They are recorded as gaps, not as passes, and this lane's independent acceptance is
+- **Part 4 is not finished** (§7h). Restore-from-backup has produced nothing at all.
+  **Kiosk cannot be verified because it is not in the candidate** (§7g, A6) — a scope
+  answer Window 1 owes, not a test this lane can write. Licence enforcement, Captain,
+  the release images and the fresh-migration evidence are PARTIAL and say why. They
+  are recorded as gaps, not as passes, and this lane's independent acceptance is
   therefore **incomplete**.
 
 **This lane does not approve production.** Two blockers are open, the candidate is
@@ -615,10 +622,29 @@ hold if something were wired to it. Nothing is. Anyone reading `14 passed` as
 "module licensing is enforced" would be wrong, and the test's own author has
 already left the note saying to delete that block the day it stops being true.
 
-### 7f. A4, A5 — the release image and build context
+### 7f. A4, A5, A7, A8 — the release image, built and booted
 
-Static, from `d625370`'s bytes. Nothing was built; these are properties of the
-recipes, and the recipes are the part of a release nobody had inspected.
+The recipes were the part of a release nobody had inspected, so they were read
+first. Then the backend image was **actually built and actually started**, because a
+recipe that reads correctly and an image that runs are different claims.
+
+```bash
+cd /home/atc-noc/w6-audit/cand-d625370/backend && docker build -t w6-audit-cand-backend:d625370 .
+```
+
+| | |
+|---|---|
+| Build | succeeded, **53.7 s**, 13 layers, 162 MiB (`169,953,997` bytes) |
+| Boot | `docker run` against `vcx_w6_audit_test`, `PORT=5099` — `VEXO Connect API listening on 0.0.0.0:5099` |
+| `GET /health` | **`HTTP 200`**, `{"status":"ok","service":"atc-pos-api"}` — which also proves Prisma loaded its engine and reached Postgres, so the `-slim` `openssl` install is correct in practice and not just in the recipe |
+| Image contents | **no `.env`, no `*.md`, no `_proof` asset** under `/app`. The backend `.dockerignore` (`node_modules`, `tests`, `*.md`, `.env*`) does its job |
+| `NODE_ENV` | `production`, set in the image |
+| Node inside the image | **`v20.20.2`** — A4, now measured rather than inferred |
+| Effective user | **`uid=0(root) gid=0(root)`** — A7 |
+
+That is the first end-to-end evidence in this program that the API image builds,
+starts, and serves. It is **not** a release certification: one container, one health
+probe, an empty database, and no frontend image was built (§7h).
 
 **Good, and worth recording because both are easy to get wrong:**
 
@@ -637,30 +663,66 @@ recipes, and the recipes are the part of a release nobody had inspected.
 
 | # | Finding | Severity |
 |---|---|---|
-| A4 | **The release image runs Node 20; every test result in this program was produced on Node 22, and nothing pins either.** `backend/Dockerfile` and `frontend/Dockerfile.prod` are both `node:20-bookworm-slim`. This box's Node is `v22.23.2`, and the audit container `v22.23.3`. There is no `engines` field in `package.json` and no `.nvmrc`. So the runtime that ships is one major version from the runtime every figure in every window's record was measured on, and no file in the repo would notice if they diverged further. | Medium — a real gap between what is tested and what runs, cheap to close with `engines` |
+| A4 | **The release image runs Node 20; every test result in this program was produced on Node 22, and nothing pins either.** `backend/Dockerfile` and `frontend/Dockerfile.prod` are both `node:20-bookworm-slim`; the built image reports **`v20.20.2`**. This box's Node is `v22.23.2`, and the audit container `v22.23.3`. There is no `engines` field in `backend/package.json` and no `.nvmrc`. So the runtime that ships is one major version from the runtime every figure in every window's record was measured on, and no file in the repo would notice if they diverged further. A worked example sits in the same repository: `agent/package.json` carries `"engines": {"node": ">=20.11"}`. | Medium — a real gap between what is tested and what runs, cheap to close with `engines` |
 | A5 | **`frontend/Dockerfile.prod` is `COPY . .`**, so the whole frontend context rests on `.dockerignore`, where `*.md` matches the **context root only** — nested paths need `**/*.md`. Four documents therefore enter the build context: `docs/CASHIER-GUIDE.md`, `docs/HARDWARE-CHECKLIST.md`, `docs/PRINTER-TEST-SESSION.md`, `docs/TOUCHUI-HANDOVER.md`. **This is hygiene, not exposure** — the final stage is `nginx:1.27-alpine` and copies only `/app/dist`, so none of them reaches the shipped image. Recorded because the same root-only rule applies to `.env*`, where the consequence would not be hygiene. No nested `.env` exists today. | Low as it stands; the `.env*` case is the reason to fix it |
+| A7 | **The API container runs as `root`.** There is no `USER` directive in `backend/Dockerfile`, so the process that serves every authenticated route, holds the database connection and decrypts gateway credentials runs as `uid=0`, and `/app` is `root:root`. Confirmed at runtime inside the running container, not inferred from the recipe. The base image already ships an unused `node` user at `uid=1000` for exactly this. Two lines — `chown` the app directory and `USER node` — close it. | **Medium-high.** It does not by itself let anyone in, but it removes the last containment step from every other defect: any RCE or path-traversal in a dependency becomes root in the container |
+| A8 | **`EXPOSE 5000`, but the app listens on `5010`.** `env.js` is `Number(process.env.PORT \|\| 5010)` and nothing under `backend/` sets `PORT=5000` anywhere. `EXPOSE` is documentation rather than enforcement, so nothing breaks today — but it is the number a reader, an orchestrator's default port mapping, or a health-check template will take, and it is wrong by ten. | Low — but it is a one-character class of bug that costs an hour at the wrong moment |
 
-### 7g. What this audit does not cover
+### 7g. A6 — Captain and Kiosk, and what "no suite carries that name" actually meant
+
+An earlier revision of this document recorded Captain/Kiosk as NOT VERIFIED because
+no test file carries either name. That was true and useless: it described this
+lane's search, not the candidate. Searched properly, across the whole commit rather
+than the extracted backend — the archive holds `backend/` only, so a grep for
+`frontend/src` there returns nothing and would have been a false negative I nearly
+recorded as a fact.
+
+```bash
+git grep -il -e captain -e kiosk d625370          # whole commit, not a working copy
+grep -l 'CAPTAIN' backend/tests/*.test.js         # 0 of 52 files
+```
+
+**Captain is a role, not a feature.** It exists in four places and no more: the
+`PosRole` enum (`schema.prisma:28`, *"one store; takes orders, cannot bill"*), the
+migration that adds the value, a permission bundle at `permissions.js:323` —
+`order.read`, `order.create`, `order.item.void`, `kot.read`, `table.read`,
+`catalog.read` — plus `STORE_PINNED_ROLES`, and a label and description in
+`frontend/src/lib/roles.js`. There is no Captain route, screen or workflow; it is a
+permission subset over the existing order and KOT routes. So there is nothing
+Captain-shaped to certify beyond the bundle itself.
+
+**Kiosk does not exist in this candidate at all.** Two matches in the entire commit,
+both incidental prose: a comment in `displayClient.js` about `localStorage`
+surviving "kiosk reloads", and a line in `HARDWARE-CHECKLIST.md` saying silent
+printing "needs kiosk-mode flags or a local print agent. Neither is built." No
+route, no role, no enum value, no screen.
+
+| # | Finding | Severity |
+|---|---|---|
+| A6 | **`CAPTAIN` appears in `0` of the candidate's 52 test files.** The role is assignable, store-pinned, labelled in the UI and carries a six-permission bundle including `order.item.void` — the right to void a line on someone else's order — and no test ever logs in as one. The bundle is also the only role that grants `order.*` without any payment permission, so *"takes orders, cannot bill"* is asserted nowhere. **Separately: the remit asks for Captain/Kiosk verification and Kiosk is not in the candidate.** That is a scope question for Window 1, not a defect — but it cannot be verified, and it must not be recorded as a pass. | Medium for the untested void permission; the Kiosk gap is a scope answer owed |
+
+### 7h. What this audit does not cover
 
 Recorded so the gaps are not read as passes. None of the following was verified by
 this lane, and this section will not claim it:
 
-- **Captain / Kiosk.** No suite in the candidate carries either name, so this was
-  not merely unrun — there is nothing here to run, and whether that is a naming
-  question or a coverage gap is Window 1's to answer.
+- **Kiosk, because there is nothing in the candidate to verify** (§7g, A6), and
+  **Captain beyond its permission bundle**, which no test exercises.
 - **Stock-effect and billing reconciliation outside the gateway suite.** The
   `inventory*` and `reporting*` families were not run. `reportingExceptions` was,
   and only because a fix was owed there.
-- **Restore-from-backup, and the built images themselves.** §7f inspects the build
-  *recipes* statically. No image was built, no container started from one, and no
-  backup was restored.
+- **Restore-from-backup.** No backup was taken and none restored. This is the one
+  remit item on which this lane has produced nothing at all.
+- **The frontend image, and the backend image beyond one health probe.** The backend
+  image was built, started and answered `GET /health` (§7f) — but that is one
+  container against an empty database, not a release exercised through it. No
+  frontend image was built, so nothing here speaks to the bundle as served.
 - **The 41 migrations against a populated database.** They were applied to an empty
   one twice — 40 at §2b, 41 at §7a, the 41st being `d625370`'s own index — and the
   §7b batch reused §7a's database. A migration that is safe on an empty schema and slow or
   unsafe on a loaded one is exactly the class of defect `d625370` was written for,
   and its own migration file says it must become `CREATE INDEX CONCURRENTLY`
   before it runs on a large production table. Unverified either way here.
-- **Anything about the frontend bundle as served.** Not in this lane's reach.
 
 Two peer certification runs were in flight throughout (Window 5 on
 `vcx_integration_test`, another on `vcx_cert625_test`) and this lane deliberately
@@ -698,6 +760,10 @@ true rather than asserting it, and both DSNs in it are safe to read.
                                and the pg_indexes line proving the schema
   w6-audit-part4-20260926.log  the §7b coverage batch — 11 files, 281/281, exit 0,
                                190.27s, same extracted tree and private database
+  w6-audit-stock.sh            the §7i run: stock effects, reporting reconciliation
+                               and billing beyond the gateway. Its header records the
+                               two files it deliberately omits, and why
+  w6-audit-stock-20260926.log  its output
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
