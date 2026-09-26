@@ -2,8 +2,12 @@
 //
 // This file exists because of a defect found while writing the brand-store
 // tests in orgIdentity.test.js, and it is kept separate because the defect is
-// not in any one router — it is in the middleware that ten call sites across
-// nine routers depend on.
+// not in any one router — it is in the middleware that eleven call sites across
+// nine files depend on: eight routers plus lib/userAuthority.js, with a twelfth
+// call inside requireStoreParam in the middleware itself. Counted from
+// `git grep -n resolveStoreInScope -- 'backend/src/**'`; an earlier revision of
+// this header said "ten call sites across nine routers", which undercounted and
+// mislabelled the lib.
 //
 // THE DEFECT (middleware/permissions.js, resolveStoreInScope)
 //
@@ -31,6 +35,13 @@
 // writes, wherever a route discards the returned branch and then trusts the
 // caller-supplied id — brands.js:147 and permissions.js:359 both do, and the
 // second is the one that hands out scope a caller does not itself hold.
+//
+// THE FIX is ef6bc79 (tables lane), which ANDs the scope fragment instead of
+// spreading it. This file was written independently against main, where the
+// defect was still live, and is kept because the remedy is one line while the
+// reasoning above is the part that stops it coming back. It passes against
+// ef6bc79 unchanged, and reverting that one line turns 8 of these 16 red — so it
+// guards the fix rather than merely agreeing with it.
 //
 // Runs ONLY against a database whose name ends in _test.
 
