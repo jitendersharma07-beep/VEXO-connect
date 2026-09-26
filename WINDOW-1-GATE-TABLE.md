@@ -36,7 +36,7 @@ verification ledger.
 | 7 | Real inbox delivery | **PENDING-OWNER** | Software is complete and race-safe. No provider credential exists on the box, so the endpoint answers 503 by design. **A second, independent blocker found since: `vexoconnect.com` publishes a malformed SPF record (leading space, so strict verifiers select no policy at all) that hard-fails from an IP which is not the domain's own, and a DMARC record with no `p=` tag. Needs no secret to fix, and must be fixed BEFORE the credential is spent or the test measures the wrong thing. See §A** |
 | 8 | Key custody (CR-3) | **FAIL as designed / PASS as built** — **PENDING-OWNER** | The key works. It is on the one host its own design document forbids. **Untouched by this lane on purpose. See §B** |
 | 9 | Backup destination deletion protection (CR-4) | **NOT VERIFIED** — **PENDING-OWNER** | Destination is reached with a general-purpose SSH key, so anything that can log in as the operator can also delete the off-host copies. **See §C** |
-| 10 | **Owner can recover after losing `atc-noc`** | **NO** | Follows from gate 8 and is *not* closed by gates 3 or 4. This is the honest headline |
+| 10 | **Owner can recover after losing `atc-noc`** | **NO** | Follows from gate 8 and is *not* closed by gates 3 or 4. This is the honest headline. **Two things changed on 2026-09-26, neither of which makes it a yes. See §E** |
 
 Gates 1–6 are as good as this lane can make them without an owner action.
 Gates 7–10 cannot be closed by testing at all — each needs something only the
@@ -327,6 +327,66 @@ Publishing a staging hostname needs DNS, `sudo`, and a certificate issued with a
 deploy hook that reloads the proxy. It is prepared and **not applied**. A
 frontend rebuild is *not* needed for it — the bundle derives its API base and its
 display origin at runtime, which was checked rather than assumed.
+
+---
+
+## §E — Host-loss recovery, gate 10 (added 2026-09-26)
+
+Gate 10 still answers **NO**, and the reason is unchanged: **the key**. What
+follows are two corrections to the *supporting* picture, one of which removes a
+real single point of failure and one of which is a warning about a document.
+
+### E1 — The recovery tooling lived only on the host it recovers from
+
+`restore_from_archive.py` and the five scripts beside it are what produced the
+22/22 evidence in gate 4. Until this lane's commit they were untracked, at
+`/home/atc-noc/vcx-cloudready-local/`, on the production host — the one machine
+whose loss they exist to survive. They are now committed at `deploy/recovery/`,
+beside `deploy/pos-backup.mjs`, with a README.
+
+Scoped honestly, because the first version of this paragraph overstated it: the
+**runbook** `docs/BACKUP-RESTORE.md` was always committed and the restore chain
+is standard tooling, so a hand restore was never at risk. What was at risk was
+the ability to **verify** one — the 22-assertion reconciliation against the
+manifest read from inside the archive. Losing that means a future operator can
+restore but cannot demonstrate the restore is complete, which is the difference
+between a recovery and a hope.
+
+Verified before committing: no credential appears in any of the six. Postgres is
+reached by `docker exec` (container trust), GPG always prompts, and the rehearsal
+path uses an isolated keyring with a throwaway key. All six pass `py_compile` /
+`bash -n`.
+
+### E2 — `docs/BACKUP-RESTORE.md` says, in three places, that no off-host copy exists
+
+It is three days stale and it is the document an operator opens during exactly
+the event it is wrong about. Lines **368**, **394–398** and **410–414** state
+that dumps and database share one disk, that "No off-host copy" is the top gap,
+and that §8 is "written, not yet run".
+
+All three are false as of 2026-09-23 16:18:39Z. `~/atc-backups/offhost-state/offhost.log`
+records **five consecutive successful sends**, most recently
+`pos-prod-20260925T211428Z.tar.gpg` last night, and this repo's own
+`docs/BACKUP-EVIDENCE-RECONCILIATION.md` already carries the receipts. One of
+those archives has been decrypted and restored 22/22 from ciphertext.
+
+Not edited here — that file belongs to the off-host owner. The finding,
+evidence and suggested replacement text are in
+`PEER-NOTE-BACKUP-RUNBOOK-STALE.md`. I read the local log only; **20.20.20.57
+was not accessed**, per the standing note that it is the prohibited VM lab.
+
+### Why none of this makes gate 10 a yes
+
+| | |
+|---|---|
+| Archives survive host loss? | **Yes** — five shipped, one proven restorable |
+| Verification tooling survives? | **Yes, now** — E1 |
+| Runbook survives? | **Yes**, but currently misdescribes the above — E2 |
+| **The key survives?** | **No.** Secret half is in the keyring on the source host — §B |
+| Site loss? | **No.** The destination is on the same /24 — a replica, not a DR copy |
+
+The key is the binding constraint and it is owner-action. Everything else is now
+either fixed or written down.
 
 ---
 
