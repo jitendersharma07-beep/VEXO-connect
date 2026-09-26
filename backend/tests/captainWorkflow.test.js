@@ -48,6 +48,22 @@ if (!/_test(\?|$)/.test(process.env.DATABASE_URL || '')) {
   throw new Error('captainWorkflow.test.js requires a DATABASE_URL ending in _test');
 }
 
+// Set BEFORE app.js is imported: config/env.js reads process.env at module load
+// and app.js mounts the guest QR router only when a customer-facing origin is
+// configured. tableQr.test.js:27 sets the same variable at its own top level —
+// and vitest.config.js has fileParallelism:false, so every file shares one Node
+// process. This file therefore passed inside a full-suite run and failed when
+// run alone: no origin, no guest router, 501 instead of 201 on issuing a code.
+// Measured on this file, 2026-09-26: 33/35 without the line, 35/35 with it
+// (/tmp/w3-repro-noqrbase.log). Found by Window 1 on the PR head; the W3
+// runners hid it because w3test.sh/w3gate.sh source a lane .env that exports
+// POS_QR_BASE_URL, so no green run of mine could have caught it.
+//
+// `||`, not a bare assignment, for two reasons: it leaves a runner that sets its
+// own origin alone, and gateway.test.js:724 deliberately CLEARS this variable
+// inside a scoped withEnv — clobbering it here would break that file instead.
+process.env.POS_QR_BASE_URL = process.env.POS_QR_BASE_URL || 'http://qr.test.local:5631';
+
 const { createApp } = await import('../src/app.js');
 const { prisma } = await import('../src/lib/prisma.js');
 const { hashPassword } = await import('../src/lib/crypto.js');
