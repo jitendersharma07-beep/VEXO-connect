@@ -76,6 +76,12 @@ const wipe = async () => {
   await prisma.posSession.deleteMany();
   await prisma.license.deleteMany();
   await prisma.discountPolicy.deleteMany();
+  // Before the users, not after: UserInvitation.createdById and .acceptedById are
+  // both ON DELETE RESTRICT, so a single invitation row left by a sibling file
+  // makes posUser.deleteMany() throw and takes this whole file down. `cf9c4a0`
+  // added this line to the other 14 suites; this file did not exist on main yet,
+  // so it was missed. Order-dependent, which is why it passes in isolation.
+  await prisma.userInvitation.deleteMany();
   await prisma.posUser.deleteMany();
   await prisma.branch.deleteMany();
   await prisma.company.deleteMany();

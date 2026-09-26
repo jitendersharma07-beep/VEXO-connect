@@ -1,8 +1,14 @@
 # W5 — Experience: floor, QR, Captain, reporting
 
-Status as of **2026-09-25**. Everything below is either a measured result with
+Status as of **2026-09-26**. Everything below is either a measured result with
 the log that produced it, or an explicitly named gap. Where a claim could not be
 tested, it says so rather than being left to a green suite to imply.
+
+**Read §11 before quoting any number in §1.** §11 is the integration run on the
+merge candidate, and it withdraws part of its own result: the full backend suite
+in that run is **inconclusive**, because another window was working uncommitted in
+this worktree while it executed. The 130 browser/HTTP checks survive and §11
+derives why. §11.4 is a real defect in this branch that the merge exposed.
 
 ---
 
@@ -25,6 +31,7 @@ either. Every browser harness ends its scenarios by reading the **database**.
 |---|---|---|
 | Backend baseline (`vcxe test`) | **1652 / 1655** at `77242fe` | `evidence/baseline-77242fe.log` |
 | W5's own backend suite (`captainWorkflow.test.js`) | **29 / 29** | `evidence/captain-acceptance-PASS.log` |
+| …and its wipe helper was **wrong** — see §11.4 | one line added | `evidence/captainworkflow-postwipefix.log` |
 | QR / card / PDF over HTTP (`qr-evidence.sh`) | **22 / 22** | `evidence/qr-evidence-20260925.log` |
 | Staff browser acceptance (`browser-acceptance.mjs`) | **36 / 36** | `evidence/browser-acceptance-20260925.log` |
 | Guest phone journey (`guest-phone-acceptance.mjs`) | **36 / 36** | `evidence/guest-phone-acceptance-20260925.log` |
@@ -32,6 +39,16 @@ either. Every browser harness ends its scenarios by reading the **database**.
 
 Evidence root: `~/vcx-experience-local/evidence/`. Screenshots in
 `evidence/shots/` — 22 of them, named per scenario.
+
+That 29 / 29 was measured before the wipe fix, and it is left standing rather
+than restated, because it is what the log says. What the fix changes is not an
+assertion outcome but whether the file reaches its first assertion at all: it
+deletes rows this suite never creates and never inspects. It has not been re-run
+in its 29-test W5-only form since, because the lane worktree is currently
+occupied by another window (§11.5); it *has* been run, green, as part of the
+combined 35-test file that window is building — `evidence/captainworkflow-postwipefix.log`,
+**35 / 35** — and the failure it prevents is demonstrated directly against the
+live schema in §11.4.
 
 The three baseline failures are classified in `WINDOW-5-BACKEND-REQUEST.md`:
 two are load artefacts that pass in isolation (proven, with logs), one is a real
@@ -550,3 +567,216 @@ promise until you read what it points at.
 `main` is not a push target and was not advanced. Coordination with W1 on merge
 order is still open — §5. **Merge is gated on integration and Captain-workflow
 evidence being green on the candidate, not on the merge box being green.**
+---
+
+## 11. Integration run on the merge candidate — and why half of it does not count
+
+The merge box being green says the diff applies. It says nothing about whether
+the result runs. This section is the run, and the correction to it.
+
+**Headline: the 130 browser/HTTP acceptance checks are valid for `49e1791`. The
+full backend vitest suite is NOT — it was contaminated by another window's
+in-flight work and is reported here as INCONCLUSIVE, not as a pass.** The
+separation is not a technicality; it is the whole result, and it is derived
+below rather than asserted.
+
+### What was tested
+
+Not a merge invented locally — GitHub's own computed merge commit, fetched and
+checked out detached so no branch and no ref moved:
+
+| | |
+|---|---|
+| Candidate | `49e1791` = `refs/pull/5/merge` |
+| Its parents | `d625370` (live `main`) + `78ea0ae` (this branch's head) |
+| Checked out | detached HEAD in the lane worktree; `x/experience` untouched, nothing pushed |
+| Date | 2026-09-26 |
+
+### What the merge brings in from `main`, and what it needed
+
+`77242fe..d625370` is six commits. Only one of them changes anything this lane
+has to act on:
+
+| From `main` | Effect here |
+|---|---|
+| `20260926040000_loyalty_profile_link_customer_index` | **A migration.** Plain `CREATE INDEX` on `LoyaltyProfileLink(customerId, companyId)`, to serve the `Customer` → cascade delete trigger. Had to be applied before anything ran. |
+| `schema.prisma` | The matching `@@index`, plus the comment explaining it. `prisma generate` re-run. |
+| `exceptions.js` (`02ee253`) | The §6 fix. Closes a dependency rather than creating one. |
+| 14 `backend/tests/*.test.js`, +1 line each | `cf9c4a0`'s invitation cleanup before the user wipe. See §11.4 — this is where a real defect in *this* branch came from. |
+| `WINDOW-2/3-HANDOFF.md`, `docs/*` | Documentation. |
+
+**No `package.json` or lockfile changed** in that range — checked explicitly,
+because `vcxe setup` asserts byte-identity with the dev clone and the lane's
+entire dependency-reuse design rests on it. It still passes, so no install was
+needed.
+
+The migration was applied with `prisma migrate deploy` — never `migrate dev`,
+which would try to reset a database — and then **verified by reading
+`pg_indexes`** rather than by believing the migrator's own success message:
+
+```
+select indexname from pg_indexes where tablename='LoyaltyProfileLink';
+  ...
+  LoyaltyProfileLink_customerId_companyId_idx      <-- present
+```
+
+### 11.1 The tree was not clean, and who noticed
+
+The Window 3 session (Captain / table-service authorisation) was working
+**uncommitted in this same lane worktree** while the run was in progress, and
+left an additive note saying so in the evidence directory. That note is correct
+about the contamination and is the reason this section exists in this form.
+
+At the moment `vcxe test` started, `git status` in the worktree was not empty:
+
+| File | Written | Owner | Relative to the vitest start (05:24:42Z) |
+|---|---|---|---|
+| `backend/src/middleware/rbac.js` | 05:14:23Z | W3 | 10 min before |
+| `backend/src/api/routes/orders.js` | 05:15:46Z | W3 | 9 min before |
+| `backend/src/api/routes/tableQr.js` | 05:16:23Z | W3 | 8 min before |
+| `backend/tests/captainWorkflow.test.js` | 05:25:50Z | **W5 file, W3 rewrite** | **68 s after — during the run** |
+| `backend/src/middleware/permissions.js` | 05:30:20Z | W3 | **5.6 min after — during the run** |
+| `frontend/src/lib/pos.js` | 05:35:06Z | **W5 file, W3 rewrite** | 10 min after |
+| `docs/completion/W3-CAPTAIN.md` | 05:34Z | W3, untracked | — |
+
+Three of those change authorisation on every order route. So the vitest run
+measured `49e1791` plus an in-flight change to the exact subsystem this
+branch's assertions are about, with two files moving mid-flight.
+
+**Verdict on the backend vitest log as a certification of `49e1791`:
+INCONCLUSIVE.** Not "failed" — inconclusive, which is a different and weaker
+claim than either a pass or a failure, and the only honest one available.
+
+### 11.2 Why the 130 acceptance checks DO still describe `49e1791`
+
+This is the part worth being precise about, because the tempting move is to
+throw the whole session away, and that would discard good evidence as
+carelessly as keeping all of it would keep bad evidence.
+
+Two mechanisms decide it, and they point the same way:
+
+- **The backend has no hot reload.** The API on `127.0.0.1:5561` serves whatever
+  source it read at process start. The process serving the browser runs was
+  started before W3's first edit at 05:14:23Z, so it was executing clean
+  `49e1791` backend source throughout. The proof is in the results themselves:
+  `POST /api/orders` as a captain returned **403**, which is only reachable from
+  pre-fix code — W3's change makes the same call `201`. A stale server is
+  normally a trap; here it is what pins the measurement to the commit.
+- **Vite does hot-reload, but there was nothing to reload.** The only frontend
+  file touched, `frontend/src/lib/pos.js`, was written at **05:35:06Z** — after
+  the last of the four suites finished at ~05:23Z. And the change is comment-only
+  (see §11.5).
+
+| Suite | Finished | Latest contaminating write before it | Verdict |
+|---|---|---|---|
+| Staff browser acceptance | 05:20:43Z | none reaching a running process | **valid, 36 / 36** |
+| Guest phone journey (390×844) | 05:22Z | none | **valid, 36 / 36** |
+| Reporting / HQ / customer display | 05:23Z | none | **valid, 36 / 36** |
+| QR / card / PDF over HTTP | 05:23Z | none | **valid, 22 / 22** |
+| Backend vitest, all 52 files | 05:48Z | two files *during* the run | **INCONCLUSIVE** |
+
+So: 130 acceptance checks green on the remote's own merge commit. The backend
+suite is not part of that claim.
+
+### 11.3 What the inconclusive log is still good for
+
+It is not certification, but it is not noise either. Vitest did not run
+alphabetically: `tests/integrations.test.js` went first and took 752,048 ms,
+finishing at ~05:37:14Z, after every edit had landed. Every other file therefore
+started against a tree that had been stable for seven minutes. And one file was
+red:
+
+```
+❯ tests/captainWorkflow.test.js (35 tests | 4 failed | 6 skipped) 6116ms
+  × opens a dine-in order on its own table WITHOUT naming a branch
+    → POS_CONFLICT "Table \"T1\" already has an open order": expected 409 to be 201
+  × adds, changes and removes draft lines        → Cannot read properties of undefined (reading 'id')
+  × sends the order to the kitchen               → Cannot read properties of undefined (reading 'id')
+  × and CAN read — the order, tickets and floor  → Cannot read properties of undefined (reading 'id')
+```
+
+One failure and three consequences of it: the first test never got an order, so
+the following three dereferenced `undefined`. The cause is a table-name
+collision between journeys sharing one `T1` at `branchA1` — an artefact of the
+interim rewrite, already addressed in the version on disk by giving each journey
+its own table. **Reported to W3 rather than fixed here**: the file is W5's, but
+those assertions are W3's change and inverting somebody else's gate test on
+their behalf is how two windows end up disagreeing in code instead of in
+writing.
+
+Note what the failure mode is *not*. `POS_CONFLICT 409` on a route that is
+supposed to answer `201` reads, at a glance, exactly like "the captain is
+refused" — the thing this file exists to measure. It is not; it is leftover
+state. A test whose failure impersonates its own subject is worth a comment in
+the file, and now has one.
+
+### 11.4 A real defect in this branch, found by the merge
+
+Independent of the contamination, and the one durable engineering result of the
+exercise. `cf9c4a0` on `main` added one line to the wipe helper of **14** test
+files:
+
+```js
+await prisma.userInvitation.deleteMany();   // before posUser, not after
+```
+
+`backend/tests/captainWorkflow.test.js` is this branch's own file and was not on
+`main` when that sweep happened, so it never got the line. It is now added, in
+the canonical position, with a comment.
+
+Why it matters, proved rather than reasoned — a control run inside a transaction
+and rolled back, so nothing persisted:
+
+```
+=== A. what the wipe did before the fix ===
+DELETE FROM "PosUser" WHERE id='wipectl-u';
+ERROR:  update or delete on table "PosUser" violates foreign key constraint
+        "UserInvitation_createdById_fkey" on table "UserInvitation"
+DETAIL:  Key (id)=(wipectl-u) is still referenced from table "UserInvitation".
+
+=== B. with the missing line first ===
+DELETE FROM "UserInvitation" ...   DELETE 1
+DELETE FROM "PosUser" ...          DELETE 1
+```
+
+`UserInvitation.createdById` and `.acceptedById` are both `ON DELETE RESTRICT`
+— read off the live table, not off `schema.prisma`. So a single invitation row
+left behind by a sibling suite makes `posUser.deleteMany()` throw and takes this
+entire file down before its first assertion.
+
+**It is order-dependent, which is why it had never been seen.** In the run above
+`invitations.test.js` happened to execute *after* `captainWorkflow.test.js`, so
+there were no invitation rows to trip over. Reverse that ordering — which
+nothing guarantees — and the file dies in `beforeAll`. A green suite was
+concealing it, and only a merge with `main` made it findable at all.
+
+### 11.5 Two W5-owned files were rewritten by another window
+
+`backend/tests/captainWorkflow.test.js` and `frontend/src/lib/pos.js` both
+belong to this branch and both were edited by W3, uncommitted, in the shared
+worktree. Recorded, not reverted — the edits are correct in substance: they
+replace this window's "the server refuses a captain" comments and assertions
+with their opposite, which is exactly what should happen now that §1/§2 is
+closed. `pos.js` is comment-only and `canSell` is still not widened to CAPTAIN,
+which is the decision this window asked for.
+
+The mechanical consequence is the one to be careful about: **this window's
+commits were built without touching that worktree** (blob → tree →
+`commit-tree` → `update-ref` with a compare-and-swap), so none of W3's
+uncommitted work can be swept into a W5 commit. That hazard is not theoretical
+in this organisation.
+
+### What this run still does not prove
+
+- **It does not certify `49e1791` as a whole.** 130 acceptance checks do; the
+  backend suite does not, and no amount of rereading the log changes that.
+- **The captain assertions in it are already historical.** They were measured
+  against a build that refuses a captain. W3 has since changed that, so a clean
+  re-run on a tree containing their commit should be expected to invert those
+  two results, and the harness expectations must be updated deliberately rather
+  than "restored" — there is a comment in `browser-acceptance.mjs` saying so.
+- **No customer phone journey.** `POS_QR_BASE_URL` is still a loopback origin;
+  that is unchanged by merging.
+- The suites were run by the window that wrote them. That is evidence, not
+  certification — the integration owner re-running them is the point of handing
+  over the commands.
