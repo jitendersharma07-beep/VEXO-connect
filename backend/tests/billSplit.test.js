@@ -531,6 +531,17 @@ describe('splitting a bill into separate cheques', () => {
     expect(rows[0].entityId).toBe(order.id);
     expect(rows[0].meta.chequeId).toBe(res.body.split.chequeId);
     expect(rows[0].meta.movedItemIds).toEqual([lines[1].id]);
+
+    // Who, not just what — which is what this test is named for, and what every
+    // assertion above this line failed to check. `lib/audit.js` derives all
+    // three actor columns from `req.user` with `?? null` fallbacks, and all
+    // three are nullable in the schema, so an auth context that stopped
+    // resolving would write NULLs here and leave the assertions above green. An
+    // audit row for a money action that cannot say who moved the money is the
+    // one thing it exists to do.
+    expect(rows[0].actorId).toBe(staff.managerA1.id);
+    expect(rows[0].actorEmail).toBe('manager.a1@split.local');
+    expect(rows[0].actorRole).toBe('BRANCH_MANAGER');
   });
 
   it('gives each cheque its own invoice number at billing', async () => {
