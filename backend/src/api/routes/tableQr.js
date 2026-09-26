@@ -22,7 +22,12 @@ import {
   isBranchPinned,
   branchIdFilterFor,
 } from '../../middleware/auth.js';
-import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
+import { requireUsableLicense, denyPlatformSelling } from '../../middleware/rbac.js';
+import {
+  loadPermissionContext,
+  requireAction,
+  scopedBranchIdWhere,
+} from '../../middleware/permissions.js';
 import { qrToPng } from '../../lib/qr/png.js';
 import { renderQrCardsPdf } from '../../lib/qr/pdf.js';
 import { buildCard, newJoinCode, newQrToken, placeLineOf, qrUrlFor } from '../../lib/qr/cards.js';
@@ -30,17 +35,29 @@ import { serializeOrder } from '../../lib/orders.js';
 import { acceptSubmission, rejectSubmission, closeVisit } from '../../lib/qr/visits.js';
 
 const router = Router();
-router.use(requirePosAuth, resolveCompanyScope);
+// loadPermissionContext for every route: the reads below are scoped by the
+// caller's stores just as the writes are.
+router.use(requirePosAuth, resolveCompanyScope, loadPermissionContext);
 
 // Issuing and revoking a card is a store-management action, not a till action: a
 // cashier must not be able to mint a new ordering URL or take a table's card out
 // of service. Accepting what a guest sent IS a till action, and is gated
 // separately below.
-const canManage = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER'), requireUsableLicense];
-const canOperate = [
-  requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER', 'CASHIER'),
-  requireUsableLicense,
-];
+//
+// Both are now actions from lib/permissions.js rather than role lists. The lists
+// these replace excluded CAPTAIN, which is the role that actually works a floor:
+// `table.write` still keeps a captain (and a cashier) away from minting cards,
+// while `order.create` lets one accept a guest basket — which is literally an
+// order-creating act, since acceptSubmission cuts the KOT.
+//
+// denyPlatformSelling for the same reason as in orders.js: accepting a
+// submission trades on a customer's till, and POS_SUPER_ADMIN holds every
+// action in the model.
+const canManage = [requireUsableLicense, denyPlatformSelling, requireAction('table.write')];
+const canOperate = [requireUsableLicense, denyPlatformSelling, requireAction('order.create')];
+// Reading the cards and the floor's visits. `table.read` is in every floor-going
+// baseline, CAPTAIN included.
+const canRead = [requireAction('table.read')];
 
 const OPEN_STATUSES = ['OPEN', 'BILLED'];
 const MAX_BULK_CARDS = 300;
@@ -123,7 +140,7 @@ const loadTable = async (req, tableId) => {
     where: {
       id: tableId,
       branch: { companyId: req.companyScope.id },
-      ...branchIdFilterFor(req.user),
+      AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
     },
     include: {
       branch: { select: { id: true, name: true, city: true, status: true, companyId: true } },
@@ -138,13 +155,13 @@ const loadTable = async (req, tableId) => {
 
 router.get(
   '/',
-  requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER', 'CASHIER'),
+  ...canRead,
   asyncHandler(async (req, res) => {
     const branchId = isBranchPinned(req.user) ? req.user.branchId : req.query.branchId || undefined;
     const tables = await prisma.diningTable.findMany({
       where: {
         branch: { companyId: req.companyScope.id },
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
         ...(branchId ? { branchId } : {}),
       },
       include: {
@@ -205,7 +222,7 @@ router.post(
         where: {
           id: { in: unique },
           branch: { companyId: req.companyScope.id },
-          ...branchIdFilterFor(req.user),
+          AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
         },
         include: { placements: publishedPlacement },
       });
@@ -409,7 +426,7 @@ const slug = (s) =>
 
 router.get(
   '/:id/png',
-  requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER', 'CASHIER'),
+  ...canRead,
   asyncHandler(async (req, res) => {
     const { scale = 8, quiet = 4 } = pngQuery.parse(req.query);
     const qr = await loadQrForPrint(req);
@@ -460,7 +477,7 @@ router.get(
     const tables = await prisma.diningTable.findMany({
       where: {
         branch: { companyId: req.companyScope.id },
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
         ...(branchId ? { branchId } : {}),
         ...(wanted ? { id: { in: wanted } } : { status: 'ACTIVE' }),
       },
@@ -577,7 +594,7 @@ router.get(
       where: {
         companyId: req.companyScope.id,
         ...(branchId ? { branchId } : {}),
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
         status,
       },
       include: { guests: { select: { id: true } }, orders: { select: { id: true } } },
@@ -604,7 +621,7 @@ router.post(
       where: {
         id: req.params.id,
         companyId: req.companyScope.id,
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
       },
     });
     if (!visit) throw notFound('Visit not found');
@@ -631,7 +648,7 @@ router.get(
       where: {
         companyId: req.companyScope.id,
         ...(branchId ? { branchId } : {}),
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
         status,
       },
       include: { table: { select: { name: true } } },
@@ -656,7 +673,7 @@ router.post(
       where: {
         id: req.params.id,
         companyId: req.companyScope.id,
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
       },
     });
     if (!submission) throw notFound('Submission not found');
@@ -676,7 +693,7 @@ router.post(
       where: {
         id: req.params.id,
         companyId: req.companyScope.id,
-        ...branchIdFilterFor(req.user),
+        AND: [branchIdFilterFor(req.user), scopedBranchIdWhere(req)],
       },
     });
     if (!submission) throw notFound('Submission not found');

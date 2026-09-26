@@ -30,7 +30,7 @@ import {
   isBranchPinned,
   branchIdFilterFor,
 } from '../../middleware/auth.js';
-import { requireRole, requireUsableLicense } from '../../middleware/rbac.js';
+import { requireRole, requireUsableLicense, denyPlatformSelling } from '../../middleware/rbac.js';
 import {
   loadPermissionContext,
   requireAction,
@@ -81,10 +81,67 @@ const router = Router();
 // deviceContext AFTER resolveCompanyScope — a device token can only be judged
 // once the tenant it must belong to is known. It is optional: a browser till
 // that sends no token passes straight through and attributes less.
-router.use(requirePosAuth, resolveCompanyScope, deviceContext);
+// loadPermissionContext runs for EVERY route in this file, reads included. It
+// resolves two things: which actions the caller holds, and which stores they
+// hold them in. The read routes need the second as much as the writes do —
+// loadOrder is shared, and a store scope enforced only on the write paths is a
+// scope a GET walks straight around.
+router.use(requirePosAuth, resolveCompanyScope, deviceContext, loadPermissionContext);
 
-const operate = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER', 'CASHIER'), requireUsableLicense];
+// Authorisation here is an ACTION resolved through lib/permissions.js, not a
+// role list repeated per route.
+//
+// The two lists that used to live on this line could not be reconciled with the
+// baselines that file declares. CAPTAIN holds `order.create` and was refused by
+// every route in this file; REGIONAL_MANAGER holds the entire till set and
+// appeared in neither list. The baselines are the policy — a role list beside
+// them is a second, silent policy that drifts. See docs/completion/W3-CAPTAIN.md.
+//
+// denyPlatformSelling is not decoration. The old role lists kept VEXO operators
+// off the till by never naming them; POS_SUPER_ADMIN's baseline holds every
+// action, so an action gate alone would have granted what omission refused.
+const till = (action) => [requireUsableLicense, denyPlatformSelling, requireAction(action)];
+
+// Taking the order — open it, change it while nothing is sent, and fire it at
+// the kitchen. One action, because it is one job: a captain who may add a line
+// but not send it cannot serve a table. There is no `kot.send` key to be more
+// precise with, and inventing one is a policy addition, not a wiring fix.
+const takeOrder = till('order.create');
+const issueBill = till('order.bill');
+const collect = till('payment.record');
+
+// Discount authority is deliberately absent from the action model — see the
+// header of lib/permissions.js. It has its own engine: DiscountPolicy, resolved
+// COMPANY → BRANCH → USER, and ROLE_FLOOR in lib/discountPolicy.js denies any
+// role with no stored row, CAPTAIN included. So this gate only asks "may you
+// work this order at all"; guardDiscountChange decides whether money may come
+// off it, and a captain is refused there unless the tenant wrote them a policy.
+const changeDiscount = till('order.create');
+
+// Reversals, and money leaving the business, keep the manager role list.
+//
+// `order.void`, `refund.issue` and `order.item.void` are all declared in
+// lib/permissions.js and all sit in baselines wider than this list — but no
+// route has ever enforced any of the three. Wiring them up would GRANT three
+// revenue-affecting actions to CASHIER and CAPTAIN in the same commit that
+// unblocks the captain journey. That is a policy decision, not a wiring fix, so
+// it is written down in docs/completion/W3-CAPTAIN.md §2 and left to Window 1
+// and the owner. The behaviour of these five routes is unchanged.
 const managerUp = [requireRole('CUSTOMER_OWNER', 'BRANCH_MANAGER'), requireUsableLicense];
+
+// Is this store inside the caller's resolved scope? Free for the two common
+// shapes; a region costs one indexed lookup.
+const branchInScope = async (req, branchId) => {
+  const scope = req.perm?.scope;
+  if (!scope) return false;
+  if (scope.kind === 'ALL' || scope.kind === 'COMPANY') return true;
+  if (scope.kind === 'LIST') return scope.branchIds.includes(branchId);
+  const hit = await prisma.branch.findFirst({
+    where: { id: branchId, companyId: req.companyScope.id, regionId: scope.regionId },
+    select: { id: true },
+  });
+  return Boolean(hit);
+};
 
 const money2 = z
   .number()
@@ -102,6 +159,15 @@ const loadOrder = async (req, include = undefined) => {
   if (isBranchPinned(req.user) && order.branchId !== req.user.branchId) {
     throw forbidden('Your role is limited to your own branch');
   }
+  // Every other role is scoped by lib/permissions.js, which knows about store
+  // ASSIGNMENTS and so about roles BRANCH_PINNED_ROLES above has never heard of.
+  // CAPTAIN is the one that matters: store-pinned in the permission model,
+  // absent from that set, and therefore — before this line — able to read and
+  // change an order at any store in the tenant by naming its id.
+  //
+  // 404 rather than 403, matching the answer another tenant's id gets, so the
+  // reply cannot be used to map somebody else's estate.
+  if (!(await branchInScope(req, order.branchId))) throw notFound('Order not found');
   // Every route in this file that touches an existing order comes through here,
   // so the device's store scope is enforced once rather than remembered twenty
   // times. A device at one store cannot add items to, bill, collect on, refund
@@ -339,16 +405,28 @@ const createSchema = z.object({
 
 router.post(
   '/',
-  ...operate,
+  ...takeOrder,
   asyncHandler(async (req, res) => {
     const data = createSchema.parse(req.body);
 
-    const branchId = isBranchPinned(req.user) ? req.user.branchId : data.branchId;
+    // The store has to be one the caller actually holds. isBranchPinned covers
+    // the two legacy pinned roles; the permission scope covers every role,
+    // including CAPTAIN — which is store-pinned in the permission model, absent
+    // from BRANCH_PINNED_ROLES, and would otherwise be free to open an order at
+    // any store in the tenant just by naming its id.
+    //
+    // A single-store caller need not send branchId at all: their scope names it.
+    const scope = req.perm.scope;
+    const onlyStore =
+      scope.kind === 'LIST' && scope.branchIds.length === 1 ? scope.branchIds[0] : null;
+    const branchId = isBranchPinned(req.user) ? req.user.branchId : (data.branchId ?? onlyStore);
     if (!branchId) throw badRequest('branchId is required', 'branchId');
     const branch = await prisma.branch.findFirst({
       where: { id: branchId, companyId: req.companyScope.id },
     });
     if (!branch) throw notFound('Branch not found');
+    // Same reply as a store in another tenant — see loadOrder.
+    if (!(await branchInScope(req, branch.id))) throw notFound('Branch not found');
     if (branch.status !== 'ACTIVE') throw conflict('Branch is closed');
     // A device credential is scoped to one store. Checked here, server-side,
     // against the branch the route actually resolved — not against whatever the
@@ -417,7 +495,7 @@ router.post(
 
 router.post(
   '/:id/items',
-  ...operate,
+  ...takeOrder,
   asyncHandler(async (req, res) => {
     const body = z
       .object({
@@ -515,7 +593,7 @@ const loadItem = async (req, order) => {
 
 router.patch(
   '/:id/items/:itemId',
-  ...operate,
+  ...takeOrder,
   asyncHandler(async (req, res) => {
     const body = z
       .object({
@@ -616,7 +694,7 @@ router.patch(
 
 router.delete(
   '/:id/items/:itemId',
-  ...operate,
+  ...takeOrder,
   asyncHandler(async (req, res) => {
     const body = z.object({ approval: approvalSchema }).parse(req.body ?? {});
     const order = await loadOrder(req, { items: true });
@@ -753,7 +831,7 @@ const publicKot = (kot, order) => ({
 
 router.post(
   '/:id/kot',
-  ...operate,
+  ...takeOrder,
   asyncHandler(async (req, res) => {
     const order = await loadOrder(req, { table: { select: { name: true } } });
     assertOpen(order);
@@ -811,7 +889,7 @@ router.get(
 
 router.post(
   '/:id/discount',
-  ...operate,
+  ...changeDiscount,
   asyncHandler(async (req, res) => {
     const body = z
       .object({ type: z.enum(['FLAT', 'PERCENT']), value: money2, approval: approvalSchema })
@@ -902,7 +980,7 @@ router.post(
 
 router.delete(
   '/:id/discount',
-  ...operate,
+  ...changeDiscount,
   asyncHandler(async (req, res) => {
     const order = await loadOrder(req, { items: true });
     assertOpen(order);
@@ -951,7 +1029,7 @@ router.delete(
 // voided and when the basket stops qualifying; a partial refund does NOT claw
 // back a promotion — the audit row on each reversal says which of these fired.
 
-const promoGate = [requireUsableLicense, loadPermissionContext, requireAction('promo.apply')];
+const promoGate = [requireUsableLicense, requireAction('promo.apply')];
 
 const promoLinesOf = (items) =>
   items
@@ -1139,7 +1217,7 @@ router.delete(
 
 router.post(
   '/:id/bill',
-  ...operate,
+  ...issueBill,
   asyncHandler(async (req, res) => {
     const order = await loadOrder(req, { branch: true, items: { select: { status: true } } });
     assertOpen(order);
@@ -1235,7 +1313,7 @@ router.post(
 
 router.post(
   '/:id/payments',
-  ...operate,
+  ...collect,
   asyncHandler(async (req, res) => {
     const body = z
       .object({
@@ -1489,7 +1567,7 @@ const accountForIntent = async (intent, order, provider) => {
 // reservation that no longer exists.
 router.post(
   '/:id/payment-intents',
-  ...operate,
+  ...collect,
   asyncHandler(async (req, res) => {
     const adapter = getAdapter();
     const order = await loadOrder(req);
@@ -1642,7 +1720,7 @@ const handoffSchema = z.object({
 // first is a way to walk out with the goods.
 router.post(
   '/:id/payment-intents/:intentId/handoff',
-  ...operate,
+  ...collect,
   asyncHandler(async (req, res) => {
     const adapter = getAdapter();
     const body = handoffSchema.parse(req.body ?? {});
@@ -2069,7 +2147,7 @@ const terminalStartSchema = z.object({
 // it got any is the status route's question.
 router.post(
   '/:id/terminal-payments',
-  ...operate,
+  ...collect,
   asyncHandler(async (req, res) => {
     // Throws 501 naming the missing dependency when the configured connector is
     // a registered-but-unimplemented vendor — so a till is told "Pine Labs needs
@@ -2239,7 +2317,7 @@ router.post(
 //     a second poll collides on the unique index rather than settling again.
 router.post(
   '/:id/terminal-payments/:intentId/status',
-  ...operate,
+  ...collect,
   asyncHandler(async (req, res) => {
     const connector = getConnector();
     const order = await loadOrder(req);
@@ -2507,7 +2585,7 @@ router.post(
 // by tapping.
 router.post(
   '/:id/terminal-payments/:intentId/cancel',
-  ...operate,
+  ...collect,
   asyncHandler(async (req, res) => {
     const connector = getConnector();
     const order = await loadOrder(req);
@@ -3094,7 +3172,7 @@ router.get(
 //    on the till's money path.
 router.post(
   '/:id/print-events',
-  ...operate,
+  ...takeOrder,
   asyncHandler(async (req, res) => {
     const body = z
       .object({

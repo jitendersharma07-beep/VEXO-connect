@@ -104,8 +104,20 @@ const hasSupportGrant = async (userId, companyId) => {
 // The gate. `requireAction('org.gst.write')` and nothing else — the route does
 // not repeat the role list, so adding a role never means auditing every router
 // for the ones that forgot.
+//
+// The returned handler carries `.posAction`, which is how the enforcement map
+// is MEASURED rather than grepped. lib/permissions.js claims in its own header
+// that "an action listed here is enforced somewhere"; a grep cannot check that
+// claim, because gates are built through helpers (`till('order.bill')`) and
+// from tables, so the key is a variable at the call site and the literal never
+// appears next to `requireAction`. Worse, a substring search matches the
+// action name in a COMMENT and reports a dead key as live — which is exactly
+// how the first version of this audit produced 0 dead keys and was wrong.
+// Walking the mounted router stack for this tag is the only honest answer.
+// tests/permissionsCoverage.test.js is that check; docs/completion/W3-CAPTAIN.md
+// §2 records what it currently finds.
 export const requireAction = (action) =>
-  asyncHandler(async (req, _res, next) => {
+  Object.assign(asyncHandler(async (req, _res, next) => {
     if (!req.perm) throw unauthorized();
     if (!req.perm.can(action)) {
       throw forbidden('You do not have permission to perform this action');
@@ -159,7 +171,7 @@ export const requireAction = (action) =>
       });
     }
     next();
-  });
+  }), { posAction: action });
 
 // Every write a platform operator makes inside a customer's tenant leaves a
 // row. "VEXO changed something in my account" must always be answerable, and

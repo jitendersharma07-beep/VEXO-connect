@@ -17,16 +17,27 @@
 //     manager's status screen, and the two distinctions the requirement turns
 //     on — READY is not SERVED, PAID is not FREE — live nowhere else.
 //
-// Recorded rather than fixed, because the routes belong to another window and
-// the requests are written up in WINDOW-5-BACKEND-REQUEST.md:
+// State of the three requests this file was written to record
+// (WINDOW-5-BACKEND-REQUEST.md):
 //
-//   §1  a CAPTAIN is refused on every order-taking route, so the role cannot
-//       do the job it is sold as doing. Asserted below as it stands today.
-//   §3  order.item.void is in CASHIER's and CAPTAIN's baselines and the route
-//       is manager-only, so neither holder can reach it. Asserted below.
-//   §4  no idempotency key on the three order writes, so a retry duplicates.
-//       Asserted below as a negative control — it is why the captain's screen
-//       reconciles instead of retrying.
+//   §1  FIXED. A CAPTAIN was refused on every order-taking route, so the role
+//       could not do the job it is sold as doing. orders.js and tableQr.js now
+//       gate on the ACTION (requireAction) instead of a hard-coded role list,
+//       and the block that asserted the refusal has been replaced by its
+//       opposite — the journey, asserted to succeed AND to write the row.
+//       Two things came with it and are asserted here too: an ATC operator is
+//       still refused (denyPlatformSelling, because POS_SUPER_ADMIN's baseline
+//       is every action there is), and a captain reaches only the store its
+//       scope names (branchInScope, because CAPTAIN is absent from auth.js's
+//       BRANCH_PINNED_ROLES and the legacy pinning does not constrain it).
+//   §3  OPEN, deliberately. order.item.void is in CASHIER's and CAPTAIN's
+//       baselines and no route consults it; the route that voids a sent line is
+//       manager-only. Wiring the action would GRANT a revenue-affecting
+//       authority, so the mismatch is documented in docs/completion/
+//       W3-CAPTAIN.md §2 and asserted below as it stands.
+//   §4  OPEN. No idempotency key on the three order writes, so a retry
+//       duplicates. Asserted below as a negative control — it is why the
+//       captain's screen reconciles instead of retrying.
 //
 // Runs ONLY against a database whose name ends in _test.
 
@@ -89,7 +100,7 @@ const wipe = async () => {
 
 const tokens = {};
 let companyA, branchA1, branchA2;
-let tableA1, tableA1b, tableA2;
+let tableA1, tableA1b, tableA2, tableCaptain;
 let menu;
 
 const login = async (email) => {
@@ -155,6 +166,15 @@ beforeAll(async () => {
   tableA1 = await prisma.diningTable.create({ data: { branchId: branchA1.id, name: 'T1', capacity: 4 } });
   tableA1b = await prisma.diningTable.create({ data: { branchId: branchA1.id, name: 'T2', capacity: 2 } });
   tableA2 = await prisma.diningTable.create({ data: { branchId: branchA2.id, name: 'T1', capacity: 4 } });
+  // One table per journey, at branchA1. The cashier journey above opens T1 and
+  // never settles it, and a table may hold only ONE open order — so a captain
+  // test aimed at T1 drew 409 POS_CONFLICT and read as "the captain is refused",
+  // which is the precise misreading this file exists to prevent. The 409 was the
+  // app behaving correctly about an occupied table and said nothing about the
+  // role. Each block that opens an order gets its own table for that reason.
+  tableCaptain = await prisma.diningTable.create({
+    data: { branchId: branchA1.id, name: 'T3 captain journey', capacity: 4 },
+  });
 
   const mk = (d) => prisma.posUser.create({ data: { companyId: companyA.id, passwordHash, ...d } });
   await mk({ email: 'owner@cp.local', fullName: 'Owner', role: 'CUSTOMER_OWNER' });
@@ -273,67 +293,151 @@ describe('the order-taking journey, over HTTP', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('a captain is refused on every order-taking route, and nothing is written', () => {
-  // WINDOW-5-BACKEND-REQUEST.md §1. `operate` in api/routes/orders.js is
-  // requireRole('CUSTOMER_OWNER','BRANCH_MANAGER','CASHIER') — the role whose
-  // whole job this is was left out, so ROLE_ACTIONS.CAPTAIN's order.create is
-  // unreachable. This block is the evidence, and it is expected to be DELETED
-  // and replaced by its opposite when the request lands.
+describe('the captain journey, end to end: store, table, order, guest basket, KOT', () => {
+  // WINDOW-5-BACKEND-REQUEST.md §1, LANDED. `operate` in api/routes/orders.js
+  // was requireRole('CUSTOMER_OWNER','BRANCH_MANAGER','CASHIER') — the role
+  // whose whole job this is was left out, so ROLE_ACTIONS.CAPTAIN's
+  // order.create was unreachable. The route now gates on the action, so this
+  // block is the inverse of the one it replaces: the same five calls, each
+  // asserted to SUCCEED and to have written the row.
+  //
+  // Read it as the server-side transcript of frontend/src/pages/Captain.jsx.
+  // Every assertion here is a call that screen makes, in the order it makes it,
+  // which is what lets a green run stand in for the journey rather than for a
+  // build.
   let existing;
+  let lineId;
 
-  beforeAll(async () => {
-    const res = await request(app)
-      .post('/api/orders')
-      .set(auth(tokens.cashier))
-      .send({ type: 'DINE_IN', tableId: tableA1b.id, items: [{ productId: menu.product.id, qty: 1 }] });
-    expect(res.status).toBe(201);
-    existing = res.body.order;
-  });
-
-  it('403 on POST /orders, with no order row created', async () => {
+  it('opens a dine-in order on its own table WITHOUT naming a branch', async () => {
+    // The captain does not send branchId. A CAPTAIN is store-pinned
+    // (permissions.js STORE_PINNED_ROLES), so storeScopeFor resolves the one
+    // store on PosUser.branchId and the route takes it from the scope. This is
+    // the "select an authorised store" half of the requirement: the captain
+    // cannot pick the wrong one because the captain does not pick at all.
     const before = await records();
     const res = await request(app)
       .post('/api/orders')
       .set(auth(tokens.captain))
-      .send({ type: 'DINE_IN', tableId: tableA1.id, items: [{ productId: menu.product.id, qty: 1 }] });
-    expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(await records()).toEqual(before);
+      .send({ type: 'DINE_IN', tableId: tableCaptain.id, items: [{ productId: menu.product.id, qty: 1 }] });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    existing = res.body.order;
+    expect(existing.branchId).toBe(branchA1.id);
+
+    // The row, not just the status. A 201 that wrote nothing is the mirror of
+    // the 403-after-writing this file was built to catch.
+    const row = await prisma.order.findUnique({ where: { id: existing.id } });
+    expect(row).toBeTruthy();
+    expect(row.branchId).toBe(branchA1.id);
+    expect(row.status).toBe('OPEN');
+    expect((await records()).orders).toBe(before.orders + 1);
   });
 
-  it('403 on adding, changing and removing a line, with the order untouched', async () => {
-    const before = await records();
-    const lineId = existing.items[0].id;
-
+  it('adds, changes and removes draft lines', async () => {
     const add = await request(app)
       .post(`/api/orders/${existing.id}/items`)
       .set(auth(tokens.captain))
       .send({ productId: menu.second.id, qty: 1 });
-    const patch = await request(app)
-      .patch(`/api/orders/${existing.id}/items/${lineId}`)
-      .set(auth(tokens.captain))
-      .send({ qty: 9 });
-    const del = await request(app)
-      .delete(`/api/orders/${existing.id}/items/${lineId}`)
-      .set(auth(tokens.captain));
+    expect(add.status, JSON.stringify(add.body)).toBe(200);
 
-    expect([add.status, patch.status, del.status]).toEqual([403, 403, 403]);
-    expect(await records()).toEqual(before);
-    const line = await prisma.orderItem.findUnique({ where: { id: lineId } });
-    expect(line.qty).toBe(1);
-    expect(line.status).toBe('ACTIVE');
+    const dal = add.body.order.items.find((i) => i.productId === menu.second.id);
+    expect(dal).toBeTruthy();
+
+    const patch = await request(app)
+      .patch(`/api/orders/${existing.id}/items/${dal.id}`)
+      .set(auth(tokens.captain))
+      .send({ qty: 3 });
+    expect(patch.status, JSON.stringify(patch.body)).toBe(200);
+    expect((await prisma.orderItem.findUnique({ where: { id: dal.id } })).qty).toBe(3);
+
+    const del = await request(app)
+      .delete(`/api/orders/${existing.id}/items/${dal.id}`)
+      .set(auth(tokens.captain));
+    expect(del.status, JSON.stringify(del.body)).toBe(200);
+    // An UNSENT line is removed outright — that is the counterpart route to the
+    // void the captain may not use, and the whole reason the two are separate.
+    expect(await prisma.orderItem.findUnique({ where: { id: dal.id } })).toBe(null);
+
+    const fresh = await prisma.orderItem.findMany({ where: { orderId: existing.id } });
+    expect(fresh.length).toBe(1);
+    lineId = fresh[0].id;
   });
 
-  it('403 on POST /kot, with no ticket cut', async () => {
-    const before = await records();
+  it('sends the order to the kitchen, and the ticket exists', async () => {
+    const before = await prisma.kot.count({ where: { orderId: existing.id } });
     const res = await request(app)
       .post(`/api/orders/${existing.id}/kot`)
       .set(auth(tokens.captain))
       .send({});
-    expect(res.status).toBe(403);
-    expect(await records()).toEqual(before);
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(await prisma.kot.count({ where: { orderId: existing.id } })).toBe(before + 1);
+    // The line is now the kitchen's business, which is what makes the void
+    // negative below meaningful rather than incidental.
+    expect((await prisma.orderItem.findUnique({ where: { id: lineId } })).kotId).toBeTruthy();
   });
 
-  it('but CAN read — the order, the tickets and the floor are open to the role', async () => {
+  it('accepts a guest QR basket, and the acceptance is what cuts the KOT', async () => {
+    // "Accept a guest QR submission where policy permits." The staff half of
+    // the guest flow is gated `canOperate` in tableQr.js, which is now
+    // requireAction('order.create') — the same authority as taking the order by
+    // hand, because it is the same act. The guest-side scan/join/submit path is
+    // covered in tests/tableQr.test.js; the submission row here is built
+    // directly so this test measures the gate and the acceptance, not the scan.
+    const guestOrder = await request(app)
+      .post('/api/orders')
+      .set(auth(tokens.captain))
+      .send({ type: 'DINE_IN', tableId: tableA1b.id, items: [{ productId: menu.product.id, qty: 2 }] });
+    expect(guestOrder.status, JSON.stringify(guestOrder.body)).toBe(201);
+
+    const visit = await openVisit(tableA1b.id, branchA1.id, '4242');
+    const issued = await request(app)
+      .post('/api/table-qr/issue')
+      .set(auth(tokens.owner))
+      .send({ tableId: tableA1b.id });
+    expect(issued.status, JSON.stringify(issued.body)).toBe(201);
+    const qr = await prisma.tableQrCode.findFirst({
+      where: { tableId: tableA1b.id, status: 'ACTIVE' },
+    });
+    expect(qr).toBeTruthy();
+
+    const submission = await prisma.qrSubmission.create({
+      data: {
+        companyId: companyA.id,
+        branchId: branchA1.id,
+        tableId: tableA1b.id,
+        qrCodeId: qr.id,
+        visitId: visit.id,
+        orderId: guestOrder.body.order.id,
+        status: 'SUBMITTED',
+        idempotencyKey: 'captain-accept-key-1',
+        requestHash: 'a'.repeat(16),
+        lineCount: 1,
+        payload: { lines: [{ name: 'Biryani', qty: 2 }] },
+      },
+    });
+
+    // Visible to the captain's inbox first — a screen cannot accept what it
+    // cannot list.
+    const inbox = await request(app)
+      .get('/api/table-qr/submissions')
+      .set(auth(tokens.captain));
+    expect(inbox.status, JSON.stringify(inbox.body)).toBe(200);
+    expect(inbox.body.submissions.map((s) => s.id)).toContain(submission.id);
+
+    const kotsBefore = await prisma.kot.count({ where: { orderId: guestOrder.body.order.id } });
+    expect(kotsBefore).toBe(0);
+
+    const accepted = await request(app)
+      .post(`/api/table-qr/submissions/${submission.id}/accept`)
+      .set(auth(tokens.captain))
+      .send({});
+    expect(accepted.status, JSON.stringify(accepted.body)).toBe(200);
+    expect(accepted.body.kotId).toBeTruthy();
+    expect(await prisma.kot.count({ where: { orderId: guestOrder.body.order.id } })).toBe(1);
+    expect((await prisma.qrSubmission.findUnique({ where: { id: submission.id } })).status)
+      .toBe('ACCEPTED');
+  });
+
+  it('and CAN read — the order, the tickets and the floor are open to the role', async () => {
     // Which is why the captain's screen can reconcile a write whose reply was
     // lost: reading back is the one thing the role has always been able to do.
     const order = await request(app).get(`/api/orders/${existing.id}`).set(auth(tokens.captain));
@@ -345,44 +449,224 @@ describe('a captain is refused on every order-taking route, and nothing is writt
 
 // ---------------------------------------------------------------------------
 
-describe('money, voids and other stores: refused, and no business record moves', () => {
-  let order;
+describe('the action is not a passport: a captain reaches only its own store', () => {
+  // Enabling the action without a scope check would have been the worse bug.
+  // CAPTAIN is in permissions.js STORE_PINNED_ROLES but was NOT in auth.js
+  // BRANCH_PINNED_ROLES, so branchIdFilterFor(captain) is `{}` — the legacy
+  // pinning does not constrain this role at all. orders.js therefore checks
+  // req.perm.scope itself (branchInScope), and this block is that check's
+  // evidence. captain2 holds exactly the same actions as captain; only the
+  // store differs.
+  let alphaTwoOrder;
 
   beforeAll(async () => {
     const res = await request(app)
       .post('/api/orders')
-      .set(auth(tokens.cashier))
-      .send({ type: 'DINE_IN', tableId: tableA2.id, branchId: branchA2.id, items: [{ productId: menu.product.id, qty: 1 }] })
-      .then((r) => (r.status === 201 ? r : request(app)
-        .post('/api/orders')
-        .set(auth(tokens.owner))
-        .send({ type: 'DINE_IN', tableId: tableA2.id, branchId: branchA2.id, items: [{ productId: menu.product.id, qty: 1 }] })));
+      .set(auth(tokens.captain2))
+      .send({ type: 'DINE_IN', tableId: tableA2.id, items: [{ productId: menu.product.id, qty: 1 }] });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.order.branchId).toBe(branchA2.id);
+    alphaTwoOrder = res.body.order;
+  });
+
+  it('cannot open an order at a store outside its scope, and writes nothing', async () => {
+    const before = await records();
+    const res = await request(app)
+      .post('/api/orders')
+      .set(auth(tokens.captain2))
+      .send({
+        type: 'DINE_IN',
+        branchId: branchA1.id,
+        tableId: tableA1.id,
+        items: [{ productId: menu.product.id, qty: 1 }],
+      });
+    // 404, not 403: a store this principal may not see is a store that does not
+    // exist as far as the answer is concerned, which is the same shape the
+    // route already used for another tenant's branch.
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(await records()).toEqual(before);
+  });
+
+  it('cannot read or modify an order belonging to the other store', async () => {
+    const before = await records();
+    const read = await request(app)
+      .get(`/api/orders/${alphaTwoOrder.id}`)
+      .set(auth(tokens.captain));
+    const write = await request(app)
+      .post(`/api/orders/${alphaTwoOrder.id}/items`)
+      .set(auth(tokens.captain))
+      .send({ productId: menu.second.id, qty: 1 });
+    const kot = await request(app)
+      .post(`/api/orders/${alphaTwoOrder.id}/kot`)
+      .set(auth(tokens.captain))
+      .send({});
+    expect([read.status, write.status, kot.status]).toEqual([404, 404, 404]);
+    expect(await records()).toEqual(before);
+  });
+
+  it('and the QR inbox is scoped the same way, not just the order routes', async () => {
+    // tableQr.js takes scopedBranchIdWhere(req) alongside the legacy
+    // branchIdFilterFor in an explicit AND — two `where` objects each carrying
+    // `branchId` would have had the second silently overwrite the first.
+    const mine = await request(app).get('/api/table-qr/submissions').set(auth(tokens.captain2));
+    expect(mine.status, JSON.stringify(mine.body)).toBe(200);
+    const foreign = mine.body.submissions.filter((s) => s.tableId === tableA1b.id);
+    expect(foreign).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('money, voids and other stores: refused, and no business record moves', () => {
+  let order;
+  let tableForMoney, tableForVoid, tableForeign;
+
+  beforeAll(async () => {
+    // Two tables in the captain's OWN store, so the money refusals below are
+    // measured with the scope correct and the action the only thing left.
+    tableForMoney = await prisma.diningTable.create({
+      data: { branchId: branchA1.id, name: 'M1', capacity: 2 },
+    });
+    tableForVoid = await prisma.diningTable.create({
+      data: { branchId: branchA1.id, name: 'M2', capacity: 2 },
+    });
+    // And a THIRD, in the other store, for the cross-store refusals. It used to
+    // reuse tableA2, which the "not a passport" block above seats and leaves
+    // open — so this beforeAll drew 409 POS_CONFLICT and took the whole describe
+    // down with it. One table per opener; occupancy is not what is under test.
+    tableForeign = await prisma.diningTable.create({
+      data: { branchId: branchA2.id, name: 'M3 other store', capacity: 2 },
+    });
+
+    // The OWNER opens it, named outright. This was a cashier attempt with an
+    // owner fallback chained behind it, which is worse than it looks: the
+    // cashier is pinned to Alpha One and can never open at Alpha Two, so the
+    // first call was always dead and the row's real author was whichever arm
+    // happened to answer 201. A fixture whose principal is decided by a race is
+    // not a fixture. A CUSTOMER_OWNER is company-wide, so it is the correct and
+    // only principal here.
+    const res = await request(app)
+      .post('/api/orders')
+      .set(auth(tokens.owner))
+      .send({
+        type: 'DINE_IN',
+        tableId: tableForeign.id,
+        branchId: branchA2.id,
+        items: [{ productId: menu.product.id, qty: 1 }],
+      });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     order = res.body.order;
+    expect(order.branchId).toBe(branchA2.id);
   });
 
   it('a captain cannot raise a bill, apply a discount or record a payment', async () => {
+    // IN ITS OWN STORE, deliberately. Run against the Alpha Two order these
+    // would now answer 404 on scope and prove nothing about authority — the
+    // captain would be refused for the wrong reason. Here the scope is right,
+    // the licence is usable, the order is the captain's own, and the ONLY thing
+    // refusing is the action.
+    const mine = await request(app)
+      .post('/api/orders')
+      .set(auth(tokens.captain))
+      .send({ type: 'DINE_IN', tableId: tableForMoney.id, items: [{ productId: menu.product.id, qty: 1 }] });
+    expect(mine.status, JSON.stringify(mine.body)).toBe(201);
+    const mineId = mine.body.order.id;
+
     const before = await records();
-    const bill = await request(app).post(`/api/orders/${order.id}/bill`).set(auth(tokens.captain)).send({});
+    const bill = await request(app).post(`/api/orders/${mineId}/bill`).set(auth(tokens.captain)).send({});
     const disc = await request(app)
-      .post(`/api/orders/${order.id}/discount`)
+      .post(`/api/orders/${mineId}/discount`)
       .set(auth(tokens.captain))
       .send({ type: 'PERCENT', value: 10, reason: 'friend of the house' });
     const pay = await request(app)
-      .post(`/api/orders/${order.id}/payments`)
+      .post(`/api/orders/${mineId}/payments`)
       .set(auth(tokens.captain))
       .send({ method: 'CASH', amount: 100 });
+    const refund = await request(app)
+      .post(`/api/orders/${mineId}/refunds`)
+      .set(auth(tokens.captain))
+      .send({ amount: 50, reason: 'guest unhappy with the biryani' });
 
-    expect([bill.status, disc.status, pay.status]).toEqual([403, 403, 403]);
+    expect([bill.status, pay.status, refund.status], JSON.stringify({
+      bill: bill.body, pay: pay.body, refund: refund.body,
+    })).toEqual([403, 403, 403]);
+    // The discount route is gated order.create, which the captain HOLDS, so it
+    // gets PAST the gate — and is refused by the money engine instead. The error
+    // CODE is the evidence for which of the two refused: POS_DISCOUNT_NOT_
+    // PERMITTED comes from guardDiscountChange, and ROLE_FLOOR[CAPTAIN] being
+    // undefined is why (lib/discountPolicy.js resolves an unlisted role to
+    // DENY). That is deliberate, not an oversight: discount authority is not an
+    // action key, it is a money ceiling a tenant grants per user.
+    expect(disc.status, JSON.stringify(disc.body)).toBe(403);
+    expect(disc.body.error.code).toBe('POS_DISCOUNT_NOT_PERMITTED');
     expect(await records()).toEqual(before);
-    const fresh = await prisma.order.findUnique({ where: { id: order.id } });
+    const fresh = await prisma.order.findUnique({ where: { id: mineId } });
     expect(fresh.status).toBe('OPEN');
+    expect(Number(fresh.discountAmount ?? 0)).toBe(0);
+  });
+
+  it('a captain cannot void a line the kitchen has already been told about', async () => {
+    // The distinction the whole void argument turns on. An UNSENT line the
+    // captain removes outright (proved in the journey block); a SENT one is the
+    // kitchen's business and is manager-only. order.item.void sits in CAPTAIN's
+    // baseline and no route consults it — see docs/completion/W3-CAPTAIN.md §2.
+    const opened = await request(app)
+      .post('/api/orders')
+      .set(auth(tokens.captain))
+      .send({ type: 'DINE_IN', tableId: tableForVoid.id, items: [{ productId: menu.product.id, qty: 1 }] });
+    expect(opened.status, JSON.stringify(opened.body)).toBe(201);
+    const sent = await request(app)
+      .post(`/api/orders/${opened.body.order.id}/kot`)
+      .set(auth(tokens.captain))
+      .send({});
+    expect(sent.status, JSON.stringify(sent.body)).toBe(201);
+
+    const lineId = opened.body.order.items[0].id;
+    const line = await prisma.orderItem.findUnique({ where: { id: lineId } });
+    expect(line.kotId, 'the line must be SENT for this test to mean anything').toBeTruthy();
+
+    const before = await records();
+    const voided = await request(app)
+      .post(`/api/orders/${opened.body.order.id}/items/${lineId}/void`)
+      .set(auth(tokens.captain))
+      .send({ reason: 'sent back by the table' });
+    expect(voided.status, JSON.stringify(voided.body)).toBe(403);
+    // And the DELETE that works on a draft line does not become a back door.
+    const deleted = await request(app)
+      .delete(`/api/orders/${opened.body.order.id}/items/${lineId}`)
+      .set(auth(tokens.captain));
+    expect([400, 409]).toContain(deleted.status);
+    expect(await records()).toEqual(before);
+    expect((await prisma.orderItem.findUnique({ where: { id: lineId } })).status).toBe('ACTIVE');
+  });
+
+  it('and no ALLOW rule can grant the money actions: the role ceiling is hard', async () => {
+    // "Unless that action is explicitly authorised" — this is what authorising
+    // would have to get past. can() consults baselineAllows BEFORE any
+    // PermissionRule row, so a COMPANY-level ALLOW on order.bill is inert for a
+    // CAPTAIN. Granting a captain the till is a ROLE change or a different
+    // login, never a toggle on the permissions screen. Asserted here so nobody
+    // ships that toggle believing it does something.
+    const { baselineAllows, can } = await import('../src/lib/permissions.js');
+    for (const action of ['order.bill', 'payment.record', 'refund.issue', 'order.void']) {
+      expect(baselineAllows('CAPTAIN', action), action).toBe(false);
+      const withAllow = new Map([[action, { effect: 'ALLOW' }]]);
+      expect(can({ role: 'CAPTAIN', resolved: withAllow }, action), `ALLOW on ${action}`).toBe(false);
+    }
+    // The discount engine says the same thing from the money side: a role absent
+    // from ROLE_FLOOR resolves to DENY, so the captain's authority is zero until
+    // a tenant writes them a DiscountPolicy row on purpose.
+    const { ROLE_FLOOR } = await import('../src/lib/discountPolicy.js');
+    expect(ROLE_FLOOR.CAPTAIN).toBeUndefined();
   });
 
   it('a CASHIER holds order.item.void in its baseline and is still refused the route', async () => {
-    // WINDOW-5-BACKEND-REQUEST.md §3. lib/permissions.js:319 grants CASHIER
-    // [...SELL, 'order.item.void']; orders.js:678 gates the route managerUp.
-    // The permission screen advertises an authority that cannot be exercised.
+    // WINDOW-5-BACKEND-REQUEST.md §3, and docs/completion/W3-CAPTAIN.md §2.
+    // lib/permissions.js grants CASHIER [...SELL, 'order.item.void']; the
+    // void-a-sent-line route is gated managerUp. The permission screen
+    // advertises an authority that cannot be exercised — left standing on
+    // purpose, because closing the gap by wiring the action would hand every
+    // cashier and captain a revenue-affecting power nobody asked for.
     const { baselineAllows } = await import('../src/lib/permissions.js');
     expect(baselineAllows('CASHIER', 'order.item.void')).toBe(true);
     expect(baselineAllows('CAPTAIN', 'order.item.void')).toBe(true);
@@ -411,10 +695,13 @@ describe('money, voids and other stores: refused, and no business record moves',
   });
 
   it('an ATC operator is read-only inside a tenant: 403 on every order write', async () => {
-    // orders.js states this in its own header. POS_SUPER_ADMIN's baseline is
-    // every action key, so the ONLY thing holding this fence is the explicit
-    // requireRole list — which is why §1 asks for requireAction *behind*
-    // requireRole rather than instead of it.
+    // The trap in §1, and the reason the fix is not a straight swap.
+    // POS_SUPER_ADMIN's baseline is [...ACTION_KEYS] — every action there is —
+    // and order.create / order.bill / payment.record are not in
+    // SUPPORT_GRANT_REQUIRED. So requireAction ALONE would have handed a
+    // platform operator a working till, which the old role list refused only by
+    // never naming the role. middleware/rbac.js denyPlatformSelling states the
+    // rule instead of leaving it to an omission, and this test is its evidence.
     const before = await records();
     const scope = { ...auth(tokens.atc), 'x-pos-company': companyA.id };
     const create = await request(app)

@@ -130,13 +130,20 @@ export const isAtc = (user) => user?.role === 'POS_SUPER_ADMIN';
 export const canSell = (user) =>
   ['CASHIER', 'BRANCH_MANAGER', 'CUSTOMER_OWNER'].includes(user?.role);
 // A captain takes orders and never touches money, so the handheld is offered to
-// this role and the till is not. Note that the server does NOT yet agree that a
-// captain may open an order: the gate on POST /orders is `operate`
-// (api/routes/orders.js:86) = requireRole('CUSTOMER_OWNER','BRANCH_MANAGER',
-// 'CASHIER'), so the route answers 403. That divergence is
-// WINDOW-5-BACKEND-REQUEST.md §1 and is W3's call — widening a server gate for a
-// role W5 does not own, on an authorization path W5 does not own, is not W5's to
-// make. The server stays the authority either way.
+// this role and the till is not.
+//
+// The server now AGREES (2026-09-26, W3). It used to refuse: the gate on
+// POST /orders was `operate` = requireRole('CUSTOMER_OWNER','BRANCH_MANAGER',
+// 'CASHIER'), so a captain's own screen got a 403 from every write on it. That
+// was WINDOW-5-BACKEND-REQUEST.md §1 and it is now closed — the till routes gate
+// on requireAction('order.create'), which ROLE_ACTIONS.CAPTAIN holds. See
+// docs/completion/W3-CAPTAIN.md.
+//
+// What did NOT change is `canSell` above: still deliberately not widened to
+// CAPTAIN, because the server still refuses this role the bill, the payment, the
+// refund and the void of a sent line. The screens behind canSell offer exactly
+// those four, so widening it would be offering buttons the API answers 403 to.
+// The server stays the authority either way.
 export const isCaptain = (user) => user?.role === 'CAPTAIN';
 export const isManagerUp = (user) =>
   ['BRANCH_MANAGER', 'CUSTOMER_OWNER'].includes(user?.role);
