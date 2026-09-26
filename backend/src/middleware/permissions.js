@@ -187,13 +187,25 @@ export const auditPlatformWrite = (req) => {
 // returns the row. A store in another tenant and a store outside the caller's
 // assignments both answer "Store not found" — identical replies, so probing ids
 // cannot map somebody else's estate.
+// AND, not a spread. `branchWhereForScope` returns `{ id: { in: [...] } }` for a
+// LIST scope, and spreading that beside `id: branchId` overwrote the id the
+// caller asked for — later keys win. The lookup then matched "any store in my own
+// scope" instead, found one, and returned a DIFFERENT branch than the one
+// requested, so the guard never fired. Every store-pinned role resolves to a LIST
+// (as does any role narrowed by a UserStoreAssignment), which made this the
+// precise set of principals the check exists to constrain. Routes that discard
+// the return value and then write the caller's id — brands.js and the assignment
+// endpoint in permissions.js — turned that into a write outside the caller's
+// scope. Under AND both constraints survive, whatever keys a future scope kind
+// brings. See tests/storeScopeResolution.test.js.
 export const resolveStoreInScope = async (req, branchId) => {
   if (!branchId) throw notFound('Store not found');
   const branch = await prisma.branch.findFirst({
     where: {
-      id: String(branchId),
-      companyId: req.companyScope.id,
-      ...branchWhereForScope(req.perm.scope),
+      AND: [
+        { id: String(branchId), companyId: req.companyScope.id },
+        branchWhereForScope(req.perm.scope),
+      ],
     },
   });
   if (!branch) throw notFound('Store not found');
