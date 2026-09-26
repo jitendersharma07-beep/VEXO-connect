@@ -457,23 +457,36 @@ describe('splitting a bill into separate cheques', () => {
   it('records covers once after a split, on the original and not the cheque', async () => {
     await clearTable(tableA1.id);
     const order = await openMixedBill();
+
+    // Four people sat down, and the floor said so before anything was divided.
+    // This first call is not scaffolding — it is what makes the correction below
+    // able to DOUBLE rather than merely land in the wrong place, and the double
+    // is the defect that reaches a report.
+    const before = await request(app)
+      .post(`/api/tables/${tableA1.id}/service`)
+      .set(auth(tokens.managerA1))
+      .send({ pax: 4 });
+    expect(before.status, JSON.stringify(before.body)).toBe(200);
+
     const lines = await lineIdsOf(order.id);
     const res = await split(tokens.managerA1, order.id, { itemIds: [lines[1].id] });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const chequeId = res.body.split.chequeId;
 
+    // A fifth person joins and the covers are corrected. One instruction, and
+    // the old route got both halves of it wrong: it resolved its single order
+    // with createdAt 'desc', so it reached the NEWER row — the cheque — which
+    // left the five recorded against a bill that was never meant to carry
+    // covers AND left the original's four sitting beside it.
     const svc = await request(app)
       .post(`/api/tables/${tableA1.id}/service`)
       .set(auth(tokens.managerA1))
-      .send({ pax: 4 });
+      .send({ pax: 5 });
     expect(svc.status, JSON.stringify(svc.body)).toBe(200);
 
     const original = await orderRow(order.id);
     const cheque = await orderRow(chequeId);
-    expect(original.pax).toBe(4);
-    // The old route resolved its single order with createdAt 'desc', so it
-    // reached the NEWER row — the cheque — and the party's covers were recorded
-    // against a bill that was never meant to carry them.
+    expect(original.pax).toBe(5);
     expect(cheque.pax).toBeNull();
 
     // Now the same fact in the form a covers report actually computes it. Be
@@ -484,20 +497,21 @@ describe('splitting a bill into separate cheques', () => {
     // bills I named, and that covers appear ONCE across whatever it holds. A
     // change that left a third open bill carrying pax — a second cheque, a
     // merge, a retry that duplicated an order — passes both lines above and
-    // fails here. The figure is the party, not the paperwork: four people who
-    // split their bill are still four people.
+    // fails here. The figure is the party, not the paperwork: five people who
+    // split their bill are still five people, and NINE is what the defect
+    // reported for this table.
     const agg = await prisma.order.aggregate({
       where: { tableId: tableA1.id, status: { in: ['OPEN', 'BILLED'] } },
       _sum: { pax: true },
       _count: { _all: true },
     });
     expect(agg._count._all).toBe(2);
-    expect(agg._sum.pax).toBe(4);
+    expect(agg._sum.pax).toBe(5);
 
     // And the till is answered for the bill that owns the covers, not for
     // whichever row the write happened to touch.
     expect(svc.body.service.orderId).toBe(order.id);
-    expect(svc.body.service.pax).toBe(4);
+    expect(svc.body.service.pax).toBe(5);
   }, 45000);
 
   it('moves the server onto every open cheque after a split', async () => {
