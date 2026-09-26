@@ -14,19 +14,25 @@ result forward from a prior session's prose.
 end to end against the real server. The independent audit of the combined
 candidate is NOT complete. This is not an approval of the release, and this
 document does not give one.** Two release blockers are open (§6), one of which is
-not in this lane's code, and five areas of the audit remit are unmeasured (§7d).
+not in this lane's code; three areas of the audit remit are NOT VERIFIED and three
+more only PARTIAL (§7g).
 
-Three separate figures, deliberately not added together:
+Four separate figures. The first two are this lane's own work; the last two are the
+candidate's code, measured by this lane's audit:
 
 | | Result | What it covers |
 |---|---|---|
 | `67/67`, exit 0 (§2) | the print agent's own suite | the agent alone — no database, no network, no printer |
 | `7/7`, exit 0 (§2b) | the end-to-end seam | the shipped client and runner over real HTTP against `createApp()`, with a real TCP printer, asserting database rows and socket bytes together |
 | `153/153`, exit 0 (§7a) | **not this lane's code** | the candidate's own gateway and phone-orders suites, run because nobody had a result for them — the first measurement the money path has ever produced |
+| `281/281`, exit 0 (§7b) | **not this lane's code** | eleven candidate suites chosen to answer named areas of the Part 4 remit — tenant isolation, recovery, Table/QR, customer display, admin and licence workflows |
 
-None is a project figure. None may be combined with other lanes' totals or turned
-into a percentage of the whole — the agent is one component, and the third figure
-above is somebody else's code that this lane merely measured.
+None of the four is a project figure, and none may be combined with other lanes'
+totals or turned into a percentage of the whole. The agent is one component, and
+the last two rows are somebody else's code that this lane merely measured — a green
+result there says those suites pass, not that the release is ready. The 434 in §7g
+is the count of candidate tests this audit executed, which is a statement about
+audit coverage and nothing else.
 
 What remains unproven is physical: **no ESC/POS byte has ever reached the
 store's printer**, so nothing here claims paper. `CONFIRMED` means the agent
@@ -229,14 +235,18 @@ and the rows below say which parts are which rather than averaging them.
 |---|---|---|
 | Verify *those exact bytes*, not a lane's working copy | PASS | `git archive d625370` into a scratch tree, three files sha256-checked against `git show`. §7 |
 | Payments / refunds / gateway reconciliation | PASS | 153/153, exit 0 — the two suites nobody had a result for. §7a |
-| Tenant isolation | PARTIAL | the cross-tenant cases inside those two suites pass, including *"never shows one tenant the gateway traffic of another"*. Isolation outside them is unverified |
-| Fresh-migration evidence | PASS | 41 migrations applied to an empty database, twice over (§2b at 40, §7a at 41), both logged |
-| Defects returned to the responsible window | PASS | A1 and A2 in §7b/§7c, each with the command that establishes it; D4–D6 and F1–F6 in §5. No peer file was edited by this lane |
-| Admin / company / licence / user workflows | **NOT VERIFIED** | §7d |
-| Table/QR, Captain/Kiosk, customer display | **NOT VERIFIED** | §7d |
-| Licence enforcement and recovery | **NOT VERIFIED** | §7d |
-| Release images and build context | **NOT VERIFIED** | §7d |
-| Restore-from-backup evidence | **NOT VERIFIED** | §7d |
+| Admin / company / user workflows | PASS | 108/108 across `platformAdmin`, `foundation`, `foundationPeople`, `invitations`. §7b |
+| Tenant isolation | PASS | `authTenantIsolation` 11/11, plus the gateway suite's *"never shows one tenant the gateway traffic of another"*. §7a, §7b |
+| Table/QR | PASS | `tableQr` 74/74. §7b |
+| Customer display | PASS | `customerDisplay` 13/13. §7b |
+| Recovery behaviour | PASS | `accountRecovery` 33/33 and `accountRecoveryOutage` 5/5. §7b |
+| **Licence enforcement** | **PARTIAL** | the mechanism is correct and fails closed (14/14), and by its own final assertion it **gates no action in this candidate**. A green suite here is not enforcement. §7e |
+| Fresh-migration evidence | PARTIAL | 41 migrations applied to an **empty** database, twice over (§2b at 40, §7a at 41), both logged. Never applied to a populated one — §7g |
+| Release images and build context | PARTIAL | the recipes audited statically, two findings (A4, A5) and three things done right. **No image was built.** §7f |
+| Defects returned to the responsible window | PASS | A1–A5 in §7c–§7f, each with the command that establishes it; D4–D7 and F1–F6 in §5. No peer file was edited by this lane |
+| Captain / Kiosk | **NOT VERIFIED** | no suite in the candidate carries either name. §7g |
+| Stock-effect / billing reconciliation beyond the gateway | **NOT VERIFIED** | §7g |
+| Restore-from-backup evidence | **NOT VERIFIED** | §7g |
 
 ## 4. Not executed, and exactly why
 
@@ -245,10 +255,10 @@ end-to-end seam test, written and never run because no `DATABASE_URL` could be
 obtained. It has now been executed, 7/7, exit 0, and is §2b. The requirement was
 the error, not the obstacle — see §2b for how it runs without a credential.
 
-What remains needs an operator at the till, and no amount of software work in this
-lane closes it: a printable width nobody here can measure (§4a), and a pack of
-paper cases that is generated and arithmetically checked but has never been
-printed (§4b).
+What remains needs an operator at the till: a print-head column count nobody here
+can measure (§4a), and a pack of paper cases that is generated and arithmetically
+checked but has never been printed (§4b). The pack is finished software; what it
+lacks is paper.
 
 ### 4a. Physical acceptance — software complete, hardware pending
 
@@ -264,7 +274,26 @@ of `docs/PRINTER-UAT-RUNBOOK.md`.
 | **Interface `USB+LAN`** — the unit has Ethernet | rating plate, photo `A1` |
 | Power 24 V ⎓ 2.5 A, BIS `R-93025780` | rating plate, photo `A1` |
 | Currently wired over USB; Windows driver `POS-80C` on `USB001` | photos `B1`, `C1` |
-| Media width | **not stated on the plate, and not measured** |
+| Media width | **not stated on the plate, and not measured here** |
+| Roll width **80 mm, printable 72 mm — the only width this build supports** | `frontend/docs/HARDWARE-CHECKLIST.md`, read at `d625370` |
+| Columns across 72 mm: **576 dots at 203 dpi or 512 at 180 dpi** → 48 or 42 Font A | same |
+
+**Two peer documents narrow this, and one of the user's instructions is now
+actionable because of them.** `frontend/docs/HARDWARE-CHECKLIST.md` and
+`frontend/docs/PRINTER-TEST-SESSION.md` — neither written in this lane — record that
+58 mm is **NOT SUPPORTED**: the layout is fixed at 72 mm printable in
+`PAPER_MM`/`PRINTABLE_MM` (`printPageSize.js`) and `PAPER_W = w-[272px]`
+(`Receipt.jsx`), so it is a code change, not a setting. The roll question is
+therefore closed by a constant rather than by a ruler.
+
+Their basis, though, is a Chromium `MediaBox` measured at 80 mm — a browser
+measurement, which is the exact thing the rest of this section argues cannot
+establish print-head geometry. It settles what the *layout* targets; it cannot
+settle what the *head* resolves. So the remaining ambiguity is not the roll but the
+resolution: **48 columns or 42**. That is what the `selftest` strip distinguishes,
+and it is why §6 B2 is now scoped to columns rather than to millimetres. It is also
+why the acceptance pack renders 48 and 42 (D7) — it previously rendered a 32-column
+case for a roll this build cannot produce.
 
 Because the plate says `USB+LAN`, a `PrintTarget` with `transport: TCP` to
 `host:9100` is reachable on this hardware once the printer has an address. Working
@@ -304,7 +333,7 @@ hardware and is not being recorded as a result.
 **Needs an operator at the till, and cannot be closed from here:**
 
 - run `node src/cli.js selftest`, photograph the strip, report the last visible
-  column number → confirms printable width and settles 58 mm vs 80 mm
+  column number → settles **48 vs 42**, the only width question left open
 - run `node src/cli.js doctor` and attach the output
 - open the drawer by hand, run `doctor`, confirm `drawerOpenLevel`
 - run `node src/cli.js drawer --yes` once — **this opens a real till**
@@ -314,14 +343,19 @@ No physical outcome is recorded in this document, because none has been observed
 
 ### 4b. The acceptance pack
 
-Generated, 34 files, at `~/vexo-connect-x-evidence/printagent/acceptance-pack/`.
+Generated, 30 files, at `~/vexo-connect-x-evidence/printagent/acceptance-pack/`
+— 12 per width, 5 source documents, 1 manifest.
 
 ```bash
 node ~/vexo-connect-x-evidence/printagent/make-acceptance-pack.mjs
 ```
 
 Each case is written as paper text, raw ESC/POS bytes, and the source document
-JSON, at **48 and 32 columns**, plus the self-test ruler at both widths.
+JSON, at **48 and 42 columns**, plus the self-test ruler at both widths. Those two
+numbers are 576 and 512 dots across the one printable width this build supports,
+divided by a 12-dot Font A character — the two candidates a `selftest` strip tells
+apart. An earlier revision of this pack used 32 for a 58 mm roll the build cannot
+produce; see D7.
 
 | Case | What it is |
 |---|---|
@@ -370,9 +404,13 @@ does not patch peer files, and none of the below is fixed here.
 | D1 | A single promotion printed `-Rs.92.00` flush left immediately above `Discount -Rs.92.00` — 184.00 of deductions on a bill that took 92.00. `discountAmount` already contains promotion amounts. | Discount first, promotions indented beneath as a breakdown. `render.js`; pinned by *"a promotion is a breakdown of the discount, not a second deduction"* |
 | D2 | A wrapped item name's tail printed at the left margin: `Veg Club Sandwich with Sweet Potato` / `Fries`, the second line bare with no amount — reads as another dish given away. | Continuation indented 2. Pinned by *"a wrapped item name continues indented, not as a free second item"* |
 | D3 | A wrapped `ORDER NOTE` left `the sauce.` alone at the left margin — on an allergy note, a dangling fragment that reads as its own instruction. | Continuation indented 2, matching the per-item notes |
+| D7 | The acceptance pack rendered every case at **48 and 32 columns**. 32 was this lane's guess at a 58 mm roll, and `frontend/docs/HARDWARE-CHECKLIST.md` settles that 58 mm is **not supported** — the layout is fixed at 72 mm printable by two constants (`PAPER_MM`/`PRINTABLE_MM` in `printPageSize.js`, `PAPER_W = w-[272px]` in `Receipt.jsx`). So half the pack tested a width the build cannot produce, and left a width it can meet untested. | Changed to **48 and 42** in `make-acceptance-pack.mjs` and regenerated: 72 mm printable is 576 dots at 203 dpi or 512 at 180 dpi, and a Font A character is 12 dots — 576/12 = 48, 512/12 = 42. 10 cases, **0 over-width lines**, reprint bytes still byte-identical to the original |
 
-All three were found by reading the generated paper, not by a failing test. The
-tests came after, so they cannot regress silently.
+D1, D2 and D3 were found by reading the generated paper, not by a failing test.
+The tests came after, so they cannot regress silently. D7 is a different kind of
+error and worth separating: the pack was arithmetically clean at 32 columns and
+every check passed, because the check was against the wrong paper. A green result
+against the wrong width is exactly what §4a warns about.
 
 ### Open — owner: the window that owns `backend/src/api/routes/printing.js`
 
@@ -404,18 +442,19 @@ them, that test fails and says so.
 | # | Blocker | Owner |
 |---|---|---|
 | B1 | **D4** — KOT has no table name. A restaurant cannot run dine-in service on tickets that do not say which table. | print-agent server route |
-| B2 | **Printable width is unmeasured**, and the operator has already reported paper being wasted by a print that lands inset on the roll (photo `B2`). No `PrintTarget.widthChars` is verified for the pilot roll, and no browser measurement can supply one. At ~32 columns or fewer the unit is 58 mm, which is a code change rather than a setting — so this gates the roll type too. One `selftest` and one photograph closes it. | operator at the till |
+| B2 | **The print head's column count is unmeasured — 48 or 42** — and the operator has already reported paper being wasted by a print that lands inset on the roll (photo `B2`). The roll is not in doubt: the build supports one width, 80 mm roll / 72 mm printable, and 58 mm is a code change rather than a setting (§4a). What is in doubt is the head's resolution across that width — 576 dots at 203 dpi or 512 at 180 dpi, which is 48 or 42 Font A columns. No `PrintTarget.widthChars` is verified for the pilot unit, and no browser measurement can supply one. One `selftest` strip and one photograph closes it. | operator at the till |
 
 Not blockers of this lane's making, but open and unresolved:
 
 - **The candidate is still uncertified**, by its own record (§1) and now by
   measurement: the certification run in flight at the time of writing does not
   contain the index it exists to certify, and its tree changed 36 seconds after it
-  started (§7b, A1).
-- **Five areas of Part 4 are NOT VERIFIED** — admin/licence workflows, Table/QR and
-  Captain/Kiosk, customer display, licence enforcement and recovery, release images
-  and restore evidence (§7d). They are recorded as gaps, not as passes, and this
-  lane's independent acceptance is therefore **incomplete**.
+  started (§7c, A1).
+- **Three areas of Part 4 are NOT VERIFIED** — Captain/Kiosk, stock-effect and
+  billing reconciliation beyond the gateway, and restore-from-backup evidence — with
+  three more PARTIAL, including licence enforcement and the release images (§7g).
+  They are recorded as gaps, not as passes, and this lane's independent acceptance is
+  therefore **incomplete**.
 
 **This lane does not approve production.** Two blockers are open, the candidate is
 uncertified, and a third of the audit remit is unmeasured.
@@ -428,6 +467,12 @@ customers stops being quadratic"*. Its bytes were taken with
 `git archive d625370` into a tree outside every lane, and the three files that
 matter were sha256-checked against `git show d625370:<path>` before anything ran.
 No peer working directory was read from or written to.
+
+Findings are numbered **A1–A5** and each is sent to the window that owns the code.
+One label collision, flagged so nobody chases the wrong artefact: the photographs in
+§4a are also lettered `A1`, `B1`, `B2`, `C1`, because that is how they are indexed in
+the hardware manifest and renaming them there would break a sha256-keyed record.
+`A1` in §7c is an audit finding; `A1` in §4a is the printer's rating plate.
 
 ### 7a. The 153 money-path tests, executed for the first time
 
@@ -465,7 +510,36 @@ run cannot distinguish "the index works" from "there was nothing to scan".
 Certifying the index needs `integrations.test.js` and these two files in one
 database, in that order. No such run exists yet.
 
-### 7b. A1 — the in-flight certification run does not contain the fix it is meant to certify
+### 7b. The remaining Part 4 areas, measured — 281 tests
+
+The areas §7 originally listed as unverified, run from the same extracted tree and
+the same private database. Chosen by mapping each area of the remit to the
+candidate's own suites, plus the one failure Window 5 attributed to code.
+
+| | |
+|---|---|
+| Result | `Test Files 11 passed (11)` · `Tests 281 passed (281)` |
+| Exit code | `0` |
+| Duration | 190.27 s |
+| Run at | 2026-09-26T04:33:49Z |
+| Log | `~/vexo-connect-x-evidence/printagent/w6-audit-part4-20260926.log` |
+
+| Area of the remit | Suite | Tests |
+|---|---|---|
+| Tenant isolation | `authTenantIsolation` | 11 |
+| Licence enforcement | `licenseModuleGate` | 14 — **but see §7e** |
+| Recovery behaviour | `accountRecovery`, `accountRecoveryOutage` | 33 + 5 |
+| Table/QR | `tableQr` | 74 |
+| Customer display | `customerDisplay` | 13 |
+| Admin / company / user workflows | `platformAdmin`, `foundation`, `foundationPeople`, `invitations` | 22 + 22 + 31 + 33 |
+| **The returned fix, verified** | `reportingExceptions` | 23 |
+
+That last row discharges a duty rather than adding a figure. Item #5 of Window 5's
+analysis was the single failure attributable to code on that evidence, and
+`02ee253` was written to fix it. It passes here, on the candidate that contains
+the fix, from a tree nothing was writing to.
+
+### 7c. A1 — the in-flight certification run does not contain the fix it is meant to certify
 
 **Owner: Window 1 and Window 5. Verified, not inferred, and time-sensitive.**
 
@@ -490,7 +564,7 @@ Two consequences, and neither is a criticism of the analysis in that document:
 The cheapest correct next attempt: `migrate deploy` first so the 41st migration
 lands, assert the index exists, and run from an extracted tree.
 
-### 7c. A2 — every suite's `beforeAll` deletes every other suite's rows
+### 7d. A2 — every suite's `beforeAll` deletes every other suite's rows
 
 **Owner: Window 1. A design observation with a measured consequence, not a bug report.**
 
@@ -513,20 +587,88 @@ per lane are already in use on this box — `vcx_cert625_test`, `vcx_idxrun_test
 `vcx_tables_test` and others — so this is a convention that has begun spreading on
 its own, and is worth making the rule.
 
-### 7d. What this audit does not cover
+### 7e. A3 — licence enforcement is a mechanism with nothing behind it
+
+**Owner: Window 1. Not a defect; a status that must not be reported as a pass.**
+
+`licenseModuleGate.test.js` ran 14 tests in **9 ms**. That is legitimate — the file
+imports `permissions.js` and the `requireAction` middleware directly, touches no
+HTTP and no database, and 9 ms is the right cost for what it is. It was worth
+opening anyway, because a 9 ms licence-enforcement result is the shape of a test
+that does not do what its name implies.
+
+What it does is better than that: it says so itself. Its final block is
+`describe('the gate is inert in this candidate')`, asserting
+
+```js
+expect(ACTION_KEYS.filter((key) => requiredModuleFor(key) !== null)).toEqual([]);
+```
+
+**Zero actions in the candidate are gated by any module licence.** The gate is
+implemented, unit-correct, fails closed on a missing licence and on a licence
+predating the column, and refuses to let one entitled module unlock another — and
+it currently guards nothing, because no action key carries a module prefix yet.
+
+So "licence enforcement" is `PARTIAL`, not `PASS`, and the distinction is the
+requirement rather than a quibble: a green suite here proves the mechanism would
+hold if something were wired to it. Nothing is. Anyone reading `14 passed` as
+"module licensing is enforced" would be wrong, and the test's own author has
+already left the note saying to delete that block the day it stops being true.
+
+### 7f. A4, A5 — the release image and build context
+
+Static, from `d625370`'s bytes. Nothing was built; these are properties of the
+recipes, and the recipes are the part of a release nobody had inspected.
+
+**Good, and worth recording because both are easy to get wrong:**
+
+- `backend/Dockerfile` copies **named paths only** (`package.json`, `prisma`,
+  `src`, `scripts`) rather than the directory, so its context cannot silently
+  acquire anything. It installs `openssl` explicitly on `-slim` — the exact trap
+  that cost this lane a run (§2b), handled correctly here.
+- `frontend/.dockerignore` excludes `public/_proof/`, and uses `dist*` rather than
+  `dist` with a comment explaining that a build-output *variant*
+  (`dist-negctl`) carried proof assets into the context on the exclusion check's
+  first run. That is a real bug someone already found and fixed.
+- Both ignore `.env*`. No `.env` file, key, certificate or archive exists under
+  any copied path. `src/lib/gateway/secrets.js` and
+  `src/lib/integrations/secrets.js` match a `*secret*` sweep but hold no literal
+  secret — they are the credential-encryption helpers.
+
+| # | Finding | Severity |
+|---|---|---|
+| A4 | **The release image runs Node 20; every test result in this program was produced on Node 22, and nothing pins either.** `backend/Dockerfile` and `frontend/Dockerfile.prod` are both `node:20-bookworm-slim`. This box's Node is `v22.23.2`, and the audit container `v22.23.3`. There is no `engines` field in `package.json` and no `.nvmrc`. So the runtime that ships is one major version from the runtime every figure in every window's record was measured on, and no file in the repo would notice if they diverged further. | Medium — a real gap between what is tested and what runs, cheap to close with `engines` |
+| A5 | **`frontend/Dockerfile.prod` is `COPY . .`**, so the whole frontend context rests on `.dockerignore`, where `*.md` matches the **context root only** — nested paths need `**/*.md`. Four documents therefore enter the build context: `docs/CASHIER-GUIDE.md`, `docs/HARDWARE-CHECKLIST.md`, `docs/PRINTER-TEST-SESSION.md`, `docs/TOUCHUI-HANDOVER.md`. **This is hygiene, not exposure** — the final stage is `nginx:1.27-alpine` and copies only `/app/dist`, so none of them reaches the shipped image. Recorded because the same root-only rule applies to `.env*`, where the consequence would not be hygiene. No nested `.env` exists today. | Low as it stands; the `.env*` case is the reason to fix it |
+
+### 7g. What this audit does not cover
 
 Recorded so the gaps are not read as passes. None of the following was verified by
-this lane, and this section will not claim them:
+this lane, and this section will not claim it:
 
-admin/company/licence/user workflows and tenant isolation beyond the cross-tenant
-leakage cases inside the two files above · billing and stock-effect reconciliation
-outside the gateway suite · Table/QR · Captain/Kiosk · customer display · licence
-enforcement and recovery · the release images and build context · restore-from-
-backup evidence. Two peer certification runs were in flight throughout (Window 5
-on `vcx_integration_test`, another on `vcx_cert625_test`) and this lane
-deliberately did not start a third full-suite run: 21 foreign `vitest` processes
-were live at 04:22Z, and contention is the defect under investigation. Adding to
-it would have corrupted the measurement it was meant to check.
+- **Captain / Kiosk.** No suite in the candidate carries either name, so this was
+  not merely unrun — there is nothing here to run, and whether that is a naming
+  question or a coverage gap is Window 1's to answer.
+- **Stock-effect and billing reconciliation outside the gateway suite.** The
+  `inventory*` and `reporting*` families were not run. `reportingExceptions` was,
+  and only because a fix was owed there.
+- **Restore-from-backup, and the built images themselves.** §7f inspects the build
+  *recipes* statically. No image was built, no container started from one, and no
+  backup was restored.
+- **The 41 migrations against a populated database.** They were applied to an empty
+  one twice — 40 at §2b, 41 at §7a, the 41st being `d625370`'s own index — and the
+  §7b batch reused §7a's database. A migration that is safe on an empty schema and slow or
+  unsafe on a loaded one is exactly the class of defect `d625370` was written for,
+  and its own migration file says it must become `CREATE INDEX CONCURRENTLY`
+  before it runs on a large production table. Unverified either way here.
+- **Anything about the frontend bundle as served.** Not in this lane's reach.
+
+Two peer certification runs were in flight throughout (Window 5 on
+`vcx_integration_test`, another on `vcx_cert625_test`) and this lane deliberately
+did not start a third full-suite run: 21 foreign `vitest` processes were live at
+04:22Z, and contention is the defect under investigation. Adding to it would have
+corrupted the measurement it was meant to check. The 434 tests in §7a and §7b were
+chosen to be the smallest set that answers the remit, not the largest set that
+would run.
 
 ## 8. Evidence
 
@@ -554,11 +696,16 @@ true rather than asserting it, and both DSNs in it are safe to read.
                                on a database of their own, from an extracted tree
   w6-audit-moneypath-20260926.log  its output — 153/153, exit 0, 41 migrations,
                                and the pg_indexes line proving the schema
+  w6-audit-part4-20260926.log  the §7b coverage batch — 11 files, 281/281, exit 0,
+                               190.27s, same extracted tree and private database
   make-acceptance-pack.mjs     regenerates the pack; exits non-zero if figures stop reconciling
   acceptance-pack/
     MANIFEST.json              per-case bytes, line counts, over-width counts, reprint comparison
     documents/*.json           the source documents, as the server builds them
-    48col/, 32col/             paper text + raw ESC/POS bytes per case
+    48col/, 42col/             paper text + raw ESC/POS bytes per case. 42, not 32:
+                               576 and 512 dots across the one printable width this
+                               build supports (D7). The 32col/ tree was deleted, not
+                               kept — it described a roll the build cannot produce
 ```
 
 Owned source, for attribution of any later change:
